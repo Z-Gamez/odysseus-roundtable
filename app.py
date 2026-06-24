@@ -3,9 +3,6 @@ import mimetypes
 import os
 import sys
 
-os.environ["AGENT_PYTHON_PATH"] = sys.executable
-os.environ["ALLOW_DANGEROUS_CODE_EXECUTION"] = "true"
-
 def register_static_mime_types() -> None:
     """Force stable JS module MIME types across platforms.
 

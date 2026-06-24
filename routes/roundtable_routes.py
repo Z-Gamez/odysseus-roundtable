@@ -21,6 +21,32 @@ from src.saw.roles import PIPELINE
 DEFAULT_WORKSPACE = os.environ.get("SAW_WORKSPACE", r"C:\Odysseus\saw-sandbox")
 
 
+def _available_models(owner):
+    """Enabled endpoints + their (non-hidden) chat models, for per-role dropdowns."""
+    out = []
+    try:
+        from core.database import SessionLocal, ModelEndpoint
+        from src.endpoint_resolver import _endpoint_enabled_models, normalize_base
+        db = SessionLocal()
+        try:
+            q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+            if owner:
+                from src.auth_helpers import owner_filter
+                q = owner_filter(q, ModelEndpoint, owner)
+            for ep in q.all():
+                models = _endpoint_enabled_models(ep)
+                if not models:
+                    continue
+                label = (getattr(ep, "name", None) or getattr(ep, "label", None)
+                         or normalize_base(getattr(ep, "base_url", "") or ""))
+                out.append({"endpoint_id": ep.id, "label": label, "models": models})
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return out
+
+
 def setup_roundtable_routes():
     router = APIRouter(prefix="/api/roundtable", tags=["roundtable"])
 
@@ -60,6 +86,43 @@ def setup_roundtable_routes():
     @router.get("/runs")
     async def list_runs(request: Request) -> Dict[str, Any]:
         return {"runs": store.list_runs(50)}
+
+    # ---- per-role model config (local vs API, per role) ----
+    @router.get("/models")
+    async def list_models(request: Request) -> Dict[str, Any]:
+        return {"endpoints": _available_models(get_current_user(request))}
+
+    @router.get("/config")
+    async def get_config(request: Request) -> Dict[str, Any]:
+        from src.settings import get_setting
+        cfg = get_setting("saw_role_models", {}) or {}
+        roles = []
+        for r in PIPELINE:
+            rc = cfg.get(r.key) or {}
+            roles.append({"key": r.key, "title": r.title, "purpose": r.endpoint_purpose,
+                          "endpoint_id": rc.get("endpoint_id", ""), "model": rc.get("model", "")})
+        return {"roles": roles, "endpoints": _available_models(get_current_user(request))}
+
+    @router.post("/config")
+    async def set_config(request: Request) -> Any:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        key = (body.get("role") or "").strip()
+        if key not in {r.key for r in PIPELINE}:
+            return JSONResponse({"error": "unknown role"}, status_code=400)
+        from src.settings import load_settings, save_settings
+        s = load_settings()
+        cfg = dict(s.get("saw_role_models") or {})
+        ep_id = (body.get("endpoint_id") or "").strip()
+        if ep_id:
+            cfg[key] = {"endpoint_id": ep_id, "model": (body.get("model") or "").strip()}
+        else:
+            cfg.pop(key, None)  # cleared -> back to the role's tier default
+        s["saw_role_models"] = cfg
+        save_settings(s)
+        return {"ok": True, "role": key, "config": cfg.get(key)}
 
     @router.get("/{run_id}")
     async def get_run(request: Request, run_id: str) -> Any:

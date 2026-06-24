@@ -11,7 +11,11 @@
   var ACCENT = "#7F77DD";           // SAW violet
   var OK = "#1D9E75", BAD = "#D85A30", WARN = "#C9A227";
 
-  var ROLE_LABELS = { bsa: "BSA · Analyst", developer: "Developer", qas: "QAS · Reviewer" };
+  var ROLE_LABELS = {
+    bsa: "BSA · Analyst", architect: "Architect", developer: "Developer",
+    qas: "QAS · Reviewer", security: "Security", tech_writer: "Tech Writer",
+    rte: "RTE · Release"
+  };
   var DEFAULT_WORKSPACE = "C\\:\\Odysseus\\saw-sandbox".replace(/\\/g, "\\"); // display only
 
   var els = null;       // overlay element refs once built
@@ -70,6 +74,24 @@
     .rt-gate.fail{color:${BAD};border-color:${BAD};background:rgba(216,90,48,.08);}
     .rt-gate.halt{color:${WARN};border-color:${WARN};background:rgba(201,162,39,.10);}
     .rt-final{margin:8px 0 0;padding:11px 13px;border-radius:10px;font-weight:700;text-align:center;}
+    #rt-cfg{cursor:pointer;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;font:inherit;font-size:12px;padding:4px 10px;border-radius:8px;opacity:.85;}
+    #rt-cfg:hover{opacity:1;border-color:${ACCENT};}
+    #rt-config{flex:1;min-height:0;overflow:auto;padding:16px 20px;display:none;flex-direction:column;}
+    #rt-config.open{display:flex;}
+    #rt-config h3{margin:0;font-size:15px;}
+    .rt-cfg-sub{opacity:.6;font-size:12px;margin:4px 0 14px;}
+    .rt-cfg-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid rgba(127,127,127,.15);}
+    .rt-cfg-row .rt-cfg-role{flex:0 0 150px;font-weight:600;font-size:13px;}
+    .rt-cfg-row select{flex:1;min-width:0;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:8px;padding:7px 9px;font:inherit;font-size:12.5px;}
+    #rt-cfg-done{cursor:pointer;border:none;border-radius:8px;padding:6px 14px;font:inherit;font-weight:600;color:#fff;background:${ACCENT};}
+    .rt-pr{margin:12px 0;border:1px solid ${ACCENT};border-radius:10px;overflow:hidden;}
+    .rt-pr-head{padding:8px 12px;font-weight:700;font-size:13px;background:rgba(127,119,221,.12);}
+    .rt-pr-mode{font-weight:400;font-size:11px;opacity:.6;border:1px solid rgba(127,127,127,.3);border-radius:6px;padding:1px 6px;margin-left:6px;}
+    .rt-pr-row{padding:5px 12px;font-size:12px;}
+    .rt-pr-row code{background:rgba(127,127,127,.12);padding:1px 5px;border-radius:4px;}
+    .rt-pr-title{padding:6px 12px;font-weight:700;font-size:13px;}
+    .rt-pr-body{padding:4px 12px 10px;white-space:pre-wrap;font-size:12.5px;line-height:1.5;opacity:.9;}
+    .rt-pr-stat{margin:0 12px 12px;padding:8px 10px;background:rgba(127,127,127,.08);border-radius:8px;font-size:11px;overflow:auto;white-space:pre;}
     `;
     var s = document.createElement("style"); s.id = "rt-styles"; s.textContent = css; document.head.appendChild(s);
   }
@@ -82,6 +104,7 @@
         <div id="rt-head">
           <span class="rt-title">⊹ <b>Round&nbsp;Table</b> — SAFe mission control</span>
           <span class="rt-spacer"></span>
+          <button id="rt-cfg" title="Per-role models">⚙ Models</button>
           <button id="rt-x" title="Close" aria-label="Close">×</button>
         </div>
         <div id="rt-body">
@@ -99,6 +122,14 @@
             <div id="rt-log"></div>
           </div>
         </div>
+        <div id="rt-config">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <h3>Per-role models</h3><span style="flex:1"></span>
+            <button id="rt-cfg-done">Done</button>
+          </div>
+          <div class="rt-cfg-sub">Route each role to a local or API model. "Default" uses its tier (saw_heavy = Claude / saw_cheap = local).</div>
+          <div id="rt-cfg-list"></div>
+        </div>
       </div></div>`);
     document.body.appendChild(ov);
     els = {
@@ -108,9 +139,13 @@
       run: ov.querySelector("#rt-run"), pipeline: ov.querySelector("#rt-pipeline"),
       status: ov.querySelector("#rt-status"), log: ov.querySelector("#rt-log"),
       recent: ov.querySelector("#rt-recent-list"),
+      body: ov.querySelector("#rt-body"), config: ov.querySelector("#rt-config"),
+      cfgList: ov.querySelector("#rt-cfg-list"),
     };
     ov.querySelector("#rt-x").addEventListener("click", close);
     ov.addEventListener("click", function (e) { if (e.target === ov) close(); });
+    ov.querySelector("#rt-cfg").addEventListener("click", toggleConfig);
+    ov.querySelector("#rt-cfg-done").addEventListener("click", closeConfig);
     els.run.addEventListener("click", startRun);
     return els;
   }
@@ -186,6 +221,20 @@
         var cls = ev.status === "pass" ? "pass" : (ev.status === "halt" ? "halt" : "fail");
         var icon = ev.status === "pass" ? "✓" : (ev.status === "halt" ? "✋" : "✗");
         els.log.appendChild(h(`<div class="rt-gate ${cls}">${icon} GATE · ${esc(ev.gate)} — ${esc(ev.detail || "")}</div>`));
+        els.log.scrollTop = els.log.scrollHeight;
+        break;
+      }
+      case "pr": {
+        els.log.appendChild(h(
+          '<div class="rt-pr">' +
+            '<div class="rt-pr-head">📦 Pull Request <span class="rt-pr-mode">' + esc(ev.mode === "dry_run" ? "dry-run" : (ev.mode || "")) + '</span></div>' +
+            '<div class="rt-pr-row"><b>branch</b> <code>' + esc(ev.branch || "") + '</code>' +
+              (ev.committed ? ' <span style="color:' + OK + '">✓ committed</span>' : ' <span style="color:' + BAD + '">not committed</span>') + '</div>' +
+            '<div class="rt-pr-row"><b>commit</b> <code>' + esc(ev.commit || "") + '</code></div>' +
+            '<div class="rt-pr-title">' + esc(ev.title || "") + '</div>' +
+            '<div class="rt-pr-body">' + esc(ev.body || "") + '</div>' +
+            (ev.stat ? '<pre class="rt-pr-stat">' + esc(ev.stat) + '</pre>' : '') +
+          '</div>'));
         els.log.scrollTop = els.log.scrollHeight;
         break;
       }
@@ -278,6 +327,53 @@
         }
       });
     } catch (e) { /* ignore */ }
+  }
+
+  // ---- per-role model config -----------------------------------------------
+  function toggleConfig() { if (els.config.classList.contains("open")) closeConfig(); else openConfig(); }
+  function closeConfig() { els.config.classList.remove("open"); if (els.body) els.body.style.display = ""; }
+  async function openConfig() {
+    els.config.classList.add("open");
+    if (els.body) els.body.style.display = "none";
+    els.cfgList.innerHTML = '<div style="opacity:.6">Loading…</div>';
+    try {
+      var resp = await fetch("/api/roundtable/config");
+      var data = await resp.json();
+      var eps = data.endpoints || [];
+      els.cfgList.innerHTML = "";
+      if (!eps.length) { els.cfgList.innerHTML = '<div style="opacity:.6">No enabled model endpoints. Add one in Settings → Models.</div>'; return; }
+      (data.roles || []).forEach(function (role) {
+        var row = h('<div class="rt-cfg-row"><span class="rt-cfg-role">' + esc(ROLE_LABELS[role.key] || role.title) + '</span></div>');
+        var sel = document.createElement("select");
+        var def = document.createElement("option");
+        def.value = ""; def.textContent = "Default (" + role.purpose + ")"; sel.appendChild(def);
+        eps.forEach(function (ep) {
+          (ep.models || []).forEach(function (m) {
+            var o = document.createElement("option");
+            o.value = ep.endpoint_id + "|" + m;
+            o.textContent = m + "  ·  " + ep.label;
+            if (role.endpoint_id === ep.endpoint_id && role.model === m) o.selected = true;
+            sel.appendChild(o);
+          });
+        });
+        sel.addEventListener("change", function () { saveRoleModel(role.key, sel.value, sel); });
+        row.appendChild(sel);
+        els.cfgList.appendChild(row);
+      });
+    } catch (e) {
+      els.cfgList.innerHTML = '<div style="color:' + BAD + '">Failed to load: ' + esc(String(e)) + '</div>';
+    }
+  }
+  async function saveRoleModel(roleKey, value, sel) {
+    var parts = value ? value.split("|") : ["", ""];
+    sel.disabled = true;
+    try {
+      await fetch("/api/roundtable/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: roleKey, endpoint_id: parts[0], model: parts.slice(1).join("|") }),
+      });
+    } catch (e) { /* ignore */ }
+    sel.disabled = false;
   }
 
   // ---- wire the launch buttons (rail icon + expanded-sidebar item) ----------

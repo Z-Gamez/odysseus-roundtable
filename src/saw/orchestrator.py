@@ -1,22 +1,26 @@
-"""SAW orchestrator — the round-table state machine (Phase 1 slice).
+"""SAW orchestrator — the round-table state machine.
 
-Pipeline:  BSA  ->  [ Developer  ->  QAS ]xN  (loop until QAS PASS or max iters)
+Pipeline:
+    BSA -> Architect (design gate) -> [ Developer -> QAS -> Security ]xN -> Tech Writer
 
-Each role is one `stream_agent_loop` call (role prompt + scoped tools + per-role
-model via Odysseus endpoint "purposes"). Between roles we enforce SAW's gates:
+Gates (SAW stop-the-line / independence):
   - stop-the-line: BSA must produce acceptance criteria or the run halts.
-  - QAS gate: an independent, write-disabled reviewer must emit a PASS verdict;
-    FAIL loops back to the Developer with the feedback attached.
+  - design gate:   Architect must APPROVE the spec; REVISE loops back to BSA
+                   (bounded), and a persistently-unapproved design halts the line.
+  - QAS gate:      independent, write-disabled reviewer must PASS; FAIL loops to Dev.
+  - security gate: independent (separate from QAS) reviewer must APPROVE; BLOCK
+                   loops to Dev. QAS and Security can never be the same run.
+  - Tech Writer:   documents the shipped change (no gate; cheap/local model).
 
-`run_pipeline()` is an async generator of SSE event strings. It is meant to be
-handed to `src.agent_runs.start(run_id, gen)`; the route streams it to the UI via
-`src.agent_runs.subscribe(run_id)` (replay + live + heartbeats for free).
+Each role = one `stream_agent_loop` call. `run_pipeline()` is an async generator of
+tagged SSE event strings, streamed to the UI via `src.agent_runs` (start/subscribe).
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import AsyncGenerator, Dict, Optional, Set, Tuple
 
@@ -26,7 +30,8 @@ from src.saw.roles import PIPELINE, RoleSpec
 logger = logging.getLogger(__name__)
 
 _DONE = "data: [DONE]\n\n"
-MAX_DEV_QAS_ITERATIONS = 2
+MAX_DEV_QAS_ITERATIONS = 2   # Developer <-> QAS/Security retry budget
+MAX_ARCH_REVISIONS = 1       # Architect -> BSA spec-revision budget
 
 
 def _sse(obj: dict) -> str:
@@ -37,9 +42,29 @@ def _sse(obj: dict) -> str:
 # Resolution helpers
 # ---------------------------------------------------------------------------
 
+def _role_override(role_key: str, owner: str):
+    """Per-role model override from settings['saw_role_models'][role_key]
+    ({endpoint_id, model}); returns (url, model, headers) or None if unset."""
+    try:
+        from src.settings import get_setting
+        rc = (get_setting("saw_role_models", {}) or {}).get(role_key) or {}
+        ep_id = (rc.get("endpoint_id") or "").strip()
+        if not ep_id:
+            return None
+        from src.endpoint_resolver import resolve_endpoint_by_id
+        return resolve_endpoint_by_id(ep_id, (rc.get("model") or "").strip() or None, owner=owner)
+    except Exception as e:
+        logger.debug("[saw] per-role override failed for %s: %s", role_key, e)
+        return None
+
+
 def _resolve(role: RoleSpec, owner: str) -> Optional[Tuple[str, str, dict]]:
-    """Resolve a role's (endpoint_url, model, headers) from its Odysseus endpoint
-    purpose ("default" = Claude/heavy, "utility" = Ollama/cheap). None if unset."""
+    """Resolve a role's (endpoint_url, model, headers). Order of precedence:
+       1. explicit per-role override (settings 'saw_role_models'), else
+       2. the role's tier purpose (saw_heavy -> Claude / saw_cheap -> local)."""
+    override = _role_override(role.key, owner)
+    if override:
+        return override
     try:
         from src.endpoint_resolver import resolve_endpoint
         url, model, headers = resolve_endpoint(role.endpoint_purpose, owner=owner)
@@ -56,11 +81,52 @@ def _tool_universe() -> Set[str]:
         from src.agent_tools import TOOL_TAGS
         return set(TOOL_TAGS)
     except Exception:
-        # Minimal fallback so role scoping still does something useful.
         return {
             "bash", "python", "web_search", "web_fetch", "read_file", "write_file",
             "edit_file", "ls", "glob", "grep", "get_workspace", "ask_user",
         }
+
+
+def _write_spec(workspace: str, spec_text: str) -> None:
+    """Persist BSA's spec to SPEC.md so downstream roles reliably have it on disk."""
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        with open(os.path.join(workspace, "SPEC.md"), "w", encoding="utf-8") as f:
+            f.write(spec_text)
+    except Exception as e:
+        logger.warning("[saw] could not persist SPEC.md: %s", e)
+
+
+def _is_git_repo(ws: str) -> bool:
+    try:
+        import subprocess
+        r = subprocess.run(["git", "-C", ws, "rev-parse", "--is-inside-work-tree"],
+                           capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and "true" in r.stdout
+    except Exception:
+        return False
+
+
+def _git_branch_commit(ws: str, branch: str, message: str) -> dict:
+    """Create `branch`, stage everything, and commit. Returns a small summary dict."""
+    import subprocess
+
+    def g(*args):
+        return subprocess.run(["git", "-C", ws, *args], capture_output=True, text=True, timeout=30)
+
+    g("config", "user.email", "saw@local")
+    g("config", "user.name", "SAW Release Engineer")
+    g("checkout", "-b", branch)
+    g("add", "-A")
+    commit = g("commit", "-m", message or "chore: SAW round-table change")
+    committed = commit.returncode == 0
+    stat = g("show", "--stat", "--oneline", "HEAD") if committed else g("diff", "--cached", "--stat")
+    return {
+        "branch": branch,
+        "committed": committed,
+        "stat": (stat.stdout or "").strip()[:1800],
+        "note": (commit.stdout + commit.stderr).strip()[:300],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -69,18 +135,53 @@ def _tool_universe() -> Set[str]:
 
 _AC_HEADING = re.compile(r"acceptance\s+criteria", re.I)
 _AC_ITEM = re.compile(r"^\s*[-*]\s*\[[ xX]\]", re.M)
-_VERDICT = re.compile(r"QAS\s+VERDICT:\s*(PASS|FAIL)", re.I)
+_QAS_VERDICT = re.compile(r"QAS\s+VERDICT:\s*(PASS|FAIL)", re.I)
+_ARCH_VERDICT = re.compile(r"ARCH\s+VERDICT:\s*(APPROVE|REVISE)", re.I)
+_SEC_VERDICT = re.compile(r"SECURITY\s+VERDICT:\s*(APPROVE|BLOCK)", re.I)
 
 
 def _has_acceptance_criteria(text: str) -> bool:
     return bool(text and _AC_HEADING.search(text) and _AC_ITEM.search(text))
 
 
-def _parse_verdict(text: str) -> Optional[str]:
-    m = _VERDICT.search(text or "")
-    if not m:
-        return None
-    return m.group(1).lower()  # "pass" | "fail"
+def _parse(rx: re.Pattern, text: str) -> Optional[str]:
+    m = rx.search(text or "")
+    return m.group(1).lower() if m else None
+
+
+def _parse_verdict(text: str) -> Optional[str]:     # qas: pass|fail
+    return _parse(_QAS_VERDICT, text)
+
+
+def _parse_arch(text: str) -> Optional[str]:        # approve|revise
+    return _parse(_ARCH_VERDICT, text)
+
+
+def _parse_security(text: str) -> Optional[str]:    # approve|block
+    return _parse(_SEC_VERDICT, text)
+
+
+def _rte_section(text: str, name: str) -> str:
+    m = re.search(r"##\s*" + name + r"\s*\n(.+?)(?=\n##\s|\Z)", text or "", re.S | re.I)
+    return m.group(1).strip() if m else ""
+
+
+def _first_content_line(section: str) -> str:
+    """First non-blank, non-code-fence line of a section (models often wrap the
+    commit message / title in ``` fences)."""
+    for ln in (section or "").splitlines():
+        s = ln.strip()
+        if s and not s.startswith("```"):
+            return s
+    return ""
+
+
+def _parse_rte(text: str, fallback_title: str) -> Tuple[str, str, str]:
+    """Extract (commit_message, pr_title, pr_body) from RTE output, with fallbacks."""
+    commit = _first_content_line(_rte_section(text, "Commit Message")) or f"feat: {fallback_title}"
+    title = _first_content_line(_rte_section(text, "PR Title")) or fallback_title
+    body = _rte_section(text, "PR Body") or (text or "").strip()
+    return commit, title, body
 
 
 # ---------------------------------------------------------------------------
@@ -88,33 +189,44 @@ def _parse_verdict(text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _bsa_messages(role: RoleSpec, title: str, description: str, acceptance: str,
-                  workspace: str) -> list:
+                  workspace: str, arch_feedback: Optional[str] = None) -> list:
     ac_block = (
         f"Provided acceptance criteria:\n{acceptance}"
         if acceptance.strip()
         else "No acceptance criteria were provided — you MUST define them."
     )
     user = (
-        f"# Ticket\nTitle: {title}\n\nDescription:\n{description or '(none)'}\n\n"
-        f"{ac_block}\n\nWorkspace: {workspace}"
+        f"# Workspace\n{workspace}\n\n"
+        f"# Ticket\nTitle: {title}\n\nDescription:\n{description or '(none)'}\n\n{ac_block}"
+    )
+    if arch_feedback:
+        user += ("\n\n# System Architect requested revisions (address every point, "
+                 "then re-emit the full spec)\n" + arch_feedback)
+    return [{"role": "system", "content": role.system_prompt},
+            {"role": "user", "content": user}]
+
+
+def _arch_messages(role: RoleSpec, title: str, spec_text: str, workspace: str) -> list:
+    user = (
+        f"# Workspace (the code/spec live here)\n{workspace}\n\n"
+        f"# Ticket\n{title}\n\n# Spec to review (also saved as SPEC.md)\n{spec_text}\n\n"
+        "Review the design BEFORE implementation. End with the verdict line."
     )
     return [{"role": "system", "content": role.system_prompt},
             {"role": "user", "content": user}]
 
 
 def _dev_messages(role: RoleSpec, title: str, spec_text: str,
-                  qas_feedback: Optional[str], workspace: str) -> list:
+                  review_feedback: Optional[str], workspace: str) -> list:
     user = (
         f"# Workspace (build here — use absolute paths under this dir)\n{workspace}\n\n"
-        f"# Ticket\n{title}\n\n# Spec (from BSA)\n{spec_text}\n\n"
+        f"# Ticket\n{title}\n\n# Spec (from BSA, design-approved)\n{spec_text}\n\n"
         "SPEC.md has been saved in the workspace. Read it, then IMPLEMENT the code with "
         "write_file/edit_file. Do NOT finish until the required files actually exist on disk."
     )
-    if qas_feedback:
-        user += (
-            "\n\n# Previous QAS review (FAILED — you must address every point)\n"
-            f"{qas_feedback}"
-        )
+    if review_feedback:
+        user += ("\n\n# Previous review FAILED — you must address every point\n"
+                 + review_feedback)
     return [{"role": "system", "content": role.system_prompt},
             {"role": "user", "content": user}]
 
@@ -123,10 +235,44 @@ def _qas_messages(role: RoleSpec, title: str, spec_text: str, dev_text: str,
                   workspace: str) -> list:
     user = (
         f"# Workspace (the code is here — use absolute paths under this dir)\n{workspace}\n\n"
-        f"# Ticket\n{title}\n\n# Spec\n{spec_text}\n\n"
-        f"# Developer's report\n{dev_text}\n\n"
+        f"# Ticket\n{title}\n\n# Spec\n{spec_text}\n\n# Developer's report\n{dev_text}\n\n"
         "Independently validate the work against the acceptance criteria in SPEC.md. "
         "List the files, run the verification steps, then end with the verdict line."
+    )
+    return [{"role": "system", "content": role.system_prompt},
+            {"role": "user", "content": user}]
+
+
+def _security_messages(role: RoleSpec, title: str, spec_text: str, dev_text: str,
+                       workspace: str) -> list:
+    user = (
+        f"# Workspace (the code is here)\n{workspace}\n\n"
+        f"# Ticket\n{title}\n\n# Spec\n{spec_text}\n\n# Developer's report\n{dev_text}\n\n"
+        "QAS has already passed this. Now do an INDEPENDENT security review of the "
+        "changed files. End with the verdict line."
+    )
+    return [{"role": "system", "content": role.system_prompt},
+            {"role": "user", "content": user}]
+
+
+def _techwriter_messages(role: RoleSpec, title: str, spec_text: str, dev_text: str,
+                         workspace: str) -> list:
+    user = (
+        f"# Workspace\n{workspace}\n\n# Ticket\n{title}\n\n# Spec\n{spec_text}\n\n"
+        f"# What was built\n{dev_text}\n\n"
+        "The change shipped (QA + security passed). Add concise docs for it. Do not change code."
+    )
+    return [{"role": "system", "content": role.system_prompt},
+            {"role": "user", "content": user}]
+
+
+def _rte_messages(role: RoleSpec, title: str, spec_text: str, dev_text: str,
+                  workspace: str) -> list:
+    user = (
+        f"# Workspace (your shell runs here)\n{workspace}\n\n"
+        f"# Ticket\n{title}\n\n# Spec\n{spec_text}\n\n# What was built\n{dev_text}\n\n"
+        "The change passed design, QA, and security. Inspect it (git status / read files) "
+        "and produce the commit message + PR text per your output contract."
     )
     return [{"role": "system", "content": role.system_prompt},
             {"role": "user", "content": user}]
@@ -177,9 +323,7 @@ async def _run_role(role: RoleSpec, url: str, model: str, headers: dict, message
     acc: list = []
     try:
         async for chunk in stream_agent_loop(
-            url,
-            model,
-            messages,
+            url, model, messages,
             headers=headers,
             temperature=role.temperature,
             max_rounds=role.max_rounds,
@@ -194,7 +338,7 @@ async def _run_role(role: RoleSpec, url: str, model: str, headers: dict, message
     except asyncio.CancelledError:
         result["text"] = "".join(acc).strip()
         raise
-    except Exception as e:  # surface role failure but don't kill the pipeline frame
+    except Exception as e:
         logger.error("[saw] role %s failed: %s", role.key, e, exc_info=True)
         yield _sse({"type": "delta", "role": role.key, "text": f"\n[role error: {e}]\n"})
     result["text"] = "".join(acc).strip()
@@ -209,56 +353,87 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
     store.create_run(run_id, title, description, acceptance, workspace, owner)
     yield _sse({"type": "run_start", "run_id": run_id, "title": title,
                 "pipeline": [r.key for r in PIPELINE], "workspace": workspace})
-    idx = 0
+    state = {"idx": 0}
+    universe = _tool_universe()
+
     try:
-        universe = _tool_universe()
-
-        # ---- Role 1: BSA ----
+        # ---------- Role 1: BSA + design gate ----------
         bsa = roles.BSA
-        ep = _resolve(bsa, owner)
-        if ep is None:
-            async for ev in _halt(run_id, "provider",
-                                  "No 'default' chat model configured. Set one in "
-                                  "Odysseus Settings → Models."):
+        arch_feedback: Optional[str] = None
+        bsa_text = ""
+        for arch_rev in range(MAX_ARCH_REVISIONS + 1):
+            ep = _resolve(bsa, owner)
+            if ep is None:
+                async for ev in _halt(run_id, "provider",
+                                      "No saw_heavy/default chat model configured in Odysseus Settings."):
+                    yield ev
+                return
+            url, model, headers = ep
+            yield _sse({"type": "role_start", "role": bsa.key, "title": bsa.title,
+                        "model": model, "purpose": bsa.endpoint_purpose, "iteration": arch_rev + 1})
+            res: Dict[str, str] = {"text": ""}
+            async for ev in _run_role(bsa, url, model, headers,
+                                      _bsa_messages(bsa, title, description, acceptance, workspace, arch_feedback),
+                                      workspace, owner, run_id, universe, arch_rev + 1, res):
                 yield ev
-            return
-        url, model, headers = ep
-        yield _sse({"type": "role_start", "role": bsa.key, "title": bsa.title,
-                    "model": model, "purpose": bsa.endpoint_purpose, "iteration": 1})
-        res: Dict[str, str] = {"text": ""}
-        async for ev in _run_role(bsa, url, model, headers,
-                                  _bsa_messages(bsa, title, description, acceptance, workspace),
-                                  workspace, owner, run_id, universe, 1, res):
-            yield ev
-        bsa_text = res["text"]
-        store.add_step(run_id, idx, bsa.key, 1, model, bsa.endpoint_purpose, bsa_text)
-        idx += 1
-        yield _sse({"type": "role_done", "role": bsa.key, "iteration": 1, "chars": len(bsa_text)})
+            bsa_text = res["text"]
+            store.add_step(run_id, state["idx"], bsa.key, arch_rev + 1, model, bsa.endpoint_purpose, bsa_text)
+            state["idx"] += 1
+            yield _sse({"type": "role_done", "role": bsa.key, "iteration": arch_rev + 1, "chars": len(bsa_text)})
 
-        # GATE: stop-the-line (no AC/DoD, no work)
-        if not _has_acceptance_criteria(bsa_text):
-            yield _sse({"type": "gate", "gate": "stop-the-line", "status": "halt",
-                        "detail": "BSA produced no acceptance criteria — stopping the line."})
-            yield _sse({"type": "run_done", "status": "halted", "detail": "no acceptance criteria"})
-            store.set_run_status(run_id, "halted")
-            yield _DONE
-            return
-        yield _sse({"type": "gate", "gate": "stop-the-line", "status": "pass",
-                    "detail": "Acceptance criteria present."})
+            # stop-the-line
+            if not _has_acceptance_criteria(bsa_text):
+                async for ev in _halt(run_id, "stop-the-line",
+                                      "BSA produced no acceptance criteria — stopping the line."):
+                    yield ev
+                return
+            if arch_rev == 0:
+                yield _sse({"type": "gate", "gate": "stop-the-line", "status": "pass",
+                            "detail": "Acceptance criteria present."})
+            _write_spec(workspace, bsa_text)
 
-        # Persist BSA's spec to SPEC.md so the Developer reliably has it as a file,
-        # regardless of whether BSA chose to call write_file itself.
-        try:
-            import os
-            os.makedirs(workspace, exist_ok=True)
-            with open(os.path.join(workspace, "SPEC.md"), "w", encoding="utf-8") as _f:
-                _f.write(bsa_text)
-        except Exception as _e:
-            logger.warning("[saw] could not persist SPEC.md: %s", _e)
+            # Architect design review
+            arch = roles.SYSTEM_ARCHITECT
+            aep = _resolve(arch, owner)
+            if aep is None:
+                async for ev in _halt(run_id, "provider", "Architect endpoint unavailable."):
+                    yield ev
+                return
+            aurl, amodel, aheaders = aep
+            yield _sse({"type": "role_start", "role": arch.key, "title": arch.title,
+                        "model": amodel, "purpose": arch.endpoint_purpose, "iteration": arch_rev + 1})
+            ares: Dict[str, str] = {"text": ""}
+            async for ev in _run_role(arch, aurl, amodel, aheaders,
+                                      _arch_messages(arch, title, bsa_text, workspace),
+                                      workspace, owner, run_id, universe, arch_rev + 1, ares):
+                yield ev
+            arch_text = ares["text"]
+            averdict = _parse_arch(arch_text)
+            store.add_step(run_id, state["idx"], arch.key, arch_rev + 1, amodel, arch.endpoint_purpose,
+                           arch_text, gate="design", verdict=averdict or "unknown")
+            state["idx"] += 1
+            yield _sse({"type": "role_done", "role": arch.key, "iteration": arch_rev + 1, "chars": len(arch_text)})
 
-        # ---- Roles 2-3: Developer <-> QAS loop ----
-        passed = False
-        qas_feedback: Optional[str] = None
+            if averdict == "approve":
+                yield _sse({"type": "gate", "gate": "design", "status": "pass",
+                            "detail": "Architect approved the design."})
+                break
+            # revise
+            yield _sse({"type": "gate", "gate": "design", "status": "fail",
+                        "detail": ("Architect requested spec revisions." if averdict == "revise"
+                                   else "Architect verdict unclear — treating as REVISE."),
+                        "iteration": arch_rev + 1})
+            if arch_rev >= MAX_ARCH_REVISIONS:
+                async for ev in _halt(run_id, "design",
+                                      "Design not approved after revision — stopping the line."):
+                    yield ev
+                return
+            arch_feedback = arch_text  # loop: BSA revises the spec
+
+        # ---------- Implementation loop: Developer -> QAS -> Security ----------
+        shipped = False
+        feedback: Optional[str] = None
+        dev_text = ""
         for iteration in range(1, MAX_DEV_QAS_ITERATIONS + 1):
             # Developer
             dev = roles.DEVELOPER
@@ -272,16 +447,15 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                         "model": dmodel, "purpose": dev.endpoint_purpose, "iteration": iteration})
             dres: Dict[str, str] = {"text": ""}
             async for ev in _run_role(dev, durl, dmodel, dheaders,
-                                      _dev_messages(dev, title, bsa_text, qas_feedback, workspace),
+                                      _dev_messages(dev, title, bsa_text, feedback, workspace),
                                       workspace, owner, run_id, universe, iteration, dres):
                 yield ev
             dev_text = dres["text"]
-            store.add_step(run_id, idx, dev.key, iteration, dmodel, dev.endpoint_purpose, dev_text)
-            idx += 1
-            yield _sse({"type": "role_done", "role": dev.key, "iteration": iteration,
-                        "chars": len(dev_text)})
+            store.add_step(run_id, state["idx"], dev.key, iteration, dmodel, dev.endpoint_purpose, dev_text)
+            state["idx"] += 1
+            yield _sse({"type": "role_done", "role": dev.key, "iteration": iteration, "chars": len(dev_text)})
 
-            # QAS (independent, write-disabled)
+            # QAS gate
             qas = roles.QAS
             qep = _resolve(qas, owner)
             if qep is None:
@@ -297,28 +471,102 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                                       workspace, owner, run_id, universe, iteration, qres):
                 yield ev
             qas_text = qres["text"]
-            verdict = _parse_verdict(qas_text)
-            store.add_step(run_id, idx, qas.key, iteration, qmodel, qas.endpoint_purpose,
-                           qas_text, gate="qas", verdict=verdict or "unknown")
-            idx += 1
-            yield _sse({"type": "role_done", "role": qas.key, "iteration": iteration,
-                        "chars": len(qas_text)})
+            qverdict = _parse_verdict(qas_text)
+            store.add_step(run_id, state["idx"], qas.key, iteration, qmodel, qas.endpoint_purpose,
+                           qas_text, gate="qas", verdict=qverdict or "unknown")
+            state["idx"] += 1
+            yield _sse({"type": "role_done", "role": qas.key, "iteration": iteration, "chars": len(qas_text)})
 
-            if verdict == "pass":
-                yield _sse({"type": "gate", "gate": "qas", "status": "pass",
-                            "detail": "QAS approved — acceptance criteria met."})
-                passed = True
+            if qverdict != "pass":
+                yield _sse({"type": "gate", "gate": "qas", "status": "fail",
+                            "detail": ("QAS rejected the work." if qverdict == "fail"
+                                       else "QAS verdict unclear — treated as FAIL."),
+                            "iteration": iteration})
+                feedback = qas_text
+                continue
+            yield _sse({"type": "gate", "gate": "qas", "status": "pass",
+                        "detail": "QAS approved — acceptance criteria met."})
+
+            # Security gate (independent of QAS)
+            sec = roles.SECURITY
+            sep = _resolve(sec, owner)
+            if sep is None:
+                async for ev in _halt(run_id, "provider", "Security endpoint unavailable."):
+                    yield ev
+                return
+            surl, smodel, sheaders = sep
+            yield _sse({"type": "role_start", "role": sec.key, "title": sec.title,
+                        "model": smodel, "purpose": sec.endpoint_purpose, "iteration": iteration})
+            sres: Dict[str, str] = {"text": ""}
+            async for ev in _run_role(sec, surl, smodel, sheaders,
+                                      _security_messages(sec, title, bsa_text, dev_text, workspace),
+                                      workspace, owner, run_id, universe, iteration, sres):
+                yield ev
+            sec_text = sres["text"]
+            sverdict = _parse_security(sec_text)
+            store.add_step(run_id, state["idx"], sec.key, iteration, smodel, sec.endpoint_purpose,
+                           sec_text, gate="security", verdict=sverdict or "unknown")
+            state["idx"] += 1
+            yield _sse({"type": "role_done", "role": sec.key, "iteration": iteration, "chars": len(sec_text)})
+
+            if sverdict == "approve":
+                yield _sse({"type": "gate", "gate": "security", "status": "pass",
+                            "detail": "Security approved — no blocking issues."})
+                shipped = True
                 break
-            detail = ("QAS rejected the work." if verdict == "fail"
-                      else "QAS verdict unclear — treated as FAIL.")
-            yield _sse({"type": "gate", "gate": "qas", "status": "fail",
-                        "detail": detail, "iteration": iteration})
-            qas_feedback = qas_text
+            yield _sse({"type": "gate", "gate": "security", "status": "fail",
+                        "detail": ("Security blocked the change." if sverdict == "block"
+                                   else "Security verdict unclear — treated as BLOCK."),
+                        "iteration": iteration})
+            feedback = sec_text
 
-        status = "passed" if passed else "failed"
+        # ---------- Tech Writer (docs, cheap/local model, no gate) ----------
+        if shipped:
+            tw = roles.TECH_WRITER
+            tep = _resolve(tw, owner)
+            if tep is not None:
+                turl, tmodel, theaders = tep
+                yield _sse({"type": "role_start", "role": tw.key, "title": tw.title,
+                            "model": tmodel, "purpose": tw.endpoint_purpose, "iteration": 1})
+                tres: Dict[str, str] = {"text": ""}
+                async for ev in _run_role(tw, turl, tmodel, theaders,
+                                          _techwriter_messages(tw, title, bsa_text, dev_text, workspace),
+                                          workspace, owner, run_id, universe, 1, tres):
+                    yield ev
+                store.add_step(run_id, state["idx"], tw.key, 1, tmodel, tw.endpoint_purpose, tres["text"])
+                state["idx"] += 1
+                yield _sse({"type": "role_done", "role": tw.key, "iteration": 1, "chars": len(tres["text"])})
+
+        # ---------- RTE: package the shipped change as a PR (dry-run) ----------
+        if shipped:
+            rte = roles.RTE
+            rep = _resolve(rte, owner)
+            if rep is not None and _is_git_repo(workspace):
+                rurl, rmodel, rheaders = rep
+                yield _sse({"type": "role_start", "role": rte.key, "title": rte.title,
+                            "model": rmodel, "purpose": rte.endpoint_purpose, "iteration": 1})
+                rres: Dict[str, str] = {"text": ""}
+                async for ev in _run_role(rte, rurl, rmodel, rheaders,
+                                          _rte_messages(rte, title, bsa_text, dev_text, workspace),
+                                          workspace, owner, run_id, universe, 1, rres):
+                    yield ev
+                store.add_step(run_id, state["idx"], rte.key, 1, rmodel, rte.endpoint_purpose, rres["text"])
+                state["idx"] += 1
+                yield _sse({"type": "role_done", "role": rte.key, "iteration": 1, "chars": len(rres["text"])})
+                commit_msg, pr_title, pr_body = _parse_rte(rres["text"], title)
+                git = _git_branch_commit(workspace, f"saw/{run_id}", commit_msg)
+                yield _sse({"type": "pr", "role": rte.key, "mode": "dry_run",
+                            "branch": git["branch"], "committed": git["committed"],
+                            "title": pr_title, "body": pr_body, "commit": commit_msg,
+                            "stat": git["stat"], "note": git["note"]})
+            elif rep is not None:
+                yield _sse({"type": "gate", "gate": "rte", "status": "halt",
+                            "detail": "Workspace is not a git repo — skipping PR shepherding."})
+
+        status = "passed" if shipped else "failed"
         yield _sse({"type": "run_done", "status": status,
-                    "detail": ("Shipped." if passed
-                               else f"Failed after {MAX_DEV_QAS_ITERATIONS} QAS iterations.")})
+                    "detail": ("Shipped." if shipped
+                               else f"Failed after {MAX_DEV_QAS_ITERATIONS} implementation iterations.")})
         store.set_run_status(run_id, status)
         yield _DONE
 

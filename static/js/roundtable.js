@@ -92,6 +92,12 @@
     .rt-pr-title{padding:6px 12px;font-weight:700;font-size:13px;}
     .rt-pr-body{padding:4px 12px 10px;white-space:pre-wrap;font-size:12.5px;line-height:1.5;opacity:.9;}
     .rt-pr-stat{margin:0 12px 12px;padding:8px 10px;background:rgba(127,127,127,.08);border-radius:8px;font-size:11px;overflow:auto;white-space:pre;}
+    .rt-pr-row a{color:var(--color-text-info,#6aa9d9);word-break:break-all;}
+    .rt-pr-actions{display:flex;align-items:center;gap:8px;padding:8px 12px 12px;flex-wrap:wrap;}
+    .rt-pr-approve{cursor:pointer;border:none;border-radius:8px;padding:7px 13px;font:inherit;font-weight:700;color:#fff;background:${OK};}
+    .rt-pr-reject{cursor:pointer;border:1px solid rgba(127,127,127,.35);border-radius:8px;padding:7px 13px;font:inherit;background:transparent;color:inherit;}
+    .rt-pr-approve:disabled,.rt-pr-reject:disabled{opacity:.5;cursor:default;}
+    .rt-pr-result{font-size:12px;}
     `;
     var s = document.createElement("style"); s.id = "rt-styles"; s.textContent = css; document.head.appendChild(s);
   }
@@ -227,16 +233,26 @@
         break;
       }
       case "pr": {
-        els.log.appendChild(h(
+        var urlRow = ev.url ? ('<div class="rt-pr-row"><b>PR</b> <a href="' + esc(ev.url) + '" target="_blank" rel="noopener">' + esc(ev.url) + '</a></div>') : '';
+        var card = h(
           '<div class="rt-pr">' +
             '<div class="rt-pr-head">📦 Pull Request <span class="rt-pr-mode">' + esc(ev.mode === "dry_run" ? "dry-run" : (ev.mode || "")) + '</span></div>' +
             '<div class="rt-pr-row"><b>branch</b> <code>' + esc(ev.branch || "") + '</code>' +
               (ev.committed ? ' <span style="color:' + OK + '">✓ committed</span>' : ' <span style="color:' + BAD + '">not committed</span>') + '</div>' +
+            urlRow +
             '<div class="rt-pr-row"><b>commit</b> <code>' + esc(ev.commit || "") + '</code></div>' +
             '<div class="rt-pr-title">' + esc(ev.title || "") + '</div>' +
             '<div class="rt-pr-body">' + esc(ev.body || "") + '</div>' +
             (ev.stat ? '<pre class="rt-pr-stat">' + esc(ev.stat) + '</pre>' : '') +
-          '</div>'));
+            '<div class="rt-pr-actions"><button class="rt-pr-approve">✓ Approve &amp; Merge</button><button class="rt-pr-reject">Reject</button><span class="rt-pr-result"></span></div>' +
+          '</div>');
+        els.log.appendChild(card);
+        (function () {
+          var runId = ev.run_id || (current && current.runId);
+          var approve = card.querySelector(".rt-pr-approve"), reject = card.querySelector(".rt-pr-reject"), result = card.querySelector(".rt-pr-result");
+          approve.addEventListener("click", function () { mergeRun(runId, approve, reject, result); });
+          reject.addEventListener("click", function () { approve.disabled = true; reject.disabled = true; result.textContent = " ✗ rejected — branch kept, not merged"; result.style.color = BAD; });
+        })();
         els.log.scrollTop = els.log.scrollHeight;
         break;
       }
@@ -382,6 +398,15 @@
         row.appendChild(sel);
         els.cfgList.appendChild(row);
       });
+      var modeRow = h('<div class="rt-cfg-row" style="border-top:1px solid rgba(127,127,127,.25);margin-top:10px;padding-top:14px;"><span class="rt-cfg-role">Release mode</span></div>');
+      var modeSel = document.createElement("select");
+      [["dry_run", "Dry-run — local branch + commit"], ["github", "GitHub — push + open a real PR"]].forEach(function (opt) {
+        var o = document.createElement("option"); o.value = opt[0]; o.textContent = opt[1];
+        if ((data.rte_mode || "dry_run") === opt[0]) o.selected = true;
+        modeSel.appendChild(o);
+      });
+      modeSel.addEventListener("change", function () { saveRteMode(modeSel.value, modeSel); });
+      modeRow.appendChild(modeSel); els.cfgList.appendChild(modeRow);
     } catch (e) {
       els.cfgList.innerHTML = '<div style="color:' + BAD + '">Failed to load: ' + esc(String(e)) + '</div>';
     }
@@ -395,6 +420,25 @@
         body: JSON.stringify({ role: roleKey, endpoint_id: parts[0], model: parts.slice(1).join("|") }),
       });
     } catch (e) { /* ignore */ }
+    sel.disabled = false;
+  }
+
+  async function mergeRun(runId, approve, reject, result) {
+    if (!runId) { result.textContent = " (no run id)"; result.style.color = BAD; return; }
+    approve.disabled = true; reject.disabled = true;
+    result.textContent = " merging…"; result.style.color = "";
+    try {
+      var resp = await fetch("/api/roundtable/" + runId + "/merge", { method: "POST" });
+      var data = await resp.json();
+      if (data.ok) { result.textContent = " ✓ " + (data.detail || "merged"); result.style.color = OK; }
+      else { result.textContent = " ✗ " + (data.detail || data.error || "merge failed"); result.style.color = BAD; approve.disabled = false; }
+    } catch (e) { result.textContent = " ✗ " + e; result.style.color = BAD; approve.disabled = false; }
+  }
+
+  async function saveRteMode(mode, sel) {
+    sel.disabled = true;
+    try { await fetch("/api/roundtable/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rte_mode: mode }) }); }
+    catch (e) { /* ignore */ }
     sel.disabled = false;
   }
 

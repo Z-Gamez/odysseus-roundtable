@@ -83,6 +83,14 @@ def setup_roundtable_routes():
     async def stop_run(request: Request, run_id: str) -> Dict[str, Any]:
         return {"stopped": agent_runs.stop(run_id)}
 
+    @router.post("/{run_id}/merge")
+    async def merge_run_ep(request: Request, run_id: str) -> Any:
+        run = store.get_run(run_id)
+        if not run:
+            return JSONResponse({"error": "Run not found."}, status_code=404)
+        from src.saw.orchestrator import merge_run
+        return merge_run(run.get("workspace") or "", run_id)
+
     @router.get("/runs")
     async def list_runs(request: Request) -> Dict[str, Any]:
         return {"runs": store.list_runs(50)}
@@ -101,7 +109,8 @@ def setup_roundtable_routes():
             rc = cfg.get(r.key) or {}
             roles.append({"key": r.key, "title": r.title, "purpose": r.endpoint_purpose,
                           "endpoint_id": rc.get("endpoint_id", ""), "model": rc.get("model", "")})
-        return {"roles": roles, "endpoints": _available_models(get_current_user(request))}
+        return {"roles": roles, "endpoints": _available_models(get_current_user(request)),
+                "rte_mode": get_setting("saw_rte_mode", "dry_run")}
 
     @router.post("/config")
     async def set_config(request: Request) -> Any:
@@ -109,11 +118,16 @@ def setup_roundtable_routes():
             body = await request.json()
         except Exception:
             body = {}
+        from src.settings import load_settings, save_settings
+        s = load_settings()
+        if "rte_mode" in body:   # release mode toggle (dry_run | github)
+            mode = "github" if str(body.get("rte_mode")).lower() == "github" else "dry_run"
+            s["saw_rte_mode"] = mode
+            save_settings(s)
+            return {"ok": True, "rte_mode": mode}
         key = (body.get("role") or "").strip()
         if key not in {r.key for r in PIPELINE}:
             return JSONResponse({"error": "unknown role"}, status_code=400)
-        from src.settings import load_settings, save_settings
-        s = load_settings()
         cfg = dict(s.get("saw_role_models") or {})
         ep_id = (body.get("endpoint_id") or "").strip()
         if ep_id:

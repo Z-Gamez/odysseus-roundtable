@@ -129,6 +129,83 @@ def _git_branch_commit(ws: str, branch: str, message: str) -> dict:
     }
 
 
+def _gh_available() -> bool:
+    import shutil
+    return shutil.which("gh") is not None
+
+
+def _has_github_remote(ws: str) -> bool:
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", ws, "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and "github.com" in (r.stdout or "")
+    except Exception:
+        return False
+
+
+def _push_and_open_pr(ws: str, branch: str, title: str, body: str) -> dict:
+    """Push the branch and open a GitHub PR via gh. Returns {ok, url|note}."""
+    import subprocess
+    if not _gh_available():
+        return {"ok": False, "note": "gh CLI not installed"}
+    if not _has_github_remote(ws):
+        return {"ok": False, "note": "workspace has no GitHub 'origin' remote"}
+
+    def run(args):
+        return subprocess.run(args, cwd=ws, capture_output=True, text=True, timeout=120)
+
+    push = run(["git", "push", "-u", "origin", branch])
+    if push.returncode != 0:
+        return {"ok": False, "note": "git push failed: " + (push.stderr or "")[:200]}
+    pr = run(["gh", "pr", "create", "--title", title, "--body", body, "--head", branch])
+    if pr.returncode != 0:
+        return {"ok": False, "note": "gh pr create failed: " + (pr.stderr or "")[:200]}
+    url = ""
+    for line in (pr.stdout or "").splitlines():
+        if line.strip().startswith("http"):
+            url = line.strip()
+    return {"ok": True, "url": url}
+
+
+def merge_run(workspace: str, run_id: str, mode: Optional[str] = None) -> dict:
+    """HITL approve & merge the run's saw/<run_id> branch. GitHub mode uses
+    `gh pr merge`; otherwise merges locally into main/master (or establishes main)."""
+    import subprocess
+    branch = f"saw/{run_id}"
+    if mode is None:
+        try:
+            from src.settings import get_setting
+            mode = get_setting("saw_rte_mode", "dry_run")
+        except Exception:
+            mode = "dry_run"
+
+    def g(*args):
+        return subprocess.run(["git", "-C", workspace, *args], capture_output=True, text=True, timeout=120)
+
+    if mode == "github" and _gh_available() and _has_github_remote(workspace):
+        m = subprocess.run(["gh", "pr", "merge", branch, "--merge", "--delete-branch"],
+                           cwd=workspace, capture_output=True, text=True, timeout=120)
+        if m.returncode == 0:
+            return {"ok": True, "detail": f"Merged the GitHub PR for {branch}."}
+        return {"ok": False, "detail": "gh pr merge failed: " + (m.stderr or "")[:300]}
+
+    main_ok = g("rev-parse", "--verify", "--quiet", "refs/heads/main").returncode == 0
+    master_ok = g("rev-parse", "--verify", "--quiet", "refs/heads/master").returncode == 0
+    base = "main" if main_ok else ("master" if master_ok else None)
+    if base is None:
+        g("branch", "-f", "main", branch); g("checkout", "main")
+        return {"ok": True, "detail": f"Established 'main' at the approved change ({branch})."}
+    if base == branch:
+        return {"ok": True, "detail": f"{branch} is already the base branch."}
+    g("checkout", base)
+    mg = g("merge", "--no-ff", branch, "-m", f"Merge {branch} (SAW HITL approved)")
+    if mg.returncode == 0:
+        return {"ok": True, "detail": f"Merged {branch} into {base} locally."}
+    g("merge", "--abort")
+    return {"ok": False, "detail": f"Merge into {base} hit conflicts; aborted."}
+
+
 # ---------------------------------------------------------------------------
 # Gate parsers
 # ---------------------------------------------------------------------------
@@ -217,13 +294,16 @@ def _arch_messages(role: RoleSpec, title: str, spec_text: str, workspace: str) -
 
 
 def _dev_messages(role: RoleSpec, title: str, spec_text: str,
-                  review_feedback: Optional[str], workspace: str) -> list:
+                  review_feedback: Optional[str], workspace: str,
+                  arch_notes: Optional[str] = None) -> list:
     user = (
         f"# Workspace (build here — use absolute paths under this dir)\n{workspace}\n\n"
-        f"# Ticket\n{title}\n\n# Spec (from BSA, design-approved)\n{spec_text}\n\n"
+        f"# Ticket\n{title}\n\n# Spec (from BSA)\n{spec_text}\n\n"
         "SPEC.md has been saved in the workspace. Read it, then IMPLEMENT the code with "
         "write_file/edit_file. Do NOT finish until the required files actually exist on disk."
     )
+    if arch_notes and arch_notes.strip():
+        user += "\n\n# System Architect's design review (apply this guidance)\n" + arch_notes
     if review_feedback:
         user += ("\n\n# Previous review FAILED — you must address every point\n"
                  + review_feedback)
@@ -357,78 +437,63 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
     universe = _tool_universe()
 
     try:
-        # ---------- Role 1: BSA + design gate ----------
+        # ---------- Role 1: BSA (stop-the-line is the one hard early gate) ----------
         bsa = roles.BSA
-        arch_feedback: Optional[str] = None
-        bsa_text = ""
-        for arch_rev in range(MAX_ARCH_REVISIONS + 1):
-            ep = _resolve(bsa, owner)
-            if ep is None:
-                async for ev in _halt(run_id, "provider",
-                                      "No saw_heavy/default chat model configured in Odysseus Settings."):
-                    yield ev
-                return
-            url, model, headers = ep
-            yield _sse({"type": "role_start", "role": bsa.key, "title": bsa.title,
-                        "model": model, "purpose": bsa.endpoint_purpose, "iteration": arch_rev + 1})
-            res: Dict[str, str] = {"text": ""}
-            async for ev in _run_role(bsa, url, model, headers,
-                                      _bsa_messages(bsa, title, description, acceptance, workspace, arch_feedback),
-                                      workspace, owner, run_id, universe, arch_rev + 1, res):
+        ep = _resolve(bsa, owner)
+        if ep is None:
+            async for ev in _halt(run_id, "provider",
+                                  "No saw_heavy chat model configured in Odysseus Settings."):
                 yield ev
-            bsa_text = res["text"]
-            store.add_step(run_id, state["idx"], bsa.key, arch_rev + 1, model, bsa.endpoint_purpose, bsa_text)
-            state["idx"] += 1
-            yield _sse({"type": "role_done", "role": bsa.key, "iteration": arch_rev + 1, "chars": len(bsa_text)})
+            return
+        url, model, headers = ep
+        yield _sse({"type": "role_start", "role": bsa.key, "title": bsa.title,
+                    "model": model, "purpose": bsa.endpoint_purpose, "iteration": 1})
+        res: Dict[str, str] = {"text": ""}
+        async for ev in _run_role(bsa, url, model, headers,
+                                  _bsa_messages(bsa, title, description, acceptance, workspace),
+                                  workspace, owner, run_id, universe, 1, res):
+            yield ev
+        bsa_text = res["text"]
+        store.add_step(run_id, state["idx"], bsa.key, 1, model, bsa.endpoint_purpose, bsa_text)
+        state["idx"] += 1
+        yield _sse({"type": "role_done", "role": bsa.key, "iteration": 1, "chars": len(bsa_text)})
 
-            # stop-the-line
-            if not _has_acceptance_criteria(bsa_text):
-                async for ev in _halt(run_id, "stop-the-line",
-                                      "BSA produced no acceptance criteria — stopping the line."):
-                    yield ev
-                return
-            if arch_rev == 0:
-                yield _sse({"type": "gate", "gate": "stop-the-line", "status": "pass",
-                            "detail": "Acceptance criteria present."})
-            _write_spec(workspace, bsa_text)
+        if not _has_acceptance_criteria(bsa_text):
+            async for ev in _halt(run_id, "stop-the-line",
+                                  "BSA produced no acceptance criteria — stopping the line."):
+                yield ev
+            return
+        yield _sse({"type": "gate", "gate": "stop-the-line", "status": "pass",
+                    "detail": "Acceptance criteria present."})
+        _write_spec(workspace, bsa_text)
 
-            # Architect design review
-            arch = roles.SYSTEM_ARCHITECT
-            aep = _resolve(arch, owner)
-            if aep is None:
-                async for ev in _halt(run_id, "provider", "Architect endpoint unavailable."):
-                    yield ev
-                return
+        # ---------- Role 2: System Architect (ADVISORY — never halts or loops) ----------
+        # Its review is recorded and passed to the Developer as design guidance. A weak
+        # model that flubs its verdict must NOT be able to stop the line.
+        arch_text = ""
+        arch = roles.SYSTEM_ARCHITECT
+        aep = _resolve(arch, owner)
+        if aep is not None:
             aurl, amodel, aheaders = aep
             yield _sse({"type": "role_start", "role": arch.key, "title": arch.title,
-                        "model": amodel, "purpose": arch.endpoint_purpose, "iteration": arch_rev + 1})
+                        "model": amodel, "purpose": arch.endpoint_purpose, "iteration": 1})
             ares: Dict[str, str] = {"text": ""}
             async for ev in _run_role(arch, aurl, amodel, aheaders,
                                       _arch_messages(arch, title, bsa_text, workspace),
-                                      workspace, owner, run_id, universe, arch_rev + 1, ares):
+                                      workspace, owner, run_id, universe, 1, ares):
                 yield ev
             arch_text = ares["text"]
             averdict = _parse_arch(arch_text)
-            store.add_step(run_id, state["idx"], arch.key, arch_rev + 1, amodel, arch.endpoint_purpose,
-                           arch_text, gate="design", verdict=averdict or "unknown")
+            store.add_step(run_id, state["idx"], arch.key, 1, amodel, arch.endpoint_purpose,
+                           arch_text, gate="design", verdict=averdict or "advisory")
             state["idx"] += 1
-            yield _sse({"type": "role_done", "role": arch.key, "iteration": arch_rev + 1, "chars": len(arch_text)})
-
-            if averdict == "approve":
+            yield _sse({"type": "role_done", "role": arch.key, "iteration": 1, "chars": len(arch_text)})
+            if averdict == "revise":
+                yield _sse({"type": "gate", "gate": "design", "status": "fail",
+                            "detail": "Architect flagged design concerns — passed to the Developer (advisory)."})
+            else:
                 yield _sse({"type": "gate", "gate": "design", "status": "pass",
-                            "detail": "Architect approved the design."})
-                break
-            # revise
-            yield _sse({"type": "gate", "gate": "design", "status": "fail",
-                        "detail": ("Architect requested spec revisions." if averdict == "revise"
-                                   else "Architect verdict unclear — treating as REVISE."),
-                        "iteration": arch_rev + 1})
-            if arch_rev >= MAX_ARCH_REVISIONS:
-                async for ev in _halt(run_id, "design",
-                                      "Design not approved after revision — stopping the line."):
-                    yield ev
-                return
-            arch_feedback = arch_text  # loop: BSA revises the spec
+                            "detail": "Architect review complete."})
 
         # ---------- Implementation loop: Developer -> QAS -> Security ----------
         shipped = False
@@ -447,7 +512,7 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                         "model": dmodel, "purpose": dev.endpoint_purpose, "iteration": iteration})
             dres: Dict[str, str] = {"text": ""}
             async for ev in _run_role(dev, durl, dmodel, dheaders,
-                                      _dev_messages(dev, title, bsa_text, feedback, workspace),
+                                      _dev_messages(dev, title, bsa_text, feedback, workspace, arch_text),
                                       workspace, owner, run_id, universe, iteration, dres):
                 yield ev
             dev_text = dres["text"]
@@ -555,8 +620,20 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                 yield _sse({"type": "role_done", "role": rte.key, "iteration": 1, "chars": len(rres["text"])})
                 commit_msg, pr_title, pr_body = _parse_rte(rres["text"], title)
                 git = _git_branch_commit(workspace, f"saw/{run_id}", commit_msg)
-                yield _sse({"type": "pr", "role": rte.key, "mode": "dry_run",
-                            "branch": git["branch"], "committed": git["committed"],
+                try:
+                    from src.settings import get_setting
+                    rte_mode = get_setting("saw_rte_mode", "dry_run")
+                except Exception:
+                    rte_mode = "dry_run"
+                pr_url = ""; mode_out = "dry_run"
+                if rte_mode == "github" and git["committed"]:
+                    gh = _push_and_open_pr(workspace, git["branch"], pr_title, pr_body)
+                    if gh.get("ok"):
+                        mode_out = "github"; pr_url = gh.get("url", "")
+                    else:
+                        pr_body += f"\n\n_GitHub PR not opened ({gh.get('note')}); kept as a local branch._"
+                yield _sse({"type": "pr", "role": rte.key, "mode": mode_out, "run_id": run_id,
+                            "branch": git["branch"], "committed": git["committed"], "url": pr_url,
                             "title": pr_title, "body": pr_body, "commit": commit_msg,
                             "stat": git["stat"], "note": git["note"]})
             elif rep is not None:

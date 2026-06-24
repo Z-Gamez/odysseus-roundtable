@@ -99,6 +99,8 @@ def _write_spec(workspace: str, spec_text: str) -> None:
 
 _LOCAL_FILE_HINT = (
     "\n\n# IMPORTANT — how to create/edit files on this model\n"
+    "The `python` and `bash` tools ARE enabled and available to you. NEVER claim a tool is "
+    "blocked or disabled — just call it and do the work.\n"
     "ALWAYS write files with the `python` tool, using a triple-quoted string so newlines and "
     "indentation are preserved exactly, e.g.:\n"
     "with open(r'<absolute path>', 'w', encoding='utf-8') as f:\n"

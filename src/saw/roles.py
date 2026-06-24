@@ -109,7 +109,7 @@ DEVELOPER = RoleSpec(
     saw_model_hint="sonnet",
     temperature=0.3,
     max_rounds=40,
-    allowed_tools=READ_TOOLS | WRITE_TOOLS | EXEC_TOOLS | WEB_TOOLS | FILE_EDITOR | PYTHON,
+    allowed_tools=READ_TOOLS | WRITE_TOOLS | EXEC_TOOLS | WEB_TOOLS,
     system_prompt=_SAFE_PREAMBLE + """
 
 # Your role: Developer

@@ -146,7 +146,9 @@
     ov.addEventListener("click", function (e) { if (e.target === ov) close(); });
     ov.querySelector("#rt-cfg").addEventListener("click", toggleConfig);
     ov.querySelector("#rt-cfg-done").addEventListener("click", closeConfig);
-    els.run.addEventListener("click", startRun);
+    els.run.addEventListener("click", function () {
+      if (els.run.dataset.mode === "stop") stopRun(); else startRun();
+    });
     return els;
   }
 
@@ -243,32 +245,52 @@
         var word = { passed: "✓ SHIPPED", failed: "✗ FAILED", halted: "✋ HALTED", error: "⚠ ERROR" }[ev.status] || ev.status;
         els.log.appendChild(h(`<div class="rt-final" style="color:#fff;background:${color}">${word}${ev.detail ? " — " + esc(ev.detail) : ""}</div>`));
         setStatus(word + (ev.detail ? " — " + ev.detail : ""), color);
-        els.run.disabled = false; els.run.textContent = "▶ Run pipeline";
+        current.done = true;
         loadRecent();
         break;
       }
     }
   }
 
+  function setRunBtn(mode) {
+    if (mode === "stop") {
+      els.run.dataset.mode = "stop"; els.run.textContent = "■ Stop";
+      els.run.disabled = false; els.run.style.background = BAD;
+    } else {
+      els.run.dataset.mode = "run"; els.run.textContent = "▶ Run pipeline";
+      els.run.disabled = false; els.run.style.background = "";
+    }
+  }
+
+  async function stopRun() {
+    if (!current || !current.runId) return;
+    els.run.disabled = true; els.run.textContent = "Stopping…";
+    setStatus("Stopping…", WARN);
+    try { await fetch("/api/roundtable/" + current.runId + "/stop", { method: "POST" }); }
+    catch (e) { /* ignore — the stream will end and finalize the UI */ }
+  }
+
   async function startRun() {
     var title = els.title.value.trim();
     if (!title) { setStatus("A ticket title is required.", BAD); els.title.focus(); return; }
-    els.run.disabled = true; els.run.textContent = "Running…";
-    current = { runId: null, blocks: {}, chips: {}, active: null };
+    current = { runId: null, blocks: {}, chips: {}, active: null, done: false };
     els.pipeline.innerHTML = ""; els.log.innerHTML = "";
     setStatus("Starting…", ACCENT);
+    setRunBtn("stop");
     try {
       var resp = await fetch("/api/roundtable/start", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: title, description: els.desc.value, acceptance: els.ac.value, workspace: els.ws.value.trim() }),
       });
       var data = await resp.json();
-      if (!resp.ok) { setStatus("Error: " + (data.error || resp.status), BAD); els.run.disabled = false; els.run.textContent = "▶ Run pipeline"; return; }
+      if (!resp.ok) { setStatus("Error: " + (data.error || resp.status), BAD); return; }
       current.runId = data.run_id;
       await streamRun(data.run_id);
+      if (!current.done) setStatus("⏹ Stopped.", WARN);   // stream ended without run_done
     } catch (e) {
-      setStatus("Failed to start: " + e, BAD);
-      els.run.disabled = false; els.run.textContent = "▶ Run pipeline";
+      setStatus("Failed: " + e, BAD);
+    } finally {
+      setRunBtn("run");
     }
   }
 

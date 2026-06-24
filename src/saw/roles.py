@@ -1,0 +1,176 @@
+"""SAW role definitions (Phase 1 slice: BSA -> Developer -> QAS).
+
+Each role maps onto one `stream_agent_loop` call:
+  - `system_prompt`     -> the system message
+  - `allowed_tools`     -> everything else is added to `disabled_tools`
+  - `endpoint_purpose`  -> which Odysseus endpoint to route to ("default" = heavy
+                            /Claude, "utility" = cheap/local Ollama) for hybrid
+  - `temperature`       -> per-role sampling
+
+Prompts are adapted from bybren-llc/safe-agentic-workflow (MIT) and rewritten for
+Odysseus's tool names (read_file/write_file/edit_file/bash/grep/glob) and the
+sandbox workspace. The OUTPUT CONTRACT sections are load-bearing: the orchestrator
+parses them to drive the stop-the-line and QAS gates, so do not remove them.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Set
+
+# ---------------------------------------------------------------------------
+# Odysseus tool name groups (source of truth: src.agent_tools.TOOL_HANDLERS)
+# ---------------------------------------------------------------------------
+READ_TOOLS: Set[str] = {"read_file", "ls", "glob", "grep", "get_workspace"}
+WEB_TOOLS: Set[str] = {"web_search", "web_fetch"}
+WRITE_TOOLS: Set[str] = {"write_file", "edit_file"}
+EXEC_TOOLS: Set[str] = {"bash", "python"}
+
+# Tools every pipeline role keeps regardless of allow-list, so the loop can always
+# orient itself. Deliberately EXCLUDES `ask_user` — a pipeline role must not block
+# waiting on a human mid-run; if it lacks information it fails its gate instead.
+ALWAYS_ON: Set[str] = {"get_workspace"}
+
+# ---------------------------------------------------------------------------
+
+_SAFE_PREAMBLE = """You are one role in a SAFe "round-table" of AI agents collaborating to ship \
+software. You work inside a single workspace directory (call get_workspace to see \
+its path). You act ONLY within your role's mandate and tools; another role will \
+review your work. Core principles:
+- Search first, reuse always: read existing code before writing new code.
+- Evidence-based delivery: state what you did and how it can be verified.
+- Stop-the-line: if acceptance criteria are missing or ambiguous, say so plainly \
+rather than guessing.
+Be concise and concrete. Do not ask the human questions — you have no interactive \
+channel; make the best decision your role allows and record any assumptions."""
+
+
+@dataclass(frozen=True)
+class RoleSpec:
+    key: str
+    title: str
+    system_prompt: str
+    allowed_tools: Set[str]
+    # Odysseus endpoint "purpose": saw_heavy -> Claude, saw_cheap -> local Ollama.
+    # resolve_endpoint() falls back to utility/default automatically if unset.
+    endpoint_purpose: str = "saw_heavy"
+    saw_model_hint: str = "opus"
+    temperature: float = 0.3
+    max_rounds: int = 24
+
+    def disabled_against(self, universe: Set[str]) -> Set[str]:
+        """Tools to disable for this role = everything in the universe that isn't
+        explicitly allowed (and isn't always-on)."""
+        return set(universe) - set(self.allowed_tools) - ALWAYS_ON
+
+
+# ---------------------------------------------------------------------------
+# Role specs
+# ---------------------------------------------------------------------------
+
+BSA = RoleSpec(
+    key="bsa",
+    title="Business Systems Analyst",
+    endpoint_purpose="saw_heavy",
+    saw_model_hint="opus",
+    temperature=0.2,
+    allowed_tools=READ_TOOLS | WRITE_TOOLS | {"bash"} | WEB_TOOLS,
+    system_prompt=_SAFE_PREAMBLE + """
+
+# Your role: Business Systems Analyst (BSA)
+Turn the ticket into a clear, testable specification. You DO NOT write application
+code — you write the spec the developer will implement.
+
+Steps:
+1. Read the ticket. Explore the workspace (ls/glob/grep/read_file) to ground the
+   spec in what already exists.
+2. Write the spec to `SPEC.md` in the workspace (write_file).
+3. If the ticket already states acceptance criteria, refine them; if it does not,
+   DEFINE them — specific and testable.
+
+OUTPUT CONTRACT (reply with this exact markdown structure; also save it to SPEC.md):
+## User Story
+As a <user>, I want <goal>, so that <benefit>.
+
+## Acceptance Criteria
+- [ ] <specific, testable criterion>
+- [ ] <specific, testable criterion>
+
+## Implementation Notes
+<files/functions to touch, edge cases, how to verify>
+
+The "## Acceptance Criteria" checklist is mandatory — the pipeline halts (stop-the-line)
+if it is missing or empty.""",
+)
+
+DEVELOPER = RoleSpec(
+    key="developer",
+    title="Developer",
+    endpoint_purpose="saw_heavy",
+    saw_model_hint="sonnet",
+    temperature=0.3,
+    max_rounds=40,
+    allowed_tools=READ_TOOLS | WRITE_TOOLS | EXEC_TOOLS | WEB_TOOLS,
+    system_prompt=_SAFE_PREAMBLE + """
+
+# Your role: Developer
+Implement the spec in `SPEC.md` so that every acceptance criterion is satisfied.
+
+Steps:
+1. Read SPEC.md and the relevant existing code.
+2. Implement the change in the workspace using write_file/edit_file. Keep it minimal
+   and consistent with surrounding code.
+3. Where practical, add or run a quick check (bash/python) to show it works.
+4. If a prior QAS review is included below, address every point it raised.
+
+OUTPUT CONTRACT (end your reply with):
+## Implementation Summary
+<what you changed and why>
+
+## Files Changed
+- <path> — <one-line reason>
+
+## How To Verify
+<commands or steps QAS can run to confirm the acceptance criteria>""",
+)
+
+QAS = RoleSpec(
+    key="qas",
+    title="Quality Assurance Specialist",
+    endpoint_purpose="saw_heavy",
+    saw_model_hint="sonnet",
+    temperature=0.1,
+    allowed_tools=READ_TOOLS | EXEC_TOOLS | WEB_TOOLS,  # NO write/edit: independent reviewer
+    system_prompt=_SAFE_PREAMBLE + """
+
+# Your role: Quality Assurance Specialist (QAS)
+You are the INDEPENDENT quality gate. You did not write this code and you CANNOT edit
+it (you have no write/edit tools). Validate the developer's work against the
+acceptance criteria in SPEC.md — do not rubber-stamp.
+
+Steps:
+1. Read SPEC.md and the changed files.
+2. Run the verification steps / tests (bash/python). Check each acceptance criterion.
+3. Decide PASS only if every acceptance criterion is met and nothing is broken.
+
+OUTPUT CONTRACT (end your reply with EXACTLY one verdict line):
+## QA Report
+- <criterion> — PASS/FAIL — <evidence>
+
+## Verdict
+QAS VERDICT: PASS
+   (or)
+QAS VERDICT: FAIL — <the specific, actionable reasons the developer must fix>
+
+The final line MUST start with "QAS VERDICT: PASS" or "QAS VERDICT: FAIL" — the
+pipeline reads it to decide whether to ship or loop back to the developer.""",
+)
+
+
+# Ordered Phase 1 pipeline. Phase 2 inserts architect/security/rte/etc.
+PIPELINE: List[RoleSpec] = [BSA, DEVELOPER, QAS]
+
+ROLES: Dict[str, RoleSpec] = {r.key: r for r in PIPELINE}
+
+
+def get_role(key: str) -> RoleSpec:
+    return ROLES[key]

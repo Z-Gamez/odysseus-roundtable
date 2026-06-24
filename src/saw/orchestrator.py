@@ -30,7 +30,7 @@ from src.saw.roles import PIPELINE, RoleSpec
 logger = logging.getLogger(__name__)
 
 _DONE = "data: [DONE]\n\n"
-MAX_DEV_QAS_ITERATIONS = 2   # Developer <-> QAS/Security retry budget
+MAX_DEV_QAS_ITERATIONS = 3   # Developer <-> QAS/Security retry budget (more = better for weaker local models)
 MAX_ARCH_REVISIONS = 1       # Architect -> BSA spec-revision budget
 
 
@@ -95,6 +95,37 @@ def _write_spec(workspace: str, spec_text: str) -> None:
             f.write(spec_text)
     except Exception as e:
         logger.warning("[saw] could not persist SPEC.md: %s", e)
+
+
+_LOCAL_FILE_HINT = (
+    "\n\n# IMPORTANT — how to create/edit files on this model\n"
+    "ALWAYS write files with the `python` tool, using a triple-quoted string so newlines and "
+    "indentation are preserved exactly, e.g.:\n"
+    "with open(r'<absolute path>', 'w', encoding='utf-8') as f:\n"
+    "    f.write('''<exact file contents>''')\n"
+    "Do NOT use write_file/edit_file tools, and do NOT use echo/cat/heredoc in bash to write "
+    "files — they corrupt newlines and indentation. Use the python tool for ALL file creation "
+    "and edits, then run the file (or `python -m py_compile <file>`) to verify it before finishing."
+)
+
+
+def _is_local_endpoint(url: str) -> bool:
+    u = (url or "").lower()
+    return "11434" in u or "ollama" in u or "127.0.0.1" in u or "localhost" in u
+
+
+def _augment_for_local(messages: list, url: str) -> list:
+    """Local models reliably drive `python`/`bash` tool calls but malform Odysseus's
+    write_file/edit_file format (→ infinite loops). For local endpoints, instruct the
+    role to do file I/O through the python tool. No-op for cloud (Claude) endpoints."""
+    if not _is_local_endpoint(url):
+        return messages
+    out = [dict(m) for m in messages]
+    for m in out:
+        if m.get("role") == "system":
+            m["content"] = (m.get("content") or "") + _LOCAL_FILE_HINT
+            return out
+    return out
 
 
 def _is_git_repo(ws: str) -> bool:
@@ -398,6 +429,7 @@ async def _run_role(role: RoleSpec, url: str, model: str, headers: dict, message
     """Run one role via the agent loop; yield tagged events; store text in result."""
     from src.agent_loop import stream_agent_loop
 
+    messages = _augment_for_local(messages, url)
     disabled = role.disabled_against(universe)
     sid = f"saw:{run_id}:{role.key}:{iteration}"
     acc: list = []

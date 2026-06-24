@@ -109,8 +109,9 @@ DEVELOPER = RoleSpec(
     saw_model_hint="sonnet",
     temperature=0.3,
     max_rounds=40,
-    allowed_tools=READ_TOOLS | WRITE_TOOLS | EXEC_TOOLS | WEB_TOOLS,
+    allowed_tools=READ_TOOLS | WRITE_TOOLS | EXEC_TOOLS | WEB_TOOLS | FILE_EDITOR | PYTHON,
     system_prompt=_SAFE_PREAMBLE + """
+    allow_code_execution=True,
 
 # Your role: Developer
 Implement the spec in `SPEC.md` so that every acceptance criterion is satisfied.

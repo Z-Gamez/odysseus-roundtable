@@ -235,8 +235,13 @@ def _is_git_repo(ws: str) -> bool:
         return False
 
 
-def _git_branch_commit(ws: str, branch: str, message: str) -> dict:
-    """Create `branch`, stage everything, and commit. Returns a small summary dict."""
+def _commit_run_output(ws: str, run_id: str, message: str, mode: str) -> dict:
+    """Commit the run's output and return a small summary dict.
+
+    dry_run (local): commit on the branch the user is ALREADY on, so the generated files
+    stay put in the workspace folder. No throwaway saw/<run_id> branch that the working
+    tree then leaves — that is what made finished work look 'deleted'.
+    github: commit on a fresh saw/<run_id> branch so it can be pushed and opened as a PR."""
     import subprocess
 
     def g(*args):
@@ -244,7 +249,12 @@ def _git_branch_commit(ws: str, branch: str, message: str) -> dict:
 
     g("config", "user.email", "saw@local")
     g("config", "user.name", "SAW Release Engineer")
-    g("checkout", "-b", branch)
+    if mode == "github":
+        branch = f"saw/{run_id}"
+        g("checkout", "-b", branch)
+    else:
+        cur = g("rev-parse", "--abbrev-ref", "HEAD")
+        branch = (cur.stdout or "").strip() or "main"
     g("add", "-A")
     commit = g("commit", "-m", message or "chore: SAW round-table change")
     committed = commit.returncode == 0
@@ -311,6 +321,12 @@ def merge_run(workspace: str, run_id: str, mode: Optional[str] = None) -> dict:
     def g(*args):
         return subprocess.run(["git", "-C", workspace, *args], capture_output=True, text=True, timeout=120)
 
+    # Local runs now commit straight to the working branch, so there's no saw/<run_id>
+    # branch to merge. If it's absent, the change has already landed — nothing to do.
+    if g("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode != 0:
+        return {"ok": True, "detail": "This run was committed directly to your working branch — nothing to merge."}
+    orig = (g("rev-parse", "--abbrev-ref", "HEAD").stdout or "").strip() or branch
+
     if mode == "github" and _gh_available() and _has_github_remote(workspace):
         m = subprocess.run(["gh", "pr", "merge", branch, "--merge", "--delete-branch"],
                            cwd=workspace, capture_output=True, text=True, timeout=120)
@@ -331,7 +347,8 @@ def merge_run(workspace: str, run_id: str, mode: Optional[str] = None) -> dict:
     if mg.returncode == 0:
         return {"ok": True, "detail": f"Merged {branch} into {base} locally."}
     g("merge", "--abort")
-    return {"ok": False, "detail": f"Merge into {base} hit conflicts; aborted."}
+    g("checkout", orig)   # never strand the user on a branch missing their files
+    return {"ok": False, "detail": f"Merge into {base} hit conflicts; aborted — left you on {orig}."}
 
 
 # ---------------------------------------------------------------------------
@@ -774,12 +791,12 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                 state["idx"] += 1
                 yield _sse({"type": "role_done", "role": rte.key, "iteration": 1, "chars": len(rres["text"])})
                 commit_msg, pr_title, pr_body = _parse_rte(rres["text"], title)
-                git = _git_branch_commit(workspace, f"saw/{run_id}", commit_msg)
                 try:
                     from src.settings import get_setting
                     rte_mode = get_setting("saw_rte_mode", "dry_run")
                 except Exception:
                     rte_mode = "dry_run"
+                git = _commit_run_output(workspace, run_id, commit_msg, rte_mode)
                 pr_url = ""; mode_out = "dry_run"
                 if rte_mode == "github" and git["committed"]:
                     gh = _push_and_open_pr(workspace, git["branch"], pr_title, pr_body)

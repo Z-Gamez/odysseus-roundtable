@@ -91,6 +91,8 @@
     #rt-history h3{margin:0;font-size:15px;}
     #rt-hist-list .rt-run-item{padding:9px 11px;border:1px solid rgba(127,127,127,.18);border-radius:8px;margin-bottom:6px;cursor:pointer;font-size:13px;display:flex;gap:10px;align-items:center;}
     #rt-hist-list .rt-run-item:hover{border-color:${ACCENT};}
+    #rt-hist-list .rt-reuse{flex:0 0 auto;cursor:pointer;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;font:inherit;font-size:11.5px;padding:3px 9px;border-radius:7px;opacity:.85;}
+    #rt-hist-list .rt-reuse:hover{opacity:1;border-color:${ACCENT};color:${ACCENT};}
     .rt-pr{margin:12px 0;border:1px solid ${ACCENT};border-radius:10px;overflow:hidden;}
     .rt-pr-head{padding:8px 12px;font-weight:700;font-size:13px;background:rgba(127,119,221,.12);}
     .rt-pr-mode{font-weight:400;font-size:11px;opacity:.6;border:1px solid rgba(127,127,127,.3);border-radius:6px;padding:1px 6px;margin-left:6px;}
@@ -359,10 +361,28 @@
       els.recent.innerHTML = "";
       (data.runs || []).slice(0, 12).forEach(function (run) {
         var color = run.status === "passed" ? OK : (run.status === "failed" ? BAD : (run.status === "halted" ? WARN : "rgba(127,127,127,.5)"));
-        var item = h(`<div class="rt-run-item" title="${esc(run.run_id)}"><span class="rt-dot" style="background:${color}"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(run.title)}</span><span style="opacity:.5">${esc(run.status)}</span></div>`);
+        var item = h(`<div class="rt-run-item" title="View transcript — ${esc(run.run_id)}"><span class="rt-dot" style="background:${color}"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(run.title)}</span><span style="opacity:.5">${esc(run.status)}</span><button class="rt-reuse" title="Load this ticket into the form to run again">↻ Reuse</button></div>`);
         item.addEventListener("click", function () { closeHistory(); loadRun(run.run_id); });
+        item.querySelector(".rt-reuse").addEventListener("click", function (e) { e.stopPropagation(); reuseRun(run.run_id); });
         els.recent.appendChild(item);
       });
+    } catch (e) { /* ignore */ }
+  }
+
+  // Pull a past run's ticket back into the form so it can be run again (tweaked
+  // or as-is). Does NOT auto-start — the user reviews then hits Run.
+  async function reuseRun(runId) {
+    try {
+      var resp = await fetch("/api/roundtable/" + runId);
+      var run = await resp.json();
+      if (run.error) return;
+      els.title.value = run.title || "";
+      els.desc.value = run.description || "";
+      els.ac.value = run.acceptance || "";
+      if (run.workspace) els.ws.value = run.workspace;
+      closeHistory();
+      setStatus("Loaded ticket from " + runId + " — review and hit ▶ Run pipeline.", ACCENT);
+      els.title.focus();
     } catch (e) { /* ignore */ }
   }
 

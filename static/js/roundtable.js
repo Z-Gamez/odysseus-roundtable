@@ -55,12 +55,14 @@
     .rt-recent .rt-run-item{padding:7px 9px;border:1px solid rgba(127,127,127,.18);border-radius:8px;margin-bottom:5px;cursor:pointer;font-size:12px;display:flex;gap:8px;align-items:center;}
     .rt-recent .rt-run-item:hover{border-color:${ACCENT};}
     .rt-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:rgba(127,127,127,.5);}
-    #rt-pipeline{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid rgba(127,127,127,.2);}
-    .rt-chip{display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid rgba(127,127,127,.3);border-radius:999px;font-size:12px;font-weight:600;opacity:.55;transition:.2s;}
+    #rt-pipeline{display:flex;flex-direction:column;align-items:stretch;gap:5px;}
+    #rt-pipeline:empty{display:none;}
+    #rt-pipeline::before{content:"Pipeline";font-size:11px;text-transform:uppercase;letter-spacing:.6px;opacity:.65;margin-bottom:1px;}
+    .rt-chip{display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid rgba(127,127,127,.3);border-radius:8px;font-size:12px;font-weight:600;opacity:.5;transition:.2s;}
     .rt-chip.run{opacity:1;border-color:${ACCENT};box-shadow:0 0 0 2px rgba(127,119,221,.18);}
     .rt-chip.done{opacity:1;}
     .rt-chip .rt-cmodel{font-weight:400;opacity:.6;font-size:10.5px;}
-    .rt-arrow{opacity:.4;}
+    .rt-arrow{display:none;}
     .rt-gatebadge{font-size:14px;}
     #rt-status{padding:8px 16px;font-size:12px;border-bottom:1px solid rgba(127,127,127,.2);opacity:.85;}
     #rt-log{flex:1;overflow:auto;padding:14px 16px;}
@@ -130,9 +132,9 @@
             <div class="rt-field"><label>Acceptance criteria (optional — BSA defines if blank)</label><textarea id="rt-ac" placeholder="- [ ] ..."></textarea></div>
             <div class="rt-field"><label>Workspace</label><input id="rt-ws" value="C:\\Odysseus\\saw-sandbox"></div>
             <button id="rt-run">▶ Run pipeline</button>
+            <div id="rt-pipeline"></div>
           </div>
           <div id="rt-main">
-            <div id="rt-pipeline"></div>
             <div id="rt-status">Idle. Fill in a ticket and hit Run.</div>
             <div id="rt-log"></div>
           </div>

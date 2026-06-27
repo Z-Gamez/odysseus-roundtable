@@ -48,7 +48,7 @@
       color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:9px;padding:8px 10px;font:inherit;font-size:13px;}
     .rt-field textarea{resize:vertical;min-height:54px;}
     #rt-run{margin-top:2px;width:100%;cursor:pointer;border:none;border-radius:10px;padding:11px;font:inherit;font-weight:700;
-      color:#fff;background:${ACCENT};}
+      color:#fff;background:${ACCENT};display:flex;align-items:center;justify-content:center;gap:6px;text-align:center;}
     #rt-run:disabled{opacity:.5;cursor:default;}
     .rt-recent{margin-top:8px;}
     .rt-recent h4{margin:6px 0;font-size:11px;text-transform:uppercase;letter-spacing:.6px;opacity:.6;}
@@ -83,7 +83,14 @@
     .rt-cfg-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid rgba(127,127,127,.15);}
     .rt-cfg-row .rt-cfg-role{flex:0 0 150px;font-weight:600;font-size:13px;}
     .rt-cfg-row select{flex:1;min-width:0;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:8px;padding:7px 9px;font:inherit;font-size:12.5px;}
-    #rt-cfg-done{cursor:pointer;border:none;border-radius:8px;padding:6px 14px;font:inherit;font-weight:600;color:#fff;background:${ACCENT};}
+    #rt-cfg-done,#rt-hist-done{cursor:pointer;border:none;border-radius:8px;padding:6px 14px;font:inherit;font-weight:600;color:#fff;background:${ACCENT};}
+    #rt-hist{cursor:pointer;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;font:inherit;font-size:12px;padding:4px 10px;border-radius:8px;opacity:.85;margin-right:6px;}
+    #rt-hist:hover{opacity:1;border-color:${ACCENT};}
+    #rt-history{flex:1;min-height:0;overflow:auto;padding:16px 20px;display:none;flex-direction:column;}
+    #rt-history.open{display:flex;}
+    #rt-history h3{margin:0;font-size:15px;}
+    #rt-hist-list .rt-run-item{padding:9px 11px;border:1px solid rgba(127,127,127,.18);border-radius:8px;margin-bottom:6px;cursor:pointer;font-size:13px;display:flex;gap:10px;align-items:center;}
+    #rt-hist-list .rt-run-item:hover{border-color:${ACCENT};}
     .rt-pr{margin:12px 0;border:1px solid ${ACCENT};border-radius:10px;overflow:hidden;}
     .rt-pr-head{padding:8px 12px;font-weight:700;font-size:13px;background:rgba(127,119,221,.12);}
     .rt-pr-mode{font-weight:400;font-size:11px;opacity:.6;border:1px solid rgba(127,127,127,.3);border-radius:6px;padding:1px 6px;margin-left:6px;}
@@ -110,6 +117,7 @@
         <div id="rt-head">
           <span class="rt-title">⊹ <b>Round&nbsp;Table</b> — SAFe mission control</span>
           <span class="rt-spacer"></span>
+          <button id="rt-hist" title="Run history">🕘 History</button>
           <button id="rt-cfg" title="Per-role models">⚙ Models</button>
           <button id="rt-x" title="Close" aria-label="Close">×</button>
         </div>
@@ -120,7 +128,6 @@
             <div class="rt-field"><label>Acceptance criteria (optional — BSA defines if blank)</label><textarea id="rt-ac" placeholder="- [ ] ..."></textarea></div>
             <div class="rt-field"><label>Workspace</label><input id="rt-ws" value="C:\\Odysseus\\saw-sandbox"></div>
             <button id="rt-run">▶ Run pipeline</button>
-            <div class="rt-recent"><h4>Recent runs</h4><div id="rt-recent-list"></div></div>
           </div>
           <div id="rt-main">
             <div id="rt-pipeline"></div>
@@ -136,6 +143,14 @@
           <div class="rt-cfg-sub">Route each role to a local or API model. "Default" uses its tier (saw_heavy = Claude / saw_cheap = local).</div>
           <div id="rt-cfg-list"></div>
         </div>
+        <div id="rt-history">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <h3>Run history</h3><span style="flex:1"></span>
+            <button id="rt-hist-done">Done</button>
+          </div>
+          <div class="rt-cfg-sub">Past pipeline runs — click one to view its transcript.</div>
+          <div id="rt-hist-list"></div>
+        </div>
       </div></div>`);
     document.body.appendChild(ov);
     els = {
@@ -144,14 +159,16 @@
       ac: ov.querySelector("#rt-ac"), ws: ov.querySelector("#rt-ws"),
       run: ov.querySelector("#rt-run"), pipeline: ov.querySelector("#rt-pipeline"),
       status: ov.querySelector("#rt-status"), log: ov.querySelector("#rt-log"),
-      recent: ov.querySelector("#rt-recent-list"),
+      recent: ov.querySelector("#rt-hist-list"),
       body: ov.querySelector("#rt-body"), config: ov.querySelector("#rt-config"),
-      cfgList: ov.querySelector("#rt-cfg-list"),
+      cfgList: ov.querySelector("#rt-cfg-list"), history: ov.querySelector("#rt-history"),
     };
     ov.querySelector("#rt-x").addEventListener("click", close);
     ov.addEventListener("click", function (e) { if (e.target === ov) close(); });
     ov.querySelector("#rt-cfg").addEventListener("click", toggleConfig);
     ov.querySelector("#rt-cfg-done").addEventListener("click", closeConfig);
+    ov.querySelector("#rt-hist").addEventListener("click", toggleHistory);
+    ov.querySelector("#rt-hist-done").addEventListener("click", closeHistory);
     els.run.addEventListener("click", function () {
       if (els.run.dataset.mode === "stop") stopRun(); else startRun();
     });
@@ -161,6 +178,9 @@
   function open() {
     if (!els) build();
     els.overlay.classList.add("rt-open");
+    if (els.body) els.body.style.display = "";
+    if (els.config) els.config.classList.remove("open");
+    if (els.history) els.history.classList.remove("open");
     loadRecent();
   }
   function close() { if (els) els.overlay.classList.remove("rt-open"); }
@@ -340,7 +360,7 @@
       (data.runs || []).slice(0, 12).forEach(function (run) {
         var color = run.status === "passed" ? OK : (run.status === "failed" ? BAD : (run.status === "halted" ? WARN : "rgba(127,127,127,.5)"));
         var item = h(`<div class="rt-run-item" title="${esc(run.run_id)}"><span class="rt-dot" style="background:${color}"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(run.title)}</span><span style="opacity:.5">${esc(run.status)}</span></div>`);
-        item.addEventListener("click", function () { loadRun(run.run_id); });
+        item.addEventListener("click", function () { closeHistory(); loadRun(run.run_id); });
         els.recent.appendChild(item);
       });
     } catch (e) { /* ignore */ }
@@ -370,7 +390,16 @@
   // ---- per-role model config -----------------------------------------------
   function toggleConfig() { if (els.config.classList.contains("open")) closeConfig(); else openConfig(); }
   function closeConfig() { els.config.classList.remove("open"); if (els.body) els.body.style.display = ""; }
+  function toggleHistory() { if (els.history.classList.contains("open")) closeHistory(); else openHistory(); }
+  function closeHistory() { els.history.classList.remove("open"); if (els.body) els.body.style.display = ""; }
+  function openHistory() {
+    closeConfig();
+    els.history.classList.add("open");
+    if (els.body) els.body.style.display = "none";
+    loadRecent();
+  }
   async function openConfig() {
+    closeHistory();
     els.config.classList.add("open");
     if (els.body) els.body.style.display = "none";
     els.cfgList.innerHTML = '<div style="opacity:.6">Loading…</div>';

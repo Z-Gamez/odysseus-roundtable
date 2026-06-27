@@ -163,7 +163,21 @@ def _build_check(workspace: str):
             txt = open(main_dart, encoding="utf-8", errors="replace").read()
             if "runApp" not in txt or len(txt.strip()) < 80:
                 return False, "structure", "lib/main.dart is empty or has no runApp() — the entry point is incomplete."
-            return True, "structure", "lib/main.dart present and non-trivial."
+            # Deeper: run the Dart analyzer to catch real compile errors, not just a
+            # missing entry point. Only ERROR-severity lines fail the gate (warnings/info
+            # are reported but don't block).
+            try:
+                r = subprocess.run("flutter analyze", cwd=workspace, shell=True,
+                                   capture_output=True, text=True, timeout=360)
+                errs = [ln.strip() for ln in (r.stdout + r.stderr).splitlines()
+                        if re.match(r"(?i)^error\b", ln.strip())]
+                if errs:
+                    return False, "flutter analyze", "Analyzer errors — fix these:\n" + "\n".join(errs[:30])
+                return True, "flutter analyze", "lib/main.dart present; flutter analyze found no errors."
+            except subprocess.TimeoutExpired:
+                return True, "structure", "lib/main.dart present (flutter analyze timed out — skipped)."
+            except Exception:
+                return True, "structure", "lib/main.dart present (flutter analyze unavailable)."
         # Python: every file must compile
         pys = [p for p in glob.glob(os.path.join(workspace, "**", "*.py"), recursive=True)
                if "__pycache__" not in p][:60]

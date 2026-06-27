@@ -110,7 +110,8 @@ def setup_roundtable_routes():
             roles.append({"key": r.key, "title": r.title, "purpose": r.endpoint_purpose,
                           "endpoint_id": rc.get("endpoint_id", ""), "model": rc.get("model", "")})
         return {"roles": roles, "endpoints": _available_models(get_current_user(request)),
-                "rte_mode": get_setting("saw_rte_mode", "dry_run")}
+                "rte_mode": get_setting("saw_rte_mode", "dry_run"),
+                "max_iterations": get_setting("saw_max_iterations", 3)}
 
     @router.post("/config")
     async def set_config(request: Request) -> Any:
@@ -125,6 +126,14 @@ def setup_roundtable_routes():
             s["saw_rte_mode"] = mode
             save_settings(s)
             return {"ok": True, "rte_mode": mode}
+        if "max_iterations" in body:   # Dev<->QAS retry budget (1..8)
+            try:
+                n = max(1, min(int(body.get("max_iterations")), 8))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "max_iterations must be a number 1-8"}, status_code=400)
+            s["saw_max_iterations"] = n
+            save_settings(s)
+            return {"ok": True, "max_iterations": n}
         key = (body.get("role") or "").strip()
         if key not in {r.key for r in PIPELINE}:
             return JSONResponse({"error": "unknown role"}, status_code=400)

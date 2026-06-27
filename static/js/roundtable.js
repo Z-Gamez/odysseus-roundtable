@@ -407,6 +407,15 @@
       });
       modeSel.addEventListener("change", function () { saveRteMode(modeSel.value, modeSel); });
       modeRow.appendChild(modeSel); els.cfgList.appendChild(modeRow);
+      var iterRow = h('<div class="rt-cfg-row"><span class="rt-cfg-role">Max attempts</span></div>');
+      var iterInput = document.createElement("input");
+      iterInput.type = "number"; iterInput.min = "1"; iterInput.max = "8";
+      iterInput.value = String(data.max_iterations || 3);
+      iterInput.style.cssText = "width:64px;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:8px;padding:7px 9px;font:inherit;";
+      iterInput.addEventListener("change", function () { saveMaxIterations(iterInput.value, iterInput); });
+      iterRow.appendChild(iterInput);
+      iterRow.appendChild(h('<span style="flex:1;font-size:11px;opacity:.55;margin-left:10px">Dev↔QA retries before the run fails</span>'));
+      els.cfgList.appendChild(iterRow);
     } catch (e) {
       els.cfgList.innerHTML = '<div style="color:' + BAD + '">Failed to load: ' + esc(String(e)) + '</div>';
     }
@@ -440,6 +449,14 @@
     try { await fetch("/api/roundtable/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rte_mode: mode }) }); }
     catch (e) { /* ignore */ }
     sel.disabled = false;
+  }
+
+  async function saveMaxIterations(n, el) {
+    var v = Math.max(1, Math.min(parseInt(n, 10) || 3, 8));
+    el.value = String(v); el.disabled = true;
+    try { await fetch("/api/roundtable/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_iterations: v }) }); }
+    catch (e) { /* ignore */ }
+    el.disabled = false;
   }
 
   // ---- wire the launch buttons (rail icon + expanded-sidebar item) ----------

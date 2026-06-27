@@ -140,6 +140,42 @@ def _list_workspace(workspace: str, limit: int = 80) -> str:
         return "(could not list workspace)"
 
 
+def _max_iterations() -> int:
+    """Configurable Dev<->QAS retry budget (setting 'saw_max_iterations'; default
+    MAX_DEV_QAS_ITERATIONS, clamped 1..8)."""
+    try:
+        from src.settings import get_setting
+        return max(1, min(int(get_setting("saw_max_iterations", MAX_DEV_QAS_ITERATIONS)), 8))
+    except Exception:
+        return MAX_DEV_QAS_ITERATIONS
+
+
+def _build_check(workspace: str):
+    """Cheap, deterministic completeness/compile gate so a weak QAS can't false-pass
+    obviously-broken work. Returns (ok, label, detail) or None when not recognised."""
+    import glob, subprocess, sys as _sys
+    try:
+        # Flutter: the app entry point must actually exist and be real
+        if os.path.exists(os.path.join(workspace, "pubspec.yaml")):
+            main_dart = os.path.join(workspace, "lib", "main.dart")
+            if not os.path.exists(main_dart):
+                return False, "structure", "Required file lib/main.dart is MISSING — the app has no entry point."
+            txt = open(main_dart, encoding="utf-8", errors="replace").read()
+            if "runApp" not in txt or len(txt.strip()) < 80:
+                return False, "structure", "lib/main.dart is empty or has no runApp() — the entry point is incomplete."
+            return True, "structure", "lib/main.dart present and non-trivial."
+        # Python: every file must compile
+        pys = [p for p in glob.glob(os.path.join(workspace, "**", "*.py"), recursive=True)
+               if "__pycache__" not in p][:60]
+        if pys:
+            r = subprocess.run([_sys.executable, "-m", "py_compile", *pys], cwd=workspace,
+                               capture_output=True, text=True, timeout=120)
+            return (r.returncode == 0), "py_compile", ((r.stdout + r.stderr).strip() or "All Python files compile.")[:1500]
+    except Exception as e:
+        logger.warning("[saw] build check error: %s", e)
+    return None
+
+
 _LOCAL_FILE_HINT = (
     "\n\n# IMPORTANT — how to create/edit files on this model\n"
     "The `python` and `bash` tools ARE enabled and available to you. NEVER claim a tool is "
@@ -390,10 +426,12 @@ def _dev_messages(role: RoleSpec, title: str, spec_text: str,
 
 
 def _qas_messages(role: RoleSpec, title: str, spec_text: str, dev_text: str,
-                  workspace: str, file_list: str = "") -> list:
+                  workspace: str, file_list: str = "", build_note: str = "") -> list:
+    build_block = (f"# Automated build/structure check (authoritative)\n{build_note}\n\n" if build_note else "")
     user = (
         f"# Workspace (the code is here — use absolute paths under this dir)\n{workspace}\n\n"
         f"# Files actually on disk right now\n{file_list or '(unknown)'}\n\n"
+        f"{build_block}"
         f"# Ticket\n{title}\n\n# Spec\n{spec_text}\n\n# Developer's report (context only)\n{dev_text}\n\n"
         "The files listed above DO exist — READ them yourself; never claim files are missing "
         "without checking, and do not just trust the report. Read each changed file, run the "
@@ -581,11 +619,12 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                 yield _sse({"type": "gate", "gate": "design", "status": "pass",
                             "detail": "Architect review complete."})
 
-        # ---------- Implementation loop: Developer -> QAS -> Security ----------
+        # ---------- Implementation loop: Developer -> build gate -> QAS -> Security ----------
         shipped = False
         feedback: Optional[str] = None
         dev_text = ""
-        for iteration in range(1, MAX_DEV_QAS_ITERATIONS + 1):
+        max_iter = _max_iterations()
+        for iteration in range(1, max_iter + 1):
             # Developer
             dev = roles.DEVELOPER
             dep = _resolve(dev, owner)
@@ -606,6 +645,20 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
             state["idx"] += 1
             yield _sse({"type": "role_done", "role": dev.key, "iteration": iteration, "chars": len(dev_text)})
 
+            # Deterministic build/structure gate — a weak QAS can't false-pass broken work.
+            build_note = ""
+            bchk = await asyncio.to_thread(_build_check, workspace)
+            if bchk is not None:
+                bok, blabel, bdetail = bchk
+                build_note = "[%s] %s\n%s" % (blabel, "PASSED" if bok else "FAILED", bdetail)
+                first = bdetail.splitlines()[0] if bdetail else ""
+                yield _sse({"type": "gate", "gate": "build", "status": "pass" if bok else "fail",
+                            "detail": ("%s: passed" % blabel) if bok else ("%s FAILED — %s" % (blabel, first))})
+                if bok is False:
+                    feedback = ("The automated build/structure check FAILED — fix this before "
+                                "anything else:\n" + bdetail)
+                    continue
+
             # QAS gate
             qas = roles.QAS
             qep = _resolve(qas, owner)
@@ -618,7 +671,7 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                         "model": qmodel, "purpose": qas.endpoint_purpose, "iteration": iteration})
             qres: Dict[str, str] = {"text": ""}
             async for ev in _run_role(qas, qurl, qmodel, qheaders,
-                                      _qas_messages(qas, title, bsa_text, dev_text, workspace, _list_workspace(workspace)),
+                                      _qas_messages(qas, title, bsa_text, dev_text, workspace, _list_workspace(workspace), build_note),
                                       workspace, owner, run_id, universe, iteration, qres):
                 yield ev
             qas_text = qres["text"]
@@ -729,7 +782,7 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
         status = "passed" if shipped else "failed"
         yield _sse({"type": "run_done", "status": status,
                     "detail": ("Shipped." if shipped
-                               else f"Failed after {MAX_DEV_QAS_ITERATIONS} implementation iterations.")})
+                               else f"Failed after {max_iter} implementation iterations.")})
         store.set_run_status(run_id, status)
         yield _DONE
 

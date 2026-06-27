@@ -180,6 +180,10 @@
     els.run.addEventListener("click", function () {
       if (els.run.dataset.mode === "stop") stopRun(); else startRun();
     });
+    // Remember the workspace the user types so new tickets reuse it instead of the default.
+    els.ws.addEventListener("change", function () {
+      try { localStorage.setItem("saw_ws", els.ws.value.trim()); } catch (e) { /* ignore */ }
+    });
     return els;
   }
 
@@ -189,6 +193,7 @@
     if (els.body) els.body.style.display = "";
     if (els.config) els.config.classList.remove("open");
     if (els.history) els.history.classList.remove("open");
+    try { var w = localStorage.getItem("saw_ws"); if (w) els.ws.value = w; } catch (e) { /* ignore */ }
     loadRecent();
   }
   function close() { if (els) els.overlay.classList.remove("rt-open"); }
@@ -321,6 +326,7 @@
     els.pipeline.innerHTML = ""; els.log.innerHTML = "";
     setStatus(payload.parent_run_id ? "Starting follow-up…" : "Starting…", ACCENT);
     setRunBtn("stop");
+    try { if (payload.workspace) localStorage.setItem("saw_ws", payload.workspace); } catch (e) { /* ignore */ }
     try {
       var resp = await fetch("/api/roundtable/start", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -490,13 +496,17 @@
       modeSel.addEventListener("change", function () { saveRteMode(modeSel.value, modeSel); });
       modeRow.appendChild(modeSel); els.cfgList.appendChild(modeRow);
       var iterRow = h('<div class="rt-cfg-row"><span class="rt-cfg-role">Max attempts</span></div>');
-      var iterInput = document.createElement("input");
-      iterInput.type = "number"; iterInput.min = "1"; iterInput.max = "8";
-      iterInput.value = String(data.max_iterations || 3);
-      iterInput.style.cssText = "width:64px;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:8px;padding:7px 9px;font:inherit;";
-      iterInput.addEventListener("change", function () { saveMaxIterations(iterInput.value, iterInput); });
-      iterRow.appendChild(iterInput);
-      iterRow.appendChild(h('<span style="flex:1;font-size:11px;opacity:.55;margin-left:10px">Dev↔QA retries before the run fails</span>'));
+      var iterVal = Math.max(1, Math.min(parseInt(data.max_iterations, 10) || 3, 10));
+      var iterSlider = document.createElement("input");
+      iterSlider.type = "range"; iterSlider.min = "1"; iterSlider.max = "10"; iterSlider.step = "1";
+      iterSlider.value = String(iterVal);
+      iterSlider.style.cssText = "flex:1;min-width:0;accent-color:" + ACCENT + ";cursor:pointer;";
+      var iterNum = h('<span style="flex:0 0 auto;width:20px;text-align:center;font-weight:700;font-size:13px">' + iterVal + '</span>');
+      iterSlider.addEventListener("input", function () { iterNum.textContent = iterSlider.value; });
+      iterSlider.addEventListener("change", function () { saveMaxIterations(iterSlider.value, iterSlider); iterNum.textContent = iterSlider.value; });
+      iterRow.appendChild(iterSlider);
+      iterRow.appendChild(iterNum);
+      iterRow.appendChild(h('<span style="flex:0 0 auto;font-size:11px;opacity:.55;margin-left:10px">Dev↔QA retries</span>'));
       els.cfgList.appendChild(iterRow);
     } catch (e) {
       els.cfgList.innerHTML = '<div style="color:' + BAD + '">Failed to load: ' + esc(String(e)) + '</div>';
@@ -534,7 +544,7 @@
   }
 
   async function saveMaxIterations(n, el) {
-    var v = Math.max(1, Math.min(parseInt(n, 10) || 3, 8));
+    var v = Math.max(1, Math.min(parseInt(n, 10) || 3, 10));
     el.value = String(v); el.disabled = true;
     try { await fetch("/api/roundtable/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_iterations: v }) }); }
     catch (e) { /* ignore */ }

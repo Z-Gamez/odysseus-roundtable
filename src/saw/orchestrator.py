@@ -152,10 +152,10 @@ def _list_workspace(workspace: str, limit: int = 80) -> str:
 
 def _max_iterations() -> int:
     """Configurable Dev<->QAS retry budget (setting 'saw_max_iterations'; default
-    MAX_DEV_QAS_ITERATIONS, clamped 1..8)."""
+    MAX_DEV_QAS_ITERATIONS, clamped 1..10)."""
     try:
         from src.settings import get_setting
-        return max(1, min(int(get_setting("saw_max_iterations", MAX_DEV_QAS_ITERATIONS)), 8))
+        return max(1, min(int(get_setting("saw_max_iterations", MAX_DEV_QAS_ITERATIONS)), 10))
     except Exception:
         return MAX_DEV_QAS_ITERATIONS
 

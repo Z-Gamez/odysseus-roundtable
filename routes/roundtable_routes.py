@@ -127,11 +127,11 @@ def setup_roundtable_routes():
             s["saw_rte_mode"] = mode
             save_settings(s)
             return {"ok": True, "rte_mode": mode}
-        if "max_iterations" in body:   # Dev<->QAS retry budget (1..8)
+        if "max_iterations" in body:   # Dev<->QAS retry budget (1..10)
             try:
-                n = max(1, min(int(body.get("max_iterations")), 8))
+                n = max(1, min(int(body.get("max_iterations")), 10))
             except (TypeError, ValueError):
-                return JSONResponse({"error": "max_iterations must be a number 1-8"}, status_code=400)
+                return JSONResponse({"error": "max_iterations must be a number 1-10"}, status_code=400)
             s["saw_max_iterations"] = n
             save_settings(s)
             return {"ok": True, "max_iterations": n}

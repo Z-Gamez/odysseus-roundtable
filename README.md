@@ -23,6 +23,26 @@
 
 ---
 
+## 🤝 Odysseus × SAW — the Round Table
+
+> **This is a community fork that combines [Odysseus](https://github.com/pewdiepie-archdaemon/odysseus) with the [SAFe Agentic Workflow (SAW)](https://github.com/bybren-llc/safe-agentic-workflow), built with [Claude](https://claude.com/claude-code), to give Odysseus an easy-to-understand, end-to-end AI agentic workflow — the _Round Table_.**
+
+Instead of one chatbot guessing at an entire task, a small **team of role-specialized AI agents** passes the work down a real assembly line — **Analyst → Architect → Developer → QA → Security → Tech Writer → Release** — each reviewing the previous one's output behind quality gates. You write one ticket; the team plans, builds, tests, and documents working code right in your workspace.
+
+### What it brings to Odysseus
+
+- 🧩 **One ticket → working software** — describe what you want and seven agents take it from spec to shipped code, no step-by-step prompting.
+- 🚦 **Quality gates, not vibes** — a deterministic build/structure check (a Flutter app must really have a runnable `lib/main.dart`; Python must compile; `flutter analyze` must be clean) plus independent QA and Security reviews catch broken work *before* it can pass.
+- 🎚️ **Per-role model routing** — run the Developer on a strong API model and the rest on free local Ollama models, or any mix, from the ⚙ Models panel — cost and privacy on your terms.
+- 🔁 **Continue the discussion** — after a run, just ask for changes; the team remembers what it built and iterates on top instead of starting over.
+- 🕘 **History & reuse** — every run is saved; replay any ticket or load it back into the form.
+- 🔐 **Least-privilege agents** — non-coding roles can't execute commands, so a reviewer can't edit the code it's grading and a writer can't launch your app.
+- 🤝 **Human-in-the-loop releases** — work commits to your branch locally, or opens a real GitHub PR — your call.
+
+Open it from the **⊹ Round Table** button in the left rail. Full walkthrough in the **[Round Table guide](docs/round-table.md)**.
+
+---
+
 ## Quick Start
 
 > `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/pewdiepie-archdaemon/odysseus/tree/main) if you want the more curated branch.

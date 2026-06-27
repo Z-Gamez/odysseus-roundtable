@@ -233,15 +233,24 @@ TECH_WRITER = RoleSpec(
     endpoint_purpose="saw_heavy",  # default Claude; switch per-role in the UI (local/API)
     saw_model_hint="haiku",
     temperature=0.3,
-    allowed_tools=READ_TOOLS | WRITE_TOOLS | {"bash"},
+    # Docs only: read code + write docs. Deliberately NO bash/python — a writer
+    # must never run scripts, tests, builds, or launch the app/IDE (doing so has
+    # crashed the user's Android Studio). It also must not change code logic.
+    allowed_tools=READ_TOOLS | WRITE_TOOLS,
     system_prompt=_SAFE_PREAMBLE + """
 
 # Your role: Technical Writer
 The code has shipped and passed QA + security. Document it briefly so the next person
-understands it.
+understands it. You ONLY read code and write documentation.
+
+You have NO execution tools and must not try to run anything. Do NOT run commands,
+shell/PowerShell (.ps1) or bash scripts, tests, builds, gradle/flutter, or launch the
+app, emulator, or IDE. Do NOT modify code logic — only add or update documentation
+text (a README section, docstrings, or comments). Another role already verified the
+code; your job is purely to describe it.
 
 Steps:
-1. Read the changed files and SPEC.md.
+1. Read the changed files and SPEC.md (read_file/ls/glob/grep).
 2. Add or update concise docs - a short README section or docstrings - describing what
    was built and how to run/verify it. Keep it accurate and minimal; do not change code.
 

@@ -97,6 +97,16 @@ def _write_spec(workspace: str, spec_text: str) -> None:
         logger.warning("[saw] could not persist SPEC.md: %s", e)
 
 
+def _read_spec(workspace: str) -> str:
+    """Read the existing SPEC.md (the prior round's spec) so a follow-up run can build on
+    what already exists instead of starting over."""
+    try:
+        with open(os.path.join(workspace, "SPEC.md"), encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
 def _extract_spec(text: str) -> str:
     """Pull the clean spec (User Story / Acceptance Criteria / Implementation Notes) out of
     the BSA's full output, dropping the tool-call fences and narration the model emits — so
@@ -411,7 +421,7 @@ def _parse_rte(text: str, fallback_title: str) -> Tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 
 def _bsa_messages(role: RoleSpec, title: str, description: str, acceptance: str,
-                  workspace: str, arch_feedback: Optional[str] = None) -> list:
+                  workspace: str, arch_feedback: Optional[str] = None, prior_spec: str = "") -> list:
     ac_block = (
         ("ACCEPTANCE CRITERIA PROVIDED BY THE USER — these are REQUIRED and AUTHORITATIVE. "
          "Reproduce them EXACTLY under your '## Acceptance Criteria' heading; you may ADD "
@@ -423,6 +433,16 @@ def _bsa_messages(role: RoleSpec, title: str, description: str, acceptance: str,
         f"# Workspace\n{workspace}\n\n"
         f"# Ticket\nTitle: {title}\n\nDescription:\n{description or '(none)'}\n\n{ac_block}"
     )
+    if prior_spec.strip():
+        user = (
+            "# FOLLOW-UP — change request on existing, working software\n"
+            "A previous round already shipped a working implementation; ALL of its files are still in "
+            "the workspace and its spec is shown below. Do NOT start over. Explore the existing files "
+            "(ls/glob/grep/read_file), then re-emit the FULL spec UPDATED to fold in only the user's "
+            "requested change while preserving everything that already works. In the ticket below, the "
+            "Description is the user's requested change — not a brand-new project.\n\n"
+            "## Existing SPEC.md (what already exists)\n" + prior_spec.strip() + "\n\n---\n\n" + user
+        )
     if arch_feedback:
         user += ("\n\n# System Architect requested revisions (address every point, "
                  "then re-emit the full spec)\n" + arch_feedback)
@@ -442,13 +462,19 @@ def _arch_messages(role: RoleSpec, title: str, spec_text: str, workspace: str) -
 
 def _dev_messages(role: RoleSpec, title: str, spec_text: str,
                   review_feedback: Optional[str], workspace: str,
-                  arch_notes: Optional[str] = None) -> list:
+                  arch_notes: Optional[str] = None, continuation: bool = False) -> list:
     user = (
         f"# Workspace (build here — use absolute paths under this dir)\n{workspace}\n\n"
         f"# Ticket\n{title}\n\n# Spec (from BSA)\n{spec_text}\n\n"
         "SPEC.md has been saved in the workspace. Read it, then IMPLEMENT the code with "
         "write_file/edit_file. Do NOT finish until the required files actually exist on disk."
     )
+    if continuation:
+        user += ("\n\n# This is a CHANGE on existing, working code\n"
+                 "The workspace ALREADY contains a complete working implementation from a prior round. "
+                 "Read the existing files FIRST, then MODIFY them in place to satisfy the updated spec. "
+                 "Apply only what the change requires; do NOT rewrite or delete working code the change "
+                 "doesn't touch.")
     if arch_notes and arch_notes.strip():
         user += "\n\n# System Architect's design review (apply this guidance)\n" + arch_notes
     if review_feedback:
@@ -582,9 +608,12 @@ async def _run_role(role: RoleSpec, url: str, model: str, headers: dict, message
 # ---------------------------------------------------------------------------
 
 async def run_pipeline(run_id: str, title: str, description: str, acceptance: str,
-                       workspace: str, owner: str) -> AsyncGenerator[str, None]:
+                       workspace: str, owner: str, parent_run_id: str = "") -> AsyncGenerator[str, None]:
     store.create_run(run_id, title, description, acceptance, workspace, owner)
-    yield _sse({"type": "run_start", "run_id": run_id, "title": title,
+    # Follow-up run: the prior round's SPEC.md and files are still in the workspace and
+    # serve as the team's memory of what already exists, so we build on it instead of anew.
+    prior_spec = _read_spec(workspace) if parent_run_id else ""
+    yield _sse({"type": "run_start", "run_id": run_id, "title": title, "parent_run_id": parent_run_id,
                 "pipeline": [r.key for r in PIPELINE], "workspace": workspace})
     state = {"idx": 0}
     universe = _tool_universe()
@@ -603,7 +632,8 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                     "model": model, "purpose": bsa.endpoint_purpose, "iteration": 1})
         res: Dict[str, str] = {"text": ""}
         async for ev in _run_role(bsa, url, model, headers,
-                                  _bsa_messages(bsa, title, description, acceptance, workspace),
+                                  _bsa_messages(bsa, title, description, acceptance, workspace,
+                                                prior_spec=prior_spec),
                                   workspace, owner, run_id, universe, 1, res):
             yield ev
         bsa_text = res["text"]
@@ -670,7 +700,8 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                         "model": dmodel, "purpose": dev.endpoint_purpose, "iteration": iteration})
             dres: Dict[str, str] = {"text": ""}
             async for ev in _run_role(dev, durl, dmodel, dheaders,
-                                      _dev_messages(dev, title, bsa_text, feedback, workspace, arch_text),
+                                      _dev_messages(dev, title, bsa_text, feedback, workspace, arch_text,
+                                                    continuation=bool(parent_run_id)),
                                       workspace, owner, run_id, universe, iteration, dres):
                 yield ev
             dev_text = dres["text"]

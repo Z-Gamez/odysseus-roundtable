@@ -63,10 +63,11 @@ def setup_roundtable_routes():
         description = (body.get("description") or "").strip()
         acceptance = (body.get("acceptance") or "").strip()
         workspace = (body.get("workspace") or "").strip() or DEFAULT_WORKSPACE
+        parent_run_id = (body.get("parent_run_id") or "").strip()
 
         run_id = "rt_" + uuid.uuid4().hex[:12]
         gen = orchestrator.run_pipeline(
-            run_id, title, description, acceptance, workspace, user or ""
+            run_id, title, description, acceptance, workspace, user or "", parent_run_id
         )
         # Detached: runs to completion server-side even if nobody is subscribed.
         agent_runs.start(run_id, gen)

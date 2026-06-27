@@ -76,6 +76,10 @@
     .rt-gate.fail{color:${BAD};border-color:${BAD};background:rgba(216,90,48,.08);}
     .rt-gate.halt{color:${WARN};border-color:${WARN};background:rgba(201,162,39,.10);}
     .rt-final{margin:8px 0 0;padding:11px 13px;border-radius:10px;font-weight:700;text-align:center;}
+    .rt-continue{margin:12px 0 4px;border:1px solid ${ACCENT};border-radius:10px;padding:12px;background:rgba(127,119,221,.06);}
+    .rt-continue .rt-continue-h{font-size:12.5px;font-weight:600;margin-bottom:8px;opacity:.9;}
+    .rt-continue textarea{width:100%;box-sizing:border-box;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:9px;padding:8px 10px;font:inherit;font-size:13px;min-height:54px;resize:vertical;}
+    .rt-continue button{margin-top:8px;cursor:pointer;border:none;border-radius:9px;padding:9px 14px;font:inherit;font-weight:700;color:#fff;background:${ACCENT};}
     #rt-cfg{cursor:pointer;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;font:inherit;font-size:12px;padding:4px 10px;border-radius:8px;opacity:.85;}
     #rt-cfg:hover{opacity:1;border-color:${ACCENT};}
     #rt-config{flex:1;min-height:0;overflow:auto;padding:16px 20px;display:none;flex-direction:column;}
@@ -287,6 +291,7 @@
         setStatus(word + (ev.detail ? " — " + ev.detail : ""), color);
         current.done = true;
         loadRecent();
+        if (ev.status === "passed") showContinue(current.runId);
         break;
       }
     }
@@ -310,17 +315,16 @@
     catch (e) { /* ignore — the stream will end and finalize the UI */ }
   }
 
-  async function startRun() {
-    var title = els.title.value.trim();
-    if (!title) { setStatus("A ticket title is required.", BAD); els.title.focus(); return; }
+  // Shared launch path for both a fresh run and a follow-up ("continue the discussion").
+  async function launchRun(payload) {
     current = { runId: null, blocks: {}, chips: {}, active: null, done: false };
     els.pipeline.innerHTML = ""; els.log.innerHTML = "";
-    setStatus("Starting…", ACCENT);
+    setStatus(payload.parent_run_id ? "Starting follow-up…" : "Starting…", ACCENT);
     setRunBtn("stop");
     try {
       var resp = await fetch("/api/roundtable/start", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title, description: els.desc.value, acceptance: els.ac.value, workspace: els.ws.value.trim() }),
+        body: JSON.stringify(payload),
       });
       var data = await resp.json();
       if (!resp.ok) { setStatus("Error: " + (data.error || resp.status), BAD); return; }
@@ -332,6 +336,33 @@
     } finally {
       setRunBtn("run");
     }
+  }
+
+  async function startRun() {
+    var title = els.title.value.trim();
+    if (!title) { setStatus("A ticket title is required.", BAD); els.title.focus(); return; }
+    await launchRun({ title: title, description: els.desc.value,
+                      acceptance: els.ac.value, workspace: els.ws.value.trim() });
+  }
+
+  // Follow-up: keep the workspace + title, send the user's requested change, and link the
+  // parent run so the team builds on what already exists (reads prior SPEC.md + files).
+  async function continueRun(parentId, changes) {
+    await launchRun({ title: els.title.value.trim() || "Follow-up", description: changes,
+                      acceptance: "", workspace: els.ws.value.trim(), parent_run_id: parentId });
+  }
+
+  // After a successful run, offer a box to request changes and re-run on top of the result.
+  function showContinue(parentId) {
+    var card = h(`<div class="rt-continue"><div class="rt-continue-h">↻ Continue the discussion — the team keeps everything it just built and applies your changes</div><textarea class="rt-change" placeholder="Describe the changes you want, e.g. 'make the header blue and add a Friends counter'"></textarea><button class="rt-change-go">Send changes to the team</button></div>`);
+    els.log.appendChild(card);
+    var box = card.querySelector(".rt-change");
+    card.querySelector(".rt-change-go").addEventListener("click", function () {
+      var changes = box.value.trim();
+      if (!changes) { box.focus(); return; }
+      continueRun(parentId, changes);
+    });
+    box.focus();
   }
 
   async function streamRun(runId) {

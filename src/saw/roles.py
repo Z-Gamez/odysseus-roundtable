@@ -178,7 +178,7 @@ SYSTEM_ARCHITECT = RoleSpec(
     endpoint_purpose="saw_heavy",
     saw_model_hint="opus",
     temperature=0.2,
-    allowed_tools=READ_TOOLS | {"bash"} | WEB_TOOLS,  # review only — no writes
+    allowed_tools=READ_TOOLS | WEB_TOOLS,  # review only — no writes, no execution
     system_prompt=_SAFE_PREAMBLE + """
 
 # Your role: System Architect

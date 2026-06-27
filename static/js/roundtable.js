@@ -134,7 +134,7 @@
             <div class="rt-field"><label>Ticket title</label><input id="rt-title" placeholder="e.g. Add a hello() function with a test"></div>
             <div class="rt-field"><label>Description</label><textarea id="rt-desc" placeholder="What needs doing and why"></textarea></div>
             <div class="rt-field"><label>Acceptance criteria (optional — BSA defines if blank)</label><textarea id="rt-ac" placeholder="- [ ] ..."></textarea></div>
-            <div class="rt-field"><label>Workspace</label><input id="rt-ws" value="C:\\Odysseus\\saw-sandbox"></div>
+            <div class="rt-field"><label>Workspace</label><input id="rt-ws" placeholder="Path to your project folder (blank = server default)"></div>
             <button id="rt-run">▶ Run pipeline</button>
             <div id="rt-pipeline"></div>
           </div>
@@ -267,9 +267,15 @@
       }
       case "pr": {
         var urlRow = ev.url ? ('<div class="rt-pr-row"><b>PR</b> <a href="' + esc(ev.url) + '" target="_blank" rel="noopener">' + esc(ev.url) + '</a></div>') : '';
+        var isDry = ev.mode === "dry_run";
+        // Local mode commits straight to your branch — there's nothing to "approve & merge".
+        var actions = isDry
+          ? '<div class="rt-pr-row" style="opacity:.75">Committed to <code>' + esc(ev.branch || "") + '</code> in your workspace — the files are right there. Switch RTE to <b>GitHub</b> mode (⚙ Models) to open a real PR instead.</div>'
+          : '<div class="rt-pr-actions"><button class="rt-pr-approve">✓ Approve &amp; Merge</button><button class="rt-pr-reject">Reject</button><span class="rt-pr-result"></span></div>';
         var card = h(
           '<div class="rt-pr">' +
-            '<div class="rt-pr-head">📦 Pull Request <span class="rt-pr-mode">' + esc(ev.mode === "dry_run" ? "dry-run" : (ev.mode || "")) + '</span></div>' +
+            '<div class="rt-pr-head">' + (isDry ? '✅ Committed to your branch' : '📦 Pull Request') +
+              ' <span class="rt-pr-mode">' + esc(isDry ? "local" : (ev.mode || "")) + '</span></div>' +
             '<div class="rt-pr-row"><b>branch</b> <code>' + esc(ev.branch || "") + '</code>' +
               (ev.committed ? ' <span style="color:' + OK + '">✓ committed</span>' : ' <span style="color:' + BAD + '">not committed</span>') + '</div>' +
             urlRow +
@@ -277,14 +283,14 @@
             '<div class="rt-pr-title">' + esc(ev.title || "") + '</div>' +
             '<div class="rt-pr-body">' + esc(ev.body || "") + '</div>' +
             (ev.stat ? '<pre class="rt-pr-stat">' + esc(ev.stat) + '</pre>' : '') +
-            '<div class="rt-pr-actions"><button class="rt-pr-approve">✓ Approve &amp; Merge</button><button class="rt-pr-reject">Reject</button><span class="rt-pr-result"></span></div>' +
+            actions +
           '</div>');
         els.log.appendChild(card);
         (function () {
           var runId = ev.run_id || (current && current.runId);
           var approve = card.querySelector(".rt-pr-approve"), reject = card.querySelector(".rt-pr-reject"), result = card.querySelector(".rt-pr-result");
-          approve.addEventListener("click", function () { mergeRun(runId, approve, reject, result); });
-          reject.addEventListener("click", function () { approve.disabled = true; reject.disabled = true; result.textContent = " ✗ rejected — branch kept, not merged"; result.style.color = BAD; });
+          if (approve) approve.addEventListener("click", function () { mergeRun(runId, approve, reject, result); });
+          if (reject) reject.addEventListener("click", function () { approve.disabled = true; reject.disabled = true; result.textContent = " ✗ rejected — branch kept, not merged"; result.style.color = BAD; });
         })();
         els.log.scrollTop = els.log.scrollHeight;
         break;

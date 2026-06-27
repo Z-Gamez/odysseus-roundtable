@@ -47,6 +47,7 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 - **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
 - **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
 - **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
+- **Round Table** — a SAFe multi-agent team (BSA → Architect → Developer → QA → Security → Tech Writer → RTE) that ships a ticket through real quality gates, with per-role model routing, a deterministic build gate, follow-up iterations, and human-in-the-loop merge. See [docs/round-table.md](docs/round-table.md).
 - **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
 
 ## Demo

@@ -18,7 +18,8 @@ from src.saw.roles import PIPELINE
 
 # Phase-1 default workspace (the Developer role writes here). Overridable per
 # request from the UI, or globally via SAW_WORKSPACE.
-DEFAULT_WORKSPACE = os.environ.get("SAW_WORKSPACE", r"C:\Odysseus\saw-sandbox")
+DEFAULT_WORKSPACE = os.environ.get("SAW_WORKSPACE") or os.path.join(
+    os.path.expanduser("~"), "saw-sandbox")
 
 
 def _available_models(owner):

@@ -73,7 +73,10 @@ BSA = RoleSpec(
     endpoint_purpose="saw_heavy",
     saw_model_hint="opus",
     temperature=0.2,
-    allowed_tools=READ_TOOLS | WRITE_TOOLS | {"bash"} | WEB_TOOLS,
+    # Analysis only: read the workspace and produce the spec as TEXT. No write/bash/
+    # python — the orchestrator saves the BSA's reply to SPEC.md itself, so handing the
+    # BSA file tools just made weak local models loop and dump commands into SPEC.md.
+    allowed_tools=READ_TOOLS | WEB_TOOLS,
     system_prompt=_SAFE_PREAMBLE + """
 
 # Your role: Business Systems Analyst (BSA)
@@ -83,11 +86,14 @@ code — you write the spec the developer will implement.
 Steps:
 1. Read the ticket. Explore the workspace (ls/glob/grep/read_file) to ground the
    spec in what already exists.
-2. Write the spec to `SPEC.md` in the workspace (write_file).
-3. If the ticket already states acceptance criteria, refine them; if it does not,
+2. If the ticket already states acceptance criteria, refine them; if it does not,
    DEFINE them — specific and testable.
 
-OUTPUT CONTRACT (reply with this exact markdown structure; also save it to SPEC.md):
+You do NOT write any files and you have no tools to do so. Do NOT try to create SPEC.md,
+run python/bash, or echo text into a file — just produce the spec as your reply below.
+The system automatically saves your reply to SPEC.md for the next role.
+
+OUTPUT CONTRACT (reply with EXACTLY this markdown structure):
 ## User Story
 As a <user>, I want <goal>, so that <benefit>.
 

@@ -209,11 +209,13 @@ def _is_local_endpoint(url: str) -> bool:
     return "11434" in u or "ollama" in u or "127.0.0.1" in u or "localhost" in u
 
 
-def _augment_for_local(messages: list, url: str) -> list:
+def _augment_for_local(messages: list, url: str, has_python: bool) -> list:
     """Local models reliably drive `python`/`bash` tool calls but malform Odysseus's
-    write_file/edit_file format (→ infinite loops). For local endpoints, instruct the
-    role to do file I/O through the python tool. No-op for cloud (Claude) endpoints."""
-    if not _is_local_endpoint(url):
+    write_file/edit_file format (→ infinite loops). For local endpoints, tell roles that
+    HAVE the python tool to do file I/O through it. No-op for cloud (Claude) endpoints and
+    for roles WITHOUT python (e.g. BSA/Architect/Tech Writer) — ordering them to 'use the
+    python tool' when they don't have it just makes them loop and dump commands into files."""
+    if not has_python or not _is_local_endpoint(url):
         return messages
     out = [dict(m) for m in messages]
     for m in out:
@@ -531,7 +533,7 @@ async def _run_role(role: RoleSpec, url: str, model: str, headers: dict, message
     """Run one role via the agent loop; yield tagged events; store text in result."""
     from src.agent_loop import stream_agent_loop
 
-    messages = _augment_for_local(messages, url)
+    messages = _augment_for_local(messages, url, "python" in role.allowed_tools)
     disabled = role.disabled_against(universe)
     sid = f"saw:{run_id}:{role.key}:{iteration}"
     acc: list = []

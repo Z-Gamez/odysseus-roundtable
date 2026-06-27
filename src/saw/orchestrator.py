@@ -97,6 +97,49 @@ def _write_spec(workspace: str, spec_text: str) -> None:
         logger.warning("[saw] could not persist SPEC.md: %s", e)
 
 
+def _extract_spec(text: str) -> str:
+    """Pull the clean spec (User Story / Acceptance Criteria / Implementation Notes) out of
+    the BSA's full output, dropping the tool-call fences and narration the model emits — so
+    SPEC.md is a clean source of truth instead of the model's raw transcript."""
+    if not text:
+        return text or ""
+    m = re.search(r"(?im)^#{1,4}\s*(user story|acceptance criteria|spec\b)", text)
+    spec = text[m.start():] if m else text
+    spec = re.sub(r"```.*?```", "", spec, flags=re.S)   # strip fenced tool calls / code dumps
+    spec = re.sub(r"\n{3,}", "\n\n", spec).strip()
+    return spec
+
+
+def _build_spec_md(bsa_text: str, title: str, acceptance: str) -> str:
+    """Clean spec for SPEC.md. If the user supplied acceptance criteria, pin them at the top
+    verbatim and mark them authoritative so the BSA can't silently replace them."""
+    spec = _extract_spec(bsa_text)
+    if acceptance and acceptance.strip():
+        spec = (f"# {title}\n\n"
+                "## Acceptance Criteria (from the ticket — AUTHORITATIVE, do not change)\n"
+                f"{acceptance.strip()}\n\n---\n\n{spec}")
+    elif not spec.lstrip().startswith("#"):
+        spec = f"# {title}\n\n{spec}"
+    return spec
+
+
+def _list_workspace(workspace: str, limit: int = 80) -> str:
+    """A real listing of files on disk, handed to QAS so it knows exactly what exists rather
+    than trusting the Developer's narration."""
+    try:
+        skip = {".git", "__pycache__", "node_modules", "build", ".dart_tool", ".gradle", ".idea"}
+        out = []
+        for root, dirs, files in os.walk(workspace):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for f in files:
+                out.append(os.path.relpath(os.path.join(root, f), workspace).replace("\\", "/"))
+                if len(out) >= limit:
+                    return "\n".join(sorted(out)) + "\n… (truncated)"
+        return "\n".join(sorted(out)) if out else "(no files yet)"
+    except Exception:
+        return "(could not list workspace)"
+
+
 _LOCAL_FILE_HINT = (
     "\n\n# IMPORTANT — how to create/edit files on this model\n"
     "The `python` and `bash` tools ARE enabled and available to you. NEVER claim a tool is "
@@ -301,7 +344,9 @@ def _parse_rte(text: str, fallback_title: str) -> Tuple[str, str, str]:
 def _bsa_messages(role: RoleSpec, title: str, description: str, acceptance: str,
                   workspace: str, arch_feedback: Optional[str] = None) -> list:
     ac_block = (
-        f"Provided acceptance criteria:\n{acceptance}"
+        ("ACCEPTANCE CRITERIA PROVIDED BY THE USER — these are REQUIRED and AUTHORITATIVE. "
+         "Reproduce them EXACTLY under your '## Acceptance Criteria' heading; you may ADD "
+         "clarifying criteria but must NOT change, drop, or reword any of these:\n" + acceptance)
         if acceptance.strip()
         else "No acceptance criteria were provided — you MUST define them."
     )
@@ -345,12 +390,15 @@ def _dev_messages(role: RoleSpec, title: str, spec_text: str,
 
 
 def _qas_messages(role: RoleSpec, title: str, spec_text: str, dev_text: str,
-                  workspace: str) -> list:
+                  workspace: str, file_list: str = "") -> list:
     user = (
         f"# Workspace (the code is here — use absolute paths under this dir)\n{workspace}\n\n"
-        f"# Ticket\n{title}\n\n# Spec\n{spec_text}\n\n# Developer's report\n{dev_text}\n\n"
-        "Independently validate the work against the acceptance criteria in SPEC.md. "
-        "List the files, run the verification steps, then end with the verdict line."
+        f"# Files actually on disk right now\n{file_list or '(unknown)'}\n\n"
+        f"# Ticket\n{title}\n\n# Spec\n{spec_text}\n\n# Developer's report (context only)\n{dev_text}\n\n"
+        "The files listed above DO exist — READ them yourself; never claim files are missing "
+        "without checking, and do not just trust the report. Read each changed file, run the "
+        "verification steps from SPEC.md, validate against the acceptance criteria, then end "
+        "with the verdict line."
     )
     return [{"role": "system", "content": role.system_prompt},
             {"role": "user", "content": user}]
@@ -492,13 +540,17 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
         state["idx"] += 1
         yield _sse({"type": "role_done", "role": bsa.key, "iteration": 1, "chars": len(bsa_text)})
 
-        if not _has_acceptance_criteria(bsa_text):
+        if not (acceptance.strip() or _has_acceptance_criteria(bsa_text)):
             async for ev in _halt(run_id, "stop-the-line",
                                   "BSA produced no acceptance criteria — stopping the line."):
                 yield ev
             return
         yield _sse({"type": "gate", "gate": "stop-the-line", "status": "pass",
-                    "detail": "Acceptance criteria present."})
+                    "detail": ("Using the acceptance criteria you provided." if acceptance.strip()
+                               else "Acceptance criteria present.")})
+        # Clean, single source of truth: strip tool-call noise; pin the user's AC if provided.
+        # Downstream roles read this cleaned spec, not the BSA's raw transcript.
+        bsa_text = _build_spec_md(bsa_text, title, acceptance)
         _write_spec(workspace, bsa_text)
 
         # ---------- Role 2: System Architect (ADVISORY — never halts or loops) ----------
@@ -566,7 +618,7 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                         "model": qmodel, "purpose": qas.endpoint_purpose, "iteration": iteration})
             qres: Dict[str, str] = {"text": ""}
             async for ev in _run_role(qas, qurl, qmodel, qheaders,
-                                      _qas_messages(qas, title, bsa_text, dev_text, workspace),
+                                      _qas_messages(qas, title, bsa_text, dev_text, workspace, _list_workspace(workspace)),
                                       workspace, owner, run_id, universe, iteration, qres):
                 yield ev
             qas_text = qres["text"]

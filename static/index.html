@@ -1535,6 +1535,10 @@
               <div id="set-imgSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6;flex-shrink:0"><path d="M13 2L3 14h9l-1 8 10-12h-9z"/></svg>Qwen3 Fast Mode<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-qwenNoThink"><span class="admin-slider"></span></label></h2>
+            <div class="admin-toggle-sub">Appends <code>/no_think</code> for Qwen3 models so they skip the reasoning step and act directly — far fewer loops and less overthinking on tool-use and browsing. Turn OFF when you want Qwen3 to reason (hard coding/analysis). No effect on other models.</div>
+          </div>
           <!-- TTS panel hidden — user opted out of read-aloud entirely. Kept
                in DOM so the JS that wires set-ttsProviderSelect etc. doesn't
                throw on missing nodes; not visible to anyone. -->

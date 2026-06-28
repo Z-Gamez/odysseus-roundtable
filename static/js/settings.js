@@ -5788,5 +5788,28 @@ export function close() {
 
 const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
 
+// Qwen3 Fast Mode toggle (/no_think) — self-contained load + save, kept independent
+// of the settings module's own init so it can't break the rest of the panel.
+(function bindQwenNoThink() {
+  function bind() {
+    var t = document.getElementById('set-qwenNoThink');
+    if (!t || t.dataset.bound === '1') return;
+    t.dataset.bound = '1';
+    fetch('/api/auth/settings', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (s) { t.checked = !!(s && s.qwen_no_think); })
+      .catch(function () {});
+    t.addEventListener('change', function () {
+      fetch('/api/auth/settings', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ qwen_no_think: t.checked }),
+      }).catch(function () {});
+    });
+  }
+  if (document.readyState !== 'loading') bind();
+  else document.addEventListener('DOMContentLoaded', bind);
+})();
+
 
 export default settingsModule;

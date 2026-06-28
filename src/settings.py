@@ -38,6 +38,10 @@ DEFAULT_SETTINGS = {
     # recipients without confirmation.
     "agent_email_confirm": True,
     "image_gen_enabled": False,
+    # Qwen3 fast mode: when True, append the /no_think soft-switch so Qwen3 models
+    # skip their reasoning step and act directly — less overthinking/looping on
+    # tool-use and browsing. No-op for non-Qwen3 models.
+    "qwen_no_think": False,
     "image_model": "",
     "image_quality": "medium",
     "vision_model": "",

@@ -162,6 +162,15 @@ if (Test-Path $cudaBase) {
     }
 }
 
+# 6b. Start the ChromaDB vector server in the background (enables smart per-query
+# tool selection + semantic memory/RAG). Optional - Odysseus falls back to the
+# full toolset if it is not running, so a failure here is non-fatal.
+$chromaScript = Join-Path $PSScriptRoot "scripts\launch-chromadb.ps1"
+if (Test-Path $chromaScript) {
+    Write-Step "Starting ChromaDB (vector index)"
+    try { & $chromaScript } catch { Write-Host ("ChromaDB did not start (optional): " + $_) -ForegroundColor Yellow }
+}
+
 # 7. Start the server (use `python -m uvicorn` - bare `uvicorn` may not be on PATH)
 Write-Step ("Starting Odysseus at http://{0}:{1}" -f $BindHost, $Port)
 Write-Host "Press Ctrl+C to stop."

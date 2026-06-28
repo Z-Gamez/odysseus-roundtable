@@ -71,6 +71,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "python": "Execute Python code for computation, data processing, math, scripting, and parsing. Not for writing code for the user. Prefer a dedicated tool for reading, writing, or searching files; use python only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
     "web_fetch": "Fetch and read the text content of a specific URL/website the user names (e.g. 'check example.com', 'open this link'). Use when you have a concrete URL; for open-ended lookups use web_search instead.",
+    "browser": "Control the user's real web browser (their Chrome, with their logins/tabs): navigate to pages, read them, click buttons/links, type into fields, fill and submit forms, manage tabs, screenshot. Use for INTERACTIVE tasks on a website — logging in, filling a form, clicking through a flow, doing something on a page — NOT read-only lookups (use web_search/web_fetch for those). High-stakes actions ask the user to confirm first.",
     "read_file": "Read a file from disk and return its contents. View source code, config files, logs. Supports an optional line range (offset/limit) for large files.",
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
@@ -339,6 +340,15 @@ class ToolIndex:
         r"https?://|www\.|\b(?:visit|open|fetch|check|read)\s+(?:this\s+)?(?:url|link|site|website|page)\b",
         re.I,
     )
+    # Interactive browser control (drive the user's real Chrome) — distinct from
+    # read-only web lookups, which stay on web_search/web_fetch.
+    _BROWSER_RE = re.compile(
+        r"\b(?:browser|chrome|browse\s+to|navigate\s+to|"
+        r"log\s*in(?:to)?|sign\s*in(?:to)?|fill\s+(?:out|in)\b|"
+        r"cart|basket|check\s*out\b|click\s+(?:on|the)\b|"
+        r"open\s+(?:a\s+)?(?:new\s+)?(?:tab|website|web\s*page))\b",
+        re.I,
+    )
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
@@ -535,6 +545,10 @@ class ToolIndex:
         # prompts do not drag web schemas into the agent context.
         if self._WEB_RE.search(query):
             base.update({"web_search", "web_fetch"})
+        # Interactive browser control (click/type/log in/fill a form in the user's
+        # real Chrome) is the `browser` tool — admin-gated, surfaced on clear intent.
+        if self._BROWSER_RE.search(query):
+            base.add("browser")
         # Hard steering: when the query is a clear "save info about a specific
         # person" pattern (address paste + name, phone next to a name, etc.),
         # the model has been observed defaulting to manage_memory even with

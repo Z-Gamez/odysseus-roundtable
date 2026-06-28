@@ -1105,6 +1105,12 @@
               <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
             </svg>
           </button>
+          <!-- Fast mode (skip model reasoning / no-think) — applies to all models -->
+          <button type="button" class="input-icon-btn" title="Fast mode — skip model reasoning so it acts directly (/no_think). Applies to all models." id="fastmode-toggle-btn" aria-label="Fast mode" aria-pressed="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 2L3 14h9l-1 8 10-12h-9z"/>
+            </svg>
+          </button>
           <!-- Workspace indicator (hidden until a folder is set) -->
           <button type="button" class="input-icon-btn tool-indicator" title="Workspace - click to clear" id="workspace-indicator-btn" aria-label="Clear workspace" style="display:none;">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -1534,10 +1540,6 @@
               </div>
               <div id="set-imgSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
-          </div>
-          <div class="admin-card">
-            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6;flex-shrink:0"><path d="M13 2L3 14h9l-1 8 10-12h-9z"/></svg>Qwen3 Fast Mode<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-qwenNoThink"><span class="admin-slider"></span></label></h2>
-            <div class="admin-toggle-sub">Appends <code>/no_think</code> for Qwen3 models so they skip the reasoning step and act directly — far fewer loops and less overthinking on tool-use and browsing. Turn OFF when you want Qwen3 to reason (hard coding/analysis). No effect on other models.</div>
           </div>
           <!-- TTS panel hidden — user opted out of read-aloud entirely. Kept
                in DOM so the JS that wires set-ttsProviderSelect etc. doesn't

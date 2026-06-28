@@ -5788,22 +5788,29 @@ export function close() {
 
 const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
 
-// Qwen3 Fast Mode toggle (/no_think) — self-contained load + save, kept independent
-// of the settings module's own init so it can't break the rest of the panel.
-(function bindQwenNoThink() {
+// Fast Mode chat-bar toggle — appends /no_think for ALL models so they act directly.
+// Self-contained load + save (via the shared app-settings endpoint), independent of
+// the settings module so it can't break anything else.
+(function bindFastMode() {
+  function setState(b, on) {
+    b.classList.toggle('active', !!on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
   function bind() {
-    var t = document.getElementById('set-qwenNoThink');
-    if (!t || t.dataset.bound === '1') return;
-    t.dataset.bound = '1';
+    var b = document.getElementById('fastmode-toggle-btn');
+    if (!b || b.dataset.bound === '1') return;
+    b.dataset.bound = '1';
     fetch('/api/auth/settings', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
-      .then(function (s) { t.checked = !!(s && s.qwen_no_think); })
+      .then(function (s) { setState(b, s && s.fast_mode); })
       .catch(function () {});
-    t.addEventListener('change', function () {
+    b.addEventListener('click', function () {
+      var on = !b.classList.contains('active');
+      setState(b, on);
       fetch('/api/auth/settings', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qwen_no_think: t.checked }),
+        body: JSON.stringify({ fast_mode: on }),
       }).catch(function () {});
     });
   }

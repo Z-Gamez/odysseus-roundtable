@@ -1871,18 +1871,17 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     else:
         messages_copy = non_sys
 
-    # Qwen3 fast mode: when the qwen_no_think setting is on, append the /no_think
-    # soft-switch to the latest user turn so Qwen3 skips its reasoning step and acts
-    # directly (less overthinking/looping on tool-use). No-op for non-Qwen3 / toggle off.
+    # Fast mode (chat-bar toggle): when on, append the /no_think soft-switch to the
+    # latest user turn for ALL models, so reasoning models (Qwen3, etc.) skip their
+    # thinking step and act directly. Harmless for models that don't recognise it.
     try:
-        if "qwen3" in (model or "").lower():
-            from src.settings import get_setting
-            if get_setting("qwen_no_think", False):
-                for _i in range(len(messages_copy) - 1, -1, -1):
-                    if messages_copy[_i].get("role") == "user" and isinstance(messages_copy[_i].get("content"), str):
-                        messages_copy[_i] = dict(messages_copy[_i])
-                        messages_copy[_i]["content"] = messages_copy[_i]["content"].rstrip() + " /no_think"
-                        break
+        from src.settings import get_setting
+        if get_setting("fast_mode", False):
+            for _i in range(len(messages_copy) - 1, -1, -1):
+                if messages_copy[_i].get("role") == "user" and isinstance(messages_copy[_i].get("content"), str):
+                    messages_copy[_i] = dict(messages_copy[_i])
+                    messages_copy[_i]["content"] = messages_copy[_i]["content"].rstrip() + " /no_think"
+                    break
     except Exception:
         pass
 

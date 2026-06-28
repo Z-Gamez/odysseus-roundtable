@@ -54,6 +54,61 @@ _SNAPSHOT_JS = """
 """
 
 
+def _port_from_url(url: str) -> int:
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).port or 9222
+    except Exception:
+        return 9222
+
+
+def _try_launch_chrome(port: int) -> bool:
+    """Best-effort: start Chrome with remote debugging if nothing is on the port,
+    so the tool self-heals instead of failing when the debug Chrome isn't running.
+    Uses a dedicated automation profile (runs alongside the user's normal Chrome).
+    Returns True if the debug port is reachable afterward."""
+    import socket
+    import subprocess
+    import time
+    import shutil
+
+    def _open() -> bool:
+        s = socket.socket()
+        s.settimeout(0.5)
+        try:
+            s.connect(("127.0.0.1", port)); return True
+        except Exception:
+            return False
+        finally:
+            s.close()
+
+    if _open():
+        return True
+    candidates = [
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+    ]
+    chrome = next((c for c in candidates if os.path.exists(c)), None) or shutil.which("chrome")
+    if not chrome:
+        return False
+    profile = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusAutomation")
+    try:
+        subprocess.Popen(
+            [chrome, f"--remote-debugging-port={port}", f"--user-data-dir={profile}", "about:blank"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+    except Exception as e:
+        logger.warning("[browser] could not launch Chrome: %s", e)
+        return False
+    for _ in range(24):
+        time.sleep(0.5)
+        if _open():
+            return True
+    return False
+
+
 class _BrowserSession:
     """One shared Playwright CDP connection to the user's Chrome, reused across
     tool calls in the conversation. Never closes the browser — it's the user's."""
@@ -71,8 +126,15 @@ class _BrowserSession:
         from playwright.async_api import async_playwright  # lazy: optional dep
         if self._pw is None:
             self._pw = await async_playwright().start()
-        # Attach to the already-running Chrome (does NOT launch a new browser).
-        self._browser = await self._pw.chromium.connect_over_cdp(cdp_url)
+        # Attach to the running Chrome. If it isn't up, try to launch it (debug
+        # mode, dedicated automation profile) and retry once — so the tool
+        # self-heals instead of failing when the debug Chrome was closed.
+        try:
+            self._browser = await self._pw.chromium.connect_over_cdp(cdp_url)
+        except Exception:
+            if not await asyncio.to_thread(_try_launch_chrome, _port_from_url(cdp_url)):
+                raise
+            self._browser = await self._pw.chromium.connect_over_cdp(cdp_url)
         ctxs = self._browser.contexts
         self._context = ctxs[0] if ctxs else await self._browser.new_context()
         pages = [p for p in self._context.pages if not p.is_closed()]
@@ -134,7 +196,7 @@ class BrowserTool:
 
         async with _SESSION.lock:
             try:
-                page = await asyncio.wait_for(_SESSION.page(cdp_url), timeout=20)
+                page = await asyncio.wait_for(_SESSION.page(cdp_url), timeout=45)
             except Exception as e:
                 return {"error": _CONNECT_HINT.format(url=cdp_url, err=f"{type(e).__name__}: {e}"),
                         "exit_code": 1}

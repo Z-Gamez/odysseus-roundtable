@@ -1298,7 +1298,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = json.dumps(args)
         else:
             content = args.get("path", "")
-    elif tool_type in ("grep", "glob", "ls"):
+    elif tool_type in ("grep", "glob", "ls", "browser"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""

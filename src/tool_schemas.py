@@ -82,6 +82,32 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "browser",
+            "description": "Control the user's real web browser (their Chrome, with their logins/tabs) from chat. One tool, many actions via 'action'. Typical flow: navigate -> snapshot (returns element refs like e5) -> click/type by ref -> read. High-stakes actions (submitting forms, buying, sending, deleting) need \"confirm\": true — first ASK THE USER, then re-call with confirm. Requires Chrome started with --remote-debugging-port (the tool says how if not connected).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["navigate", "snapshot", "read", "click", "type", "key", "scroll", "back", "forward", "screenshot", "tabs", "wait"], "description": "What to do."},
+                    "url": {"type": "string", "description": "For navigate (or tabs op=new): URL or bare domain."},
+                    "ref": {"type": "string", "description": "For click/type: the element ref (e.g. 'e5') from a prior snapshot."},
+                    "text": {"type": "string", "description": "For type: the text to enter."},
+                    "key": {"type": "string", "description": "For key: key name (Enter, Escape, ArrowDown, ...)."},
+                    "direction": {"type": "string", "enum": ["up", "down"], "description": "For scroll."},
+                    "submit": {"type": "boolean", "description": "For type: press Enter to submit after typing (treated as high-stakes; needs confirm)."},
+                    "confirm": {"type": "boolean", "description": "Set true ONLY after the user has approved a high-stakes action."},
+                    "op": {"type": "string", "enum": ["list", "select", "new"], "description": "For tabs: which tab operation."},
+                    "index": {"type": "integer", "description": "For tabs op=select: tab index."},
+                    "selector": {"type": "string", "description": "For wait: CSS selector to wait for."},
+                    "ms": {"type": "integer", "description": "For wait: milliseconds."},
+                    "full_page": {"type": "boolean", "description": "For screenshot: capture the full page."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": "Read a file from disk. Optionally read a line range with offset/limit for large files.",
             "parameters": {

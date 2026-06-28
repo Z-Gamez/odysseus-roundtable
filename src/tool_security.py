@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 NON_ADMIN_BLOCKED_TOOLS = {
     "bash",
     "python",
+    "browser",
     "manage_bg_jobs",
     "read_file",
     "write_file",

@@ -340,6 +340,15 @@ Use this instead of `bash`, `curl`, `python`, `requests`, or scraping code for w
 ```
 Fetch and read the text content of a SPECIFIC URL the user names (e.g. "check example.com", "what does this page say <url>"). A bare domain like `example.com` works (defaults to https). Use this when you already have a concrete URL. For open-ended lookups use `web_search`, and for "research X" jobs use `trigger_research`.""",
 
+    "browser": """\
+```browser
+{"action": "navigate", "url": "youtube.com"}
+```
+Control the user's REAL web browser (their Chrome, with their logins and tabs) to DO things on websites — not just read them. One tool, many actions via the `action` field. Typical flow: `navigate` to a page, then `snapshot` (lists clickable elements with refs like e5), then `click`/`type` by ref, then `read` the page text.
+Actions: navigate {"action":"navigate","url":"..."}, snapshot, read, click {"action":"click","ref":"e5"}, type {"action":"type","ref":"e3","text":"hello"}, key {"action":"key","key":"Enter"}, scroll {"action":"scroll","direction":"down"}, back, forward, screenshot, tabs {"action":"tabs","op":"new","url":"..."} (or op:list/select), wait.
+Use this for INTERACTIVE web tasks (open a tab, log in, fill a form, click through a flow, add to cart) — for read-only lookups prefer `web_search`/`web_fetch`.
+HIGH-STAKES actions (submitting a form, buying/paying/checkout, sending, deleting, or pressing Enter in a form) require "confirm": true — FIRST ask the user to confirm, THEN re-call the same action with "confirm": true. If the tool can't connect it returns instructions for starting Chrome with remote debugging.""",
+
     "read_file": """\
 ```read_file
 <file path>

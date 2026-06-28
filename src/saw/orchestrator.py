@@ -466,8 +466,13 @@ def _dev_messages(role: RoleSpec, title: str, spec_text: str,
     user = (
         f"# Workspace (build here — use absolute paths under this dir)\n{workspace}\n\n"
         f"# Ticket\n{title}\n\n# Spec (from BSA)\n{spec_text}\n\n"
-        "SPEC.md has been saved in the workspace. Read it, then IMPLEMENT the code with "
-        "write_file/edit_file. Do NOT finish until the required files actually exist on disk."
+        "SPEC.md has been saved in the workspace. Read it, then IMPLEMENT the code.\n"
+        "WRITING FILES — write each file's FULL contents in ONE shot. To REPLACE a file a scaffold "
+        "generated (e.g. the default lib/main.dart after `flutter create`), OVERWRITE it completely "
+        "in a single write. Do NOT use edit_file or a series of small edits to transform a generated "
+        "file — the exact-match edit fails and you LOOP. (edit_file is only for one small change to "
+        "a file you are NOT replacing.) Do NOT finish until the required files exist on disk with the "
+        "correct contents."
     )
     if continuation:
         user += ("\n\n# This is a CHANGE on existing, working code\n"

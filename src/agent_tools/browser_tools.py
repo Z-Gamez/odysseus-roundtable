@@ -95,7 +95,8 @@ def _try_launch_chrome(port: int) -> bool:
     profile = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusAutomation")
     try:
         subprocess.Popen(
-            [chrome, f"--remote-debugging-port={port}", f"--user-data-dir={profile}", "about:blank"],
+            [chrome, f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
+             "--start-maximized", "--new-window", "about:blank"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
@@ -215,6 +216,10 @@ class BrowserTool:
             if "://" not in url:
                 url = "https://" + url
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            try:
+                await page.bring_to_front()  # raise the tab so the user sees it
+            except Exception:
+                pass
             snap = await self._snapshot(page)
             return {"output": f"Navigated to {page.url}\nTitle: {await page.title()}\n\n{snap}",
                     "exit_code": 0}

@@ -347,7 +347,8 @@ Fetch and read the text content of a SPECIFIC URL the user names (e.g. "check ex
 Control the user's REAL web browser (their Chrome, with their logins and tabs) to DO things on websites — not just read them. One tool, many actions via the `action` field. Typical flow: `navigate` to a page, then `snapshot` (lists clickable elements with refs like e5), then `click`/`type` by ref, then `read` the page text.
 Actions: navigate {"action":"navigate","url":"..."}, snapshot, read, click {"action":"click","ref":"e5"}, type {"action":"type","ref":"e3","text":"hello"}, key {"action":"key","key":"Enter"}, scroll {"action":"scroll","direction":"down"}, back, forward, screenshot, tabs {"action":"tabs","op":"new","url":"..."} (or op:list/select), wait.
 Use this for INTERACTIVE web tasks (open a tab, log in, fill a form, click through a flow, add to cart) — for read-only lookups prefer `web_search`/`web_fetch`.
-HIGH-STAKES actions (submitting a form, buying/paying/checkout, sending, deleting, or pressing Enter in a form) require "confirm": true — FIRST ask the user to confirm, THEN re-call the same action with "confirm": true. If the tool can't connect it returns instructions for starting Chrome with remote debugging.""",
+HIGH-STAKES actions (submitting a form, buying/paying/checkout, sending, deleting, or pressing Enter in a form) require "confirm": true — FIRST ask the user to confirm, THEN re-call the same action with "confirm": true. If the tool can't connect it returns instructions for starting Chrome with remote debugging.
+ACT DECISIVELY: when asked to do something in the browser, CALL this tool immediately — do not deliberate at length about whether to. As soon as the requested action has SUCCEEDED you are DONE: reply with a one-line confirmation of what you did and STOP. Do NOT keep calling tools, re-snapshotting, or re-planning after the task is complete.""",
 
     "read_file": """\
 ```read_file

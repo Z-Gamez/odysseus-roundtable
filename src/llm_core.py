@@ -472,9 +472,27 @@ def _build_ollama_payload(
     if max_tokens and max_tokens > 0:
         options["num_predict"] = max_tokens
     if num_ctx is not None and num_ctx > 0 and num_ctx != DEFAULT_CONTEXT:
+        # Cap the requested window. A model's full 128K window makes Ollama allocate a
+        # huge KV cache (VRAM spill -> CPU offload -> slow, plus a model reload). The cap
+        # keeps it fast; configurable via the ollama_num_ctx setting (0 = no cap).
+        try:
+            from src.settings import get_setting
+            cap = int(get_setting("ollama_num_ctx", 0) or 0)
+        except Exception:
+            cap = 0
+        if cap > 0:
+            num_ctx = min(num_ctx, cap)
         options["num_ctx"] = num_ctx
     if options:
         payload["options"] = options
+    # Keep the model resident between requests so it doesn't unload + reload each turn.
+    try:
+        from src.settings import get_setting
+        ka = get_setting("ollama_keep_alive", "")
+        if ka:
+            payload["keep_alive"] = ka
+    except Exception:
+        pass
     if tools:
         payload["tools"] = tools
     return payload

@@ -43,6 +43,14 @@ DEFAULT_SETTINGS = {
     # their thinking step and act directly — less overthinking/looping on tool-use and
     # browsing. Harmless no-op for models that don't recognise the switch.
     "fast_mode": False,
+    # Local (Ollama) performance: cap the context window Odysseus asks Ollama to
+    # allocate. A model's full window (often 128K) makes Ollama allocate a giant KV
+    # cache that spills out of VRAM and forces a model reload - far slower than the
+    # Ollama app's 2048 default. 0 = no cap (use the model's full advertised window).
+    "ollama_num_ctx": 16384,
+    # Keep the model resident between requests so it doesn't unload + reload (Ollama
+    # default is "5m"). "-1" keeps it loaded until Ollama restarts; "" uses the default.
+    "ollama_keep_alive": "30m",
     "image_model": "",
     "image_quality": "medium",
     "vision_model": "",

@@ -29,6 +29,10 @@ if (-not $ollama) {
     return
 }
 
+# Performance: flash attention speeds up attention and cuts KV-cache memory. Only
+# applies when WE start Ollama here - an already-running Ollama (tray app) won't pick
+# it up until it is restarted.
+if (-not $env:OLLAMA_FLASH_ATTENTION) { $env:OLLAMA_FLASH_ATTENTION = '1' }
 Start-Process -FilePath $ollama -ArgumentList 'serve' -WindowStyle Hidden
 $ok = $false
 for ($i = 0; $i -lt 20; $i++) {

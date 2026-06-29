@@ -83,9 +83,17 @@ def open_native_window(url: str) -> bool:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Odysseus.Desktop.App")
         except Exception:
             pass
+    # Persistent WebView2 profile so cookies / localStorage survive across launches —
+    # i.e. the login session (and saved username/password) is remembered.
+    storage = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Odysseus", "WebView2")
+    try:
+        os.makedirs(storage, exist_ok=True)
+    except Exception:
+        storage = None
     try:
         webview.create_window(TITLE, url, width=1440, height=920, min_size=(900, 600))
-        webview.start(_apply_window_icon)  # callback runs after the window opens -> set icon
+        # private_mode=False keeps the profile on disk; the callback sets the icon.
+        webview.start(_apply_window_icon, private_mode=False, storage_path=storage)
         return True
     except Exception as e:
         print(f"[odysseus-app] native window failed ({e}); falling back to app-mode")

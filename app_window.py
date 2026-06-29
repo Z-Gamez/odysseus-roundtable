@@ -7,6 +7,7 @@ or the WebView2 runtime isn't available.
 
 Run by launch-app.ps1 after the server is up. ODYSSEUS_URL overrides the address.
 """
+import ctypes
 import os
 import sys
 import time
@@ -31,6 +32,44 @@ def wait_for_server(url: str, timeout: int = 90) -> bool:
     return False
 
 
+def _resolve_icon() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    for c in (os.environ.get("ODYSSEUS_ICON", ""),
+              os.path.join(here, "static", "odysseus.ico"),
+              r"C:\Odysseus\images-removebg-preview.ico"):
+        if c and os.path.exists(c):
+            return c
+    return ""
+
+
+def _apply_window_icon(*_args) -> None:
+    """Set the title-bar + taskbar icon on the native window (Windows only).
+
+    pywebview windows default to the python/pythonw icon; load the Odysseus .ico and
+    push it onto the window with WM_SETICON once the window exists."""
+    if os.name != "nt":
+        return
+    ico = _resolve_icon()
+    if not ico:
+        return
+    try:
+        user32 = ctypes.windll.user32
+        WM_SETICON, ICON_SMALL, ICON_BIG, IMAGE_ICON, LR = 0x0080, 0, 1, 1, 0x00000010
+        small = user32.LoadImageW(None, ico, IMAGE_ICON, 16, 16, LR)
+        big = user32.LoadImageW(None, ico, IMAGE_ICON, 32, 32, LR)
+        for _ in range(50):
+            hwnd = user32.FindWindowW(None, TITLE)
+            if hwnd:
+                if small:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, small)
+                if big:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, big)
+                break
+            time.sleep(0.1)
+    except Exception as e:
+        print(f"[odysseus-app] could not set window icon: {e}")
+
+
 def open_native_window(url: str) -> bool:
     """True native window via pywebview (WebView2). Blocks until the window closes."""
     try:
@@ -38,9 +77,15 @@ def open_native_window(url: str) -> bool:
     except Exception as e:
         print(f"[odysseus-app] pywebview not available: {e}")
         return False
+    # Give the app its own taskbar identity so it doesn't group under Python.
+    if os.name == "nt":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Odysseus.Desktop.App")
+        except Exception:
+            pass
     try:
         webview.create_window(TITLE, url, width=1440, height=920, min_size=(900, 600))
-        webview.start()  # blocks until the user closes the window
+        webview.start(_apply_window_icon)  # callback runs after the window opens -> set icon
         return True
     except Exception as e:
         print(f"[odysseus-app] native window failed ({e}); falling back to app-mode")

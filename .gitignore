@@ -34,6 +34,10 @@ logs/
 *.sqlite
 *.sqlite3
 
+# Packaged desktop app (built by build-app.ps1 - rebuildable, don't commit the binary)
+/Odysseus.exe
+*.spec
+
 # Node
 node_modules/
 services/node_modules/

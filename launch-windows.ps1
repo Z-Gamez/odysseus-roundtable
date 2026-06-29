@@ -162,6 +162,14 @@ if (Test-Path $cudaBase) {
     }
 }
 
+# 6a. Start Ollama in the background so local models are available. Optional and
+# non-fatal - skipped cleanly if Ollama isn't installed or is already running.
+$ollamaScript = Join-Path $PSScriptRoot "scripts\launch-ollama.ps1"
+if (Test-Path $ollamaScript) {
+    Write-Step "Starting Ollama (local models)"
+    try { & $ollamaScript } catch { Write-Host ("Ollama did not start (optional): " + $_) -ForegroundColor Yellow }
+}
+
 # 6b. Start the ChromaDB vector server in the background (enables smart per-query
 # tool selection + semantic memory/RAG). Optional - Odysseus falls back to the
 # full toolset if it is not running, so a failure here is non-fatal.

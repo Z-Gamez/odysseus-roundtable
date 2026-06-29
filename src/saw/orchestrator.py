@@ -219,13 +219,34 @@ def _is_local_endpoint(url: str) -> bool:
     return "11434" in u or "ollama" in u or "127.0.0.1" in u or "localhost" in u
 
 
+def _endpoint_supports_tools(url: str) -> bool:
+    """True if the endpoint serving `url` has supports_tools=True (native function
+    calling). When on, local models emit clean native write_file/python calls."""
+    try:
+        from core.database import SessionLocal, ModelEndpoint
+        db = SessionLocal()
+        try:
+            for ep in db.query(ModelEndpoint).all():
+                b = getattr(ep, "base_url", None)
+                if b and b in (url or ""):
+                    return getattr(ep, "supports_tools", None) is True
+        finally:
+            db.close()
+    except Exception:
+        pass
+    return False
+
+
 def _augment_for_local(messages: list, url: str, has_python: bool) -> list:
-    """Local models reliably drive `python`/`bash` tool calls but malform Odysseus's
-    write_file/edit_file format (→ infinite loops). For local endpoints, tell roles that
-    HAVE the python tool to do file I/O through it. No-op for cloud (Claude) endpoints and
-    for roles WITHOUT python (e.g. BSA/Architect/Tech Writer) — ordering them to 'use the
-    python tool' when they don't have it just makes them loop and dump commands into files."""
+    """In FENCED mode, local models malform Odysseus's write_file/edit_file format, so we
+    tell roles that HAVE python to do file I/O through it. BUT when the endpoint has
+    supports_tools=True (native function calling), local models emit clean native
+    write_file/python calls and this hint HURTS — e.g. Orninth does write_file natively
+    but stalls when forced to write a long file as a python triple-quoted string. So skip
+    the hint in native-tools mode. Also no-op for cloud endpoints / roles without python."""
     if not has_python or not _is_local_endpoint(url):
+        return messages
+    if _endpoint_supports_tools(url):
         return messages
     out = [dict(m) for m in messages]
     for m in out:

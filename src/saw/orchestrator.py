@@ -151,13 +151,52 @@ def _list_workspace(workspace: str, limit: int = 80) -> str:
 
 
 def _max_iterations() -> int:
-    """Configurable Dev<->QAS retry budget (setting 'saw_max_iterations'; default
-    MAX_DEV_QAS_ITERATIONS, clamped 1..10)."""
+    """Configurable Dev<->QAS retry budget (setting 'saw_max_iterations').
+    Returns 1..10, or 0 meaning INFINITE — retry until the gates pass (the run
+    can still be cancelled by the user). Default MAX_DEV_QAS_ITERATIONS."""
     try:
         from src.settings import get_setting
-        return max(1, min(int(get_setting("saw_max_iterations", MAX_DEV_QAS_ITERATIONS)), 10))
+        v = int(get_setting("saw_max_iterations", MAX_DEV_QAS_ITERATIONS))
     except Exception:
         return MAX_DEV_QAS_ITERATIONS
+    if v <= 0:
+        return 0                       # infinite
+    return max(1, min(v, 10))
+
+
+def _saw_stream_timeout() -> int:
+    """Per-round stream budget for SAW roles (setting 'saw_stream_timeout_seconds').
+
+    The chat default (300s) is tuned for interactive use; a Round Table Dev on a
+    big local model that spills to CPU can spend several minutes in prompt eval
+    (zero tokens streaming — trips the inactivity timeout) and then generate for
+    longer than the 20-minute round deadline (300*4) — both cut the file write
+    mid-stream and hand broken code to the build gate. Default 3600s: the
+    inactivity cut becomes 1h and the round deadline 4h. Lower it if you only
+    run fast models."""
+    try:
+        from src.settings import get_setting
+        v = int(get_setting("saw_stream_timeout_seconds", 3600))
+        return v if v > 0 else 3600
+    except Exception:
+        return 3600
+
+
+def _saw_max_tokens() -> int:
+    """Per-turn output cap for every SAW role (setting 'saw_max_tokens').
+
+    The agent loop's default is only 4096; a Developer writing a whole file in
+    one tool call blows past that and the call is TRUNCATED mid-write, leaving
+    broken code that then trips the build gate. Give roles real room. The actual
+    ceiling is still the model's context window (num_ctx); this only lifts the
+    artificial 4096 sub-cap. Default 8192; raise it (with ollama_num_ctx) for
+    very large single files."""
+    try:
+        from src.settings import get_setting
+        v = int(get_setting("saw_max_tokens", 8192))
+        return v if v > 0 else 8192
+    except Exception:
+        return 8192
 
 
 def _build_check(workspace: str):
@@ -165,29 +204,44 @@ def _build_check(workspace: str):
     obviously-broken work. Returns (ok, label, detail) or None when not recognised."""
     import glob, subprocess, sys as _sys
     try:
-        # Flutter: the app entry point must actually exist and be real
+        # Flutter: locate the project — pubspec.yaml at the workspace root, or one level
+        # down if the model scaffolded into a `flutter create <name>` subfolder. Without
+        # this, a project in a subfolder skips the gate entirely and a weak QAS can false-pass.
+        proj = None
         if os.path.exists(os.path.join(workspace, "pubspec.yaml")):
-            main_dart = os.path.join(workspace, "lib", "main.dart")
+            proj = workspace
+        else:
+            try:
+                for d in sorted(os.listdir(workspace)):
+                    sub = os.path.join(workspace, d)
+                    if os.path.isdir(sub) and os.path.exists(os.path.join(sub, "pubspec.yaml")):
+                        proj = sub
+                        break
+            except OSError:
+                proj = None
+        if proj is not None:
+            where = "" if proj == workspace else os.path.basename(proj) + "/"
+            main_dart = os.path.join(proj, "lib", "main.dart")
             if not os.path.exists(main_dart):
-                return False, "structure", "Required file lib/main.dart is MISSING — the app has no entry point."
+                return False, "structure", f"Required file {where}lib/main.dart is MISSING — the app has no entry point."
             txt = open(main_dart, encoding="utf-8", errors="replace").read()
             if "runApp" not in txt or len(txt.strip()) < 80:
-                return False, "structure", "lib/main.dart is empty or has no runApp() — the entry point is incomplete."
+                return False, "structure", f"{where}lib/main.dart is empty or has no runApp() — the entry point is incomplete."
             # Deeper: run the Dart analyzer to catch real compile errors, not just a
             # missing entry point. Only ERROR-severity lines fail the gate (warnings/info
             # are reported but don't block).
             try:
-                r = subprocess.run("flutter analyze", cwd=workspace, shell=True,
+                r = subprocess.run("flutter analyze", cwd=proj, shell=True,
                                    capture_output=True, text=True, timeout=360)
                 errs = [ln.strip() for ln in (r.stdout + r.stderr).splitlines()
                         if re.match(r"(?i)^error\b", ln.strip())]
                 if errs:
                     return False, "flutter analyze", "Analyzer errors — fix these:\n" + "\n".join(errs[:30])
-                return True, "flutter analyze", "lib/main.dart present; flutter analyze found no errors."
+                return True, "flutter analyze", f"{where}lib/main.dart present; flutter analyze found no errors."
             except subprocess.TimeoutExpired:
-                return True, "structure", "lib/main.dart present (flutter analyze timed out — skipped)."
+                return True, "structure", f"{where}lib/main.dart present (flutter analyze timed out — skipped)."
             except Exception:
-                return True, "structure", "lib/main.dart present (flutter analyze unavailable)."
+                return True, "structure", f"{where}lib/main.dart present (flutter analyze unavailable)."
         # Python: every file must compile
         pys = [p for p in glob.glob(os.path.join(workspace, "**", "*.py"), recursive=True)
                if "__pycache__" not in p][:60]
@@ -493,7 +547,22 @@ def _dev_messages(role: RoleSpec, title: str, spec_text: str,
         "in a single write. Do NOT use edit_file or a series of small edits to transform a generated "
         "file — the exact-match edit fails and you LOOP. (edit_file is only for one small change to "
         "a file you are NOT replacing.) Do NOT finish until the required files exist on disk with the "
-        "correct contents."
+        "correct contents.\n"
+        "KEEP FILES SMALL — this is critical. Prefer SEVERAL small files (each under ~150 lines, one "
+        "write_file call each) over one big file. Split game/app logic into modules (e.g. js/player.js, "
+        "js/enemies.js, js/main.js) and wire them together. NEVER attempt a single write_file call for a "
+        "'substantial' file — large single-call writes fail; a chain of small complete files succeeds.\n"
+        "READING FILES — never read a whole LARGE file in one call, and never run a command that dumps "
+        "one (e.g. cat/type on a big file). Use grep to find the relevant function/section, then "
+        "read_file with offset+limit to pull just that chunk (~120 lines). Filter big command output "
+        "with grep/head/tail.\n"
+        "SCAFFOLDING A PROJECT — `flutter create my_app` makes a SUBFOLDER `<workspace>/my_app/`, and "
+        "THAT subfolder is then the project root. Every file you write afterwards MUST live inside it "
+        "(e.g. `<workspace>/my_app/lib/main.dart`), NEVER the workspace root — splitting files between "
+        "the two breaks the build. Simpler and recommended: scaffold IN PLACE with "
+        "`flutter create . --project-name <name>` (note the trailing dot) so the project root IS the "
+        "workspace and there is no subfolder to get lost in. Either way, keep ALL project files under "
+        "ONE root."
     )
     if continuation:
         user += ("\n\n# This is a CHANGE on existing, working code\n"
@@ -611,6 +680,8 @@ async def _run_role(role: RoleSpec, url: str, model: str, headers: dict, message
             url, model, messages,
             headers=headers,
             temperature=role.temperature,
+            max_tokens=_saw_max_tokens(),
+            stream_timeout=_saw_stream_timeout(),
             max_rounds=role.max_rounds,
             session_id=sid,
             disabled_tools=disabled or None,
@@ -712,8 +783,16 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
         shipped = False
         feedback: Optional[str] = None
         dev_text = ""
-        max_iter = _max_iterations()
-        for iteration in range(1, max_iter + 1):
+        max_iter = _max_iterations()   # 0 == infinite (retry until the gates pass)
+        iteration = 0
+        while True:
+            iteration += 1
+            # Stop once the finite budget is spent. When max_iter is 0 (infinite)
+            # this never fires, so the only exits are a passing run (break below)
+            # or the user cancelling. A `continue` on a failed gate re-enters here,
+            # so the budget check stays correct across retries.
+            if max_iter and iteration > max_iter:
+                break
             # Developer
             dev = roles.DEVELOPER
             dep = _resolve(dev, owner)

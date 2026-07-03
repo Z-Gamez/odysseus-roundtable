@@ -114,7 +114,13 @@ DEVELOPER = RoleSpec(
     endpoint_purpose="saw_heavy",
     saw_model_hint="sonnet",
     temperature=0.3,
-    max_rounds=40,
+    # Local models work in SMALL increments (one read/write/check per round);
+    # building a real app plus fixing analyzer errors routinely needs >40 tool
+    # round-trips. 40 was cutting Ornith off mid-task at ~8 min (observed:
+    # "round cap (40) reached mid-task"), wasting the whole attempt. At ~15s a
+    # round this cap is a ~40 min ceiling — the Dev<->QAS iteration budget and
+    # the user's stop button are the real limits.
+    max_rounds=160,
     allowed_tools=READ_TOOLS | WRITE_TOOLS | EXEC_TOOLS | WEB_TOOLS,
     system_prompt=_SAFE_PREAMBLE + """
 

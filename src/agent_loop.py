@@ -681,6 +681,38 @@ def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
     return parsed.port == 11434 and (path == "/v1" or path.startswith("/v1/"))
 
 
+_OLLAMA_NUMCTX_CACHE: Dict[str, int] = {}
+
+
+def _ollama_served_num_ctx(endpoint_url: str, model: str) -> int:
+    """The num_ctx Ollama will actually serve this model with (its Modelfile
+    ``PARAMETER num_ctx``), or 0 when unset/unknown.
+
+    The /v1 endpoint ignores per-request options, so the Modelfile value IS the
+    enforced window. Budgeting off anything larger lets Ollama silently
+    truncate the prompt server-side — dropping the OLDEST turns (the task!)
+    while keeping the tail. Observed: a Dev mid-run greeting "ready for your
+    request" because only the datetime/workspace context survived truncation."""
+    key = (endpoint_url or "") + "|" + (model or "")
+    if key in _OLLAMA_NUMCTX_CACHE:
+        return _OLLAMA_NUMCTX_CACHE[key]
+    val = 0
+    try:
+        import httpx
+        parts = urlparse(endpoint_url or "")
+        base = (parts.scheme or "http") + "://" + (parts.netloc or "localhost:11434")
+        r = httpx.post(base + "/api/show", json={"model": model}, timeout=4)
+        if r.status_code == 200:
+            params = (r.json() or {}).get("parameters") or ""
+            m = re.search(r"(?m)^num_ctx\s+(\d+)", params)
+            if m:
+                val = int(m.group(1))
+    except Exception:
+        val = 0
+    _OLLAMA_NUMCTX_CACHE[key] = val
+    return val
+
+
 def _is_local_openai_compat_url(endpoint_url: str) -> bool:
     try:
         parsed = urlparse(endpoint_url or "")
@@ -2040,6 +2072,7 @@ async def stream_agent_loop(
     forced_tools: Optional[Set[str]] = None,
     uploaded_files: Optional[List[Dict]] = None,
     _is_teacher_run: bool = False,
+    stream_timeout: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -2462,6 +2495,8 @@ async def stream_agent_loop(
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
+    _round_trim_budget = 0        # set below when soft-trim is active
+    _round_trim_reserve = 1024
     try:
         from src.context_compactor import trim_for_context
         from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX, DEFAULT_BUDGET, budget_is_explicit as _budget_is_explicit
@@ -2488,6 +2523,30 @@ async def stream_agent_loop(
             # proves (else 0) — not the passed-in context_length, which can be stale
             # or unset for some callers (#4122 review).
             ctx_for_budget = budget_context_for_model(endpoint_url, model, fallback=context_length)
+            # Ollama enforces a much smaller window at serve time (request
+            # options.num_ctx on the native API; Modelfile/server default on
+            # /v1) than the model card advertises. Budget against the enforced
+            # window (the ollama_num_ctx setting), otherwise the trimmer thinks
+            # a 131K model has endless room while the real 16K window silently
+            # fills — the model then returns EMPTY rounds mid-task (observed:
+            # SAW Developer suffocating at prompt_tokens ~15.8K, num_ctx 16384).
+            try:
+                # NOTE: import with an alias, and use this module's OWN
+                # _is_ollama_openai_compat_url (defined above) — rebinding
+                # either name here makes it function-local and breaks the
+                # earlier use at the top of this function (UnboundLocalError).
+                from src.llm_core import _detect_provider as _llm_detect_provider
+                if _llm_detect_provider(endpoint_url) == "ollama" or _is_ollama_openai_compat_url(endpoint_url):
+                    _ollama_cap = int(get_setting("ollama_num_ctx", 0) or 0)
+                    # The Modelfile's num_ctx (e.g. a user-built 12K variant) can be
+                    # SMALLER than the setting — budget against the tightest window
+                    # or Ollama truncates the prompt server-side, task first.
+                    _served_ctx = _ollama_served_num_ctx(endpoint_url, model)
+                    for _cap_v in (_ollama_cap, _served_ctx):
+                        if _cap_v and _cap_v > 0:
+                            ctx_for_budget = min(ctx_for_budget, _cap_v) if ctx_for_budget else _cap_v
+            except Exception:
+                pass
             effective_budget = compute_input_token_budget(
                 soft_budget,
                 ctx_for_budget,
@@ -2509,6 +2568,11 @@ async def stream_agent_loop(
                     reserve_tokens,
                 )
                 messages = trimmed_messages
+            # Keep the budget for per-round re-trims inside the agent loop —
+            # tool results grow the conversation every round, and a prep-only
+            # trim lets long tool-heavy runs outgrow the window mid-task.
+            _round_trim_budget = effective_budget
+            _round_trim_reserve = reserve_tokens
     except Exception as e:
         logger.warning("[agent] Soft context trim skipped: %s", e)
     prep_timings["context_trim"] = time.time() - _t3
@@ -2563,7 +2627,7 @@ async def stream_agent_loop(
     # an action without emitting the tool call. Capped to prevent a model
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
-    _MAX_INTENT_NUDGES = 2
+    _MAX_INTENT_NUDGES = 3
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -2572,13 +2636,18 @@ async def stream_agent_loop(
     # Match the common phrasings + an action verb that maps to an available
     # tool, so we don't nudge on harmless transitional text like "let me
     # know what you think".
+    # Anchored at line starts OR sentence boundaries ("...the big one. I'll
+    # implement..."), and the verb list includes IMPLEMENTATION verbs — local
+    # devs stall precisely on "I'll implement/write the big file" (observed:
+    # Ornith narrating the largest file then emitting end-of-turn, twice).
     _INTENT_RE = re.compile(
-        r"(?:^|\n)\s*(?:let me|i'?ll|i will|i need to|we need to|need to|"
+        r"(?:^|[\n.:;!?—–]\s*)\s*(?:now\s+)?(?:let me|i'?ll|i will|i need to|we need to|need to|"
         r"i should|we should|i must|we must|going to|let's)\s+"
-        r"(?:tail|check|investigate|look at|see|tail|read|fetch|inspect|"
+        r"(?:tail|check|investigate|look at|see|read|fetch|inspect|"
         r"verify|diagnose|examine|debug|capture|grab|pull|view|run|call|"
         r"trigger|launch|start|kick off|stop|kill|restart|adopt|serve|"
-        r"register|adopt|list|search|find|query|hit|ping|test|use|perform|do)"
+        r"register|list|search|find|query|hit|ping|test|use|perform|do|"
+        r"implement|write|create|build|code|add|fix|rewrite|update|scaffold|generate|make)"
         r"\b[^.\n]{0,140}",
         re.IGNORECASE,
     )
@@ -2593,11 +2662,44 @@ async def stream_agent_loop(
     # using tools — i.e. it was cut off, not finished. Drives a "Continue" event
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
+    # Ollama's runner can die mid-stream under memory pressure ("model runner
+    # has unexpectedly stopped", std::bad_alloc). Ending the turn there throws
+    # away the whole working conversation — instead wait for the runner to
+    # reload and retry the round with the conversation intact.
+    _crash_retries_left = 3
 
     for round_num in range(1, max_rounds + 1):
+        # Re-trim EVERY round, not just at prep: each round appends tool results
+        # (a written file echoes its full content back), so a long tool-heavy
+        # run outgrows the window mid-task — the model then returns an empty
+        # round and the loop mistakes suffocation for completion.
+        if _round_trim_budget > 0 and round_num > 1:
+            try:
+                from src.context_compactor import trim_for_context as _rt_trim
+                _before_rt = estimate_tokens(messages)
+                # Pin the task (first user message) through the trim: it's the
+                # OLDEST conversation turn, i.e. the first thing a deep trim
+                # drops — but chat templates like Ornith's hard-REQUIRE a user
+                # message and 400 the entire request without one ("No user
+                # query found in messages"). Marker stripped again below so it
+                # never reaches the provider payload.
+                _first_user = next((m for m in messages if m.get("role") == "user"), None)
+                if _first_user is not None:
+                    _first_user["_protected"] = True
+                messages = _rt_trim(messages, _round_trim_budget,
+                                    reserve_tokens=_round_trim_reserve)
+                for _m in messages:
+                    _m.pop("_protected", None)
+                _after_rt = estimate_tokens(messages)
+                if _after_rt < _before_rt:
+                    logger.info("[agent] round %s re-trim: %s -> %s tokens (budget=%s)",
+                                round_num, _before_rt, _after_rt, _round_trim_budget)
+            except Exception as _rt_e:
+                logger.warning("[agent] round re-trim skipped: %s", _rt_e)
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
+        _runner_crashed = False  # local runner died mid-stream this round
         # Reset doc streaming state per round
         _doc_acc = ""
         _doc_opened = False
@@ -2653,7 +2755,10 @@ async def stream_agent_loop(
             _last_content = _last_user.lower()
             _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
             all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
-        agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
+        # Caller override first (SAW passes a much larger budget for slow local
+        # models: a CPU-offloaded 35B can spend minutes in prompt eval with no
+        # tokens streaming, then generate for well over the default deadline).
+        agent_stream_timeout = int(stream_timeout or get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
@@ -2714,6 +2819,12 @@ async def stream_agent_loop(
                     time.time() - _round_start,
                     chunk[:500],
                 )
+                if "model runner has unexpectedly stopped" in chunk:
+                    # Ollama runner crash (memory pressure) — flag for the
+                    # post-round recovery retry instead of surfacing the raw
+                    # error and losing the turn.
+                    _runner_crashed = True
+                    continue
                 yield chunk
                 continue
             if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -2880,6 +2991,22 @@ async def stream_agent_loop(
             _round_first_event_logged,
             _round_first_token_logged,
         )
+        # Runner-crash recovery: the local runner died mid-round with (near)
+        # nothing produced. Wait for Ollama to reload the model, then retry the
+        # round with the conversation INTACT — ending the turn here would throw
+        # away all prior working state and hand the gate a half-done workspace.
+        if (_runner_crashed and not native_tool_calls
+                and len(round_response.strip()) < 200):
+            if _crash_retries_left > 0:
+                _crash_retries_left -= 1
+                _wait = 20 * (3 - _crash_retries_left)  # 20s, 40s, 60s
+                logger.warning(
+                    "[agent] local runner crashed in round %s — waiting %ss for it to recover (%s retries left)",
+                    round_num, _wait, _crash_retries_left)
+                yield f'data: {json.dumps({"delta": f"\\n[local model runner crashed - waiting {_wait}s for it to recover, then retrying...]\\n"})}\n\n'
+                await asyncio.sleep(_wait)
+                continue  # burns a round number; the conversation is preserved
+            yield f'data: {json.dumps({"delta": "\\n[local model runner keeps crashing - giving up this turn; see ollama server logs]\\n"})}\n\n'
         tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
             round_response,
             native_tool_calls,
@@ -3026,29 +3153,89 @@ async def stream_agent_loop(
             # tool doesn't pin us in a forever loop.
             _intent_text = _strip_think_blocks(cleaned_round).strip()
             _intent_match = _INTENT_RE.search(_intent_text) if _intent_text else None
+            # A short narration that ends with a colon ("Now the main game
+            # logic — this is the largest piece:") is an announced-but-absent
+            # action even when no intent verb matched.
+            _ends_with_colon = bool(_intent_text) and _intent_text.endswith(":")
+            # A round with NO visible output and NO tool call mid-task is
+            # always a stall (observed: 33-41s of pure reasoning then EOS after
+            # a string of read_file rounds) — there's no legit "answer" that's
+            # completely empty. Gate on ANY prior tool activity this turn
+            # (tool_events), NOT _effectful_used: that flag ignores reads, so a
+            # turn that only read files and then went silent slipped through.
+            _empty_round = not _intent_text and bool(tool_events)
             # Only nudge when the round REALLY looks like an unfinished
             # promise: short response (<400 chars), no fenced code/answer,
             # and an action-intent phrase was matched. Long answers that
             # happen to contain "let me know" are not stalls.
             _looks_like_promise = (
                 not guide_only
-                and _intent_match is not None
+                and (_intent_match is not None or _ends_with_colon or _empty_round)
                 and len(_intent_text) < 400
                 and "```" not in _intent_text
                 and _intent_nudge_count < _MAX_INTENT_NUDGES
             )
             if _looks_like_promise:
                 _intent_nudge_count += 1
-                _matched_phrase = _intent_match.group(0).strip()
+                if _intent_match:
+                    _matched_phrase = _intent_match.group(0).strip()
+                elif _intent_text:
+                    _matched_phrase = _intent_text.splitlines()[-1].strip()[-140:]
+                else:
+                    _matched_phrase = "(no output and no tool call this round)"
                 logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
                 _lower_phrase = _matched_phrase.lower()
-                _cookbook_log_hint = ""
-                if any(_word in _lower_phrase for _word in ("log", "logs", "output", "tail", "status")):
-                    _cookbook_log_hint = (
+                # Word-boundary matching — plain substring checks misclassify
+                # ("log" is inside "logic", so a giant-write stall got the
+                # Cookbook-logs hint).
+                def _has_word(*_words):
+                    return any(re.search(r"\b" + re.escape(_w) + r"\b", _lower_phrase)
+                               for _w in _words)
+                # Action-specific escape hatch: the stall is usually the model
+                # planning ONE oversized operation (giant write, whole-file
+                # read, full-dump command). Point it at the small version of
+                # the same action so the retry is actually completable.
+                _action_hint = ""
+                if _empty_round and not _intent_text:
+                    # No phrase to classify — cover all three escape hatches.
+                    _action_hint = (
+                        " Continue with ONE SMALL tool call right now: use grep or "
+                        "read_file with offset+limit if you are inspecting a big file, "
+                        "a filtered command (grep/head/tail) if you are running "
+                        "something with large output, or a small (<150 line) "
+                        "write_file if you are implementing."
+                    )
+                elif _has_word("log", "logs", "output", "tail", "status"):
+                    _action_hint = (
                         " If this is about a Cookbook/model serve, the concrete calls are: "
                         "`list_served_models` first, then `tail_serve_output` with the "
                         "session_id from the serve/list result. Never answer with "
                         "\"check logs\" when those tools are available."
+                    )
+                elif _has_word("read", "inspect", "review", "look at", "examine", "analyze", "scan", "open"):
+                    # Whole-file reads of big files stall local models the same
+                    # way giant writes do. Chunk it.
+                    _action_hint = (
+                        " Do NOT (re)read a huge file in one call — that is what stalled "
+                        "you. Use grep to jump straight to the relevant function/section, "
+                        "or read_file with offset+limit to pull ONLY the chunk you need "
+                        "(e.g. ~120 lines around the target). Make that smaller call now."
+                    )
+                elif _has_word("run", "execute", "command", "bash", "python", "test", "check"):
+                    _action_hint = (
+                        " If the command would print a whole large file or huge output, "
+                        "FILTER it instead of dumping everything (grep for the pattern, "
+                        "or head/tail for the first/last ~80 lines). Emit the filtered "
+                        "command now."
+                    )
+                elif _has_word("write", "implement", "create", "build", "code", "file", "logic"):
+                    # Local models stall on ONE giant write (observed: 3x ~105s
+                    # thinking rounds, zero calls). Steer them to smaller units.
+                    _action_hint = (
+                        " If the file is too large to emit in one call, do NOT retry the "
+                        "same giant write: SPLIT it into several small files/modules "
+                        "(each under ~150 lines) and emit the write_file call for the "
+                        "FIRST small piece right now."
                     )
                 messages.append({
                     "role": "system",
@@ -3058,7 +3245,7 @@ async def stream_agent_loop(
                         "see you announced the action but didn't run it, which "
                         "is the most frustrating thing you can do. "
                         "DO IT NOW: emit the actual function call this turn. "
-                        f"{_cookbook_log_hint}"
+                        f"{_action_hint}"
                         "If you decided not to do it after all, say so plainly in "
                         "one sentence instead of restating the plan."
                     ),

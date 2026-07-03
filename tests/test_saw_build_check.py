@@ -26,6 +26,20 @@ def test_flutter_trivial_main_dart_fails(tmp_path):
     assert ok is False
 
 
+def test_flutter_project_in_subfolder_is_found(tmp_path):
+    # The model often runs `flutter create my_app`, which scaffolds into a
+    # <workspace>/my_app/ subfolder. The gate must still find and validate it
+    # there (previously this skipped the gate entirely -> QAS could false-pass).
+    proj = tmp_path / "my_app"
+    (proj / "lib").mkdir(parents=True)
+    (proj / "pubspec.yaml").write_text("name: my_app\n", encoding="utf-8")
+    # Missing entry point in the subfolder must still FAIL, and the detail should
+    # point at the subfolder so the Dev knows where the real project root is.
+    ok, label, detail = orch._build_check(str(tmp_path))
+    assert ok is False
+    assert "my_app/lib/main.dart" in detail
+
+
 def test_python_compiles(tmp_path):
     (tmp_path / "add.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
     res = orch._build_check(str(tmp_path))

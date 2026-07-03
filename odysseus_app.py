@@ -56,8 +56,10 @@ def _run_helper(rel_path: str) -> None:
 
 
 def start_background():
-    """Start Ollama + ChromaDB (idempotent helpers) and the server. Returns the
-    uvicorn process if we launched it (so we can stop it on close), else None."""
+    """Kick off Ollama + ChromaDB (idempotent helpers) and the server WITHOUT
+    waiting — the window opens on a splash immediately and flips to the app
+    when the server answers (see app_window). Returns the uvicorn process if
+    we launched it, else None (already running from a previous session)."""
     _run_helper(os.path.join("scripts", "launch-ollama.ps1"))
     _run_helper(os.path.join("scripts", "launch-chromadb.ps1"))
     proc = None
@@ -65,46 +67,20 @@ def start_background():
         proc = subprocess.Popen(
             [VENV_PY, "-m", "uvicorn", "app:app", "--host", HOST, "--port", str(PORT)],
             cwd=ROOT, creationflags=_NO_WINDOW)
-    deadline = time.time() + 90
-    while time.time() < deadline and not _server_up():
-        time.sleep(0.7)
     return proc
 
 
-def _apply_icon(*_args) -> None:
-    """Push the Odysseus icon onto the window (title bar + taskbar) once it exists."""
-    if os.name != "nt" or not os.path.exists(ICON):
-        return
-    try:
-        import ctypes
-        u = ctypes.windll.user32
-        WM_SETICON, SMALL, BIG, IMG, LR = 0x0080, 0, 1, 1, 0x00000010
-        small = u.LoadImageW(None, ICON, IMG, 16, 16, LR)
-        big = u.LoadImageW(None, ICON, IMG, 32, 32, LR)
-        for _ in range(50):
-            hwnd = u.FindWindowW(None, TITLE)
-            if hwnd:
-                if small:
-                    u.SendMessageW(hwnd, WM_SETICON, SMALL, small)
-                if big:
-                    u.SendMessageW(hwnd, WM_SETICON, BIG, big)
-                break
-            time.sleep(0.1)
-    except Exception:
-        pass
-
-
 def open_window() -> None:
-    import webview
-    storage = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-                           "Odysseus", "WebView2")
-    try:
-        os.makedirs(storage, exist_ok=True)
-    except Exception:
-        storage = None
-    webview.create_window(TITLE, URL, width=1440, height=920, min_size=(900, 600))
-    # private_mode=False keeps cookies/login; callback sets the icon after open.
-    webview.start(_apply_icon, private_mode=False, storage_path=storage)
+    """Host the UI in the shared frameless window (see app_window.py).
+
+    app_window owns all the window chrome (frameless title bar, native
+    resize/snap, js_api min/max/close, icon); we just point it at our URL/icon."""
+    os.environ.setdefault("ODYSSEUS_URL", URL)
+    if os.path.exists(ICON):
+        os.environ.setdefault("ODYSSEUS_ICON", ICON)
+    import app_window
+    if not app_window.open_native_window(URL):
+        app_window.open_app_mode(URL)
 
 
 def main() -> None:
@@ -112,7 +88,12 @@ def main() -> None:
     try:
         open_window()
     finally:
-        if proc is not None and proc.poll() is None:
+        # Keep the server WARM by default: closing the window leaves uvicorn
+        # (and Ollama/ChromaDB, which were always independent) running, so the
+        # next launch skips the slow boot and the splash flips instantly.
+        # Set ODYSSEUS_KILL_SERVER_ON_EXIT=1 to restore the old stop-on-close.
+        if (os.environ.get("ODYSSEUS_KILL_SERVER_ON_EXIT", "").strip() in ("1", "true", "yes")
+                and proc is not None and proc.poll() is None):
             try:
                 proc.terminate()
             except Exception:

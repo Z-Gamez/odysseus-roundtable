@@ -232,6 +232,40 @@
   <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#282c34);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
     <div id="loader-wave" style="color:var(--brand-color,var(--red,#e06c75));font-family:monospace;font-size:11px;opacity:.5">▁▂▃</div>
   </div>
+  <!-- Native window controls — only visible inside the frameless desktop app
+       (body.native-app is added when pywebview announces itself). -->
+  <div class="win-controls" id="win-controls" role="group" aria-label="Window controls">
+    <button type="button" class="win-btn" id="win-min" title="Minimize" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1"/></svg></button>
+    <button type="button" class="win-btn" id="win-max" title="Maximize" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" stroke-width="1"/></svg></button>
+    <button type="button" class="win-btn win-close" id="win-cls" title="Close" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.1"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.1"/></svg></button>
+  </div>
+  <script nonce="{{CSP_NONCE}}">
+  (function(){
+    // Frameless desktop window: wire the in-page window controls + drag regions.
+    function nativeApp(){
+      if (document.body.classList.contains('native-app')) return;
+      document.body.classList.add('native-app');
+      var api = function(){ return window.pywebview && window.pywebview.api; };
+      var on = function(id, fn){ var el = document.getElementById(id);
+        if (el) el.addEventListener('click', function(){ var a = api(); if (a && a[fn]) a[fn](); }); };
+      on('win-min', 'win_minimize'); on('win-max', 'win_toggle_max'); on('win-cls', 'win_close');
+      // Drag regions: the top bar + sidebar header move the window. `app-region:
+      // drag` (style.css) gives native drag/snap on new WebView2; the
+      // pywebview-drag-region class is the JS fallback for older runtimes.
+      ['.chat-top-bar', '.sidebar-header'].forEach(function(sel){
+        var el = document.querySelector(sel);
+        if (!el) return;
+        el.classList.add('pywebview-drag-region');
+        el.addEventListener('dblclick', function(e){
+          if (e.target !== el) return; // only bare-strip double-clicks maximize
+          var a = api(); if (a && a.win_toggle_max) a.win_toggle_max();
+        });
+      });
+    }
+    if (window.pywebview) nativeApp();
+    else window.addEventListener('pywebviewready', nativeApp);
+  })();
+  </script>
   <script nonce="{{CSP_NONCE}}">
   (function(){
     var el=document.getElementById('loader-wave');

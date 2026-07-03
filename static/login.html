@@ -248,9 +248,57 @@
     vertical-align: -3px;
   }
   @keyframes login-spin { to { transform: rotate(360deg); } }
+  /* Native window controls — frameless desktop app only (body.native-app is
+     set by the pywebview bootstrap below). Mirrors static/style.css. */
+  .win-drag {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 130px; height: 34px;
+    z-index: 1999;
+    app-region: drag; -webkit-app-region: drag;
+  }
+  .win-controls {
+    display: none;
+    position: fixed; top: 0; right: 0; z-index: 2000; height: 34px;
+    app-region: no-drag; -webkit-app-region: no-drag;
+  }
+  body.native-app .win-controls, body.native-app .win-drag { display: flex; }
+  .win-btn {
+    width: 42px; height: 34px;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: none; border-radius: 0; padding: 0;
+    color: color-mix(in srgb, var(--fg) 62%, transparent);
+    cursor: default;
+  }
+  .win-btn:hover { background: color-mix(in srgb, var(--fg) 12%, transparent); color: var(--fg); }
+  .win-btn.win-close:hover { background: #e81123; color: #fff; }
 </style>
 </head>
 <body>
+<div class="win-drag" id="win-drag" aria-hidden="true"></div>
+<div class="win-controls" id="win-controls" role="group" aria-label="Window controls">
+  <button type="button" class="win-btn" id="win-min" title="Minimize" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1"/></svg></button>
+  <button type="button" class="win-btn" id="win-max" title="Maximize" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" stroke-width="1"/></svg></button>
+  <button type="button" class="win-btn win-close" id="win-cls" title="Close" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.1"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.1"/></svg></button>
+</div>
+<script nonce="{{CSP_NONCE}}">
+(function(){
+  function nativeApp(){
+    if (document.body.classList.contains('native-app')) return;
+    document.body.classList.add('native-app');
+    var api = function(){ return window.pywebview && window.pywebview.api; };
+    var on = function(id, fn){ var el = document.getElementById(id);
+      if (el) el.addEventListener('click', function(){ var a = api(); if (a && a[fn]) a[fn](); }); };
+    on('win-min', 'win_minimize'); on('win-max', 'win_toggle_max'); on('win-cls', 'win_close');
+    var strip = document.getElementById('win-drag');
+    if (strip) {
+      strip.classList.add('pywebview-drag-region'); // JS-drag fallback
+      strip.addEventListener('dblclick', function(){ var a = api(); if (a && a.win_toggle_max) a.win_toggle_max(); });
+    }
+  }
+  if (window.pywebview) nativeApp();
+  else window.addEventListener('pywebviewready', nativeApp);
+})();
+</script>
 <main class="card">
   <h1 class="logo">
     <svg class="logo-boat" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg><span>Odysseus</span>

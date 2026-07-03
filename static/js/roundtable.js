@@ -1,14 +1,16 @@
-/* SAW Round Table — self-contained overlay UI.
+/* SAW Round Table — self-contained edge-to-edge view.
  *
  * Additive: attaches its own handler to the #rail-roundtable button and renders
- * everything inside one injected overlay, so it doesn't touch Odysseus's view
- * framework. Talks to /api/roundtable/* and parses the orchestrator's tagged SSE
- * stream (run_start / role_start / delta / tool / role_done / gate / run_done).
+ * everything inside one injected panel that fills the chat column (beside the
+ * rail), so it doesn't touch Odysseus's view framework. Talks to
+ * /api/roundtable/* and parses the orchestrator's tagged SSE stream
+ * (run_start / role_start / delta / tool / role_done / gate / pr / run_done).
  */
 (function () {
   "use strict";
 
   var ACCENT = "#7F77DD";           // SAW violet
+  var ACCENT_SOFT = "rgba(127,119,221,.14)";
   var OK = "#1D9E75", BAD = "#D85A30", WARN = "#C9A227";
 
   var ROLE_LABELS = {
@@ -16,187 +18,487 @@
     qas: "QAS · Reviewer", security: "Security", tech_writer: "Tech Writer",
     rte: "RTE · Release"
   };
-  var DEFAULT_WORKSPACE = "C\\:\\Odysseus\\saw-sandbox".replace(/\\/g, "\\"); // display only
 
-  var els = null;       // overlay element refs once built
-  var current = null;   // { runId, blocks: {roleKey_iter: bodyEl}, chips: {role: el} }
+  var els = null;       // element refs once built
+  var current = null;   // { runId, blocks: {roleKey_iter: state}, chips: {role: el} }
+  var chipTimer = null; // elapsed-time interval while a run is live
 
   function h(html) { var t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; }
   function esc(s) { return (s == null ? "" : String(s)).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
+  function fmtDur(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    return s < 60 ? s + "s" : Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  }
+  // The backend still keys runs by a short title; derive one from the project
+  // description so the user doesn't have to fill a separate field.
+  function deriveTitle(desc) {
+    var t = (desc || "").trim().split("\n")[0].trim();
+    if (t.length > 80) t = t.slice(0, 77) + "...";
+    return t || "Round Table project";
+  }
+  function relTime(ts) {
+    if (!ts) return "";
+    var s = Math.max(0, Date.now() / 1000 - Number(ts));
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
 
-  // ---- styles --------------------------------------------------------------
+  // ---- inline SVG icons (no emoji) ------------------------------------------
+  var ICONS = {
+    table:   '<path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8z"/><circle cx="12" cy="19.5" r="1.4"/>',
+    play:    '<path d="M7 4.5v15l12-7.5z"/>',
+    stop:    '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    close:   '<path d="M6 6l12 12M18 6L6 18"/>',
+    check:   '<path d="M4.5 12.5l5 5 10-11"/>',
+    cross:   '<path d="M6 6l12 12M18 6L6 18"/>',
+    halt:    '<path d="M12 5v9M12 17.5v.5"/>',
+    chev:    '<path d="M9 6l6 6-6 6"/>',
+    tool:    '<path d="M14.7 6.3a4 4 0 0 0-5.3 5.2L4 17v3h3l5.4-5.4a4 4 0 0 0 5.2-5.3l-2.8 2.8-2.1-.7-.7-2.1z"/>',
+    branch:  '<circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 7.2v9.6M18 11.2c0 3-3 4-6 4"/>',
+    refresh: '<path d="M20 11a8 8 0 1 0-2.3 6.3M20 5v6h-6"/>',
+    folder:  '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    chevd:   '<path d="M6 9l6 6 6-6"/>',
+    up:      '<path d="M12 19V5M5 12l7-7 7 7"/>',
+    discuss: '<path d="M21 11a7 7 0 0 1-7 7H7l-4 3V11a7 7 0 0 1 7-7h4a7 7 0 0 1 7 7z"/><path d="M8.5 10.5h7M8.5 13.5h4"/>',
+    bsa:       '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4.5V3h6v1.5M9 9.5h6M9 13h6M9 16.5h4"/>',
+    architect: '<path d="M4 20L20 4M4 20h5M4 20v-5M20 4h-5M20 4v5"/>',
+    developer: '<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M13 4l-2 16"/>',
+    qas:       '<path d="M12 3l7 3v6c0 4-3 6.5-7 8.5C8 18.5 5 16 5 12V6z"/><path d="M9 12l2 2 4-4.5"/>',
+    security:  '<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+    tech_writer: '<path d="M5 4h9l5 5v11H5z"/><path d="M14 4v5h5M8 13h8M8 16.5h6"/>',
+    rte:       '<circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 7.2v9.6M18 11.2c0 3-3 4-6 4"/>'
+  };
+  function icon(name, size) {
+    return '<svg class="rt-i" width="' + (size || 14) + '" height="' + (size || 14) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || ICONS.tool) + '</svg>';
+  }
+
+  // ---- styles ----------------------------------------------------------------
   function injectStyles() {
     if (document.getElementById("rt-styles")) return;
     var css = `
-    #rt-overlay{position:fixed;inset:0;z-index:9000;display:none;background:rgba(0,0,0,.45);
-      backdrop-filter:blur(2px);}
+    /* Frost the ENTIRE window — including behind/around the rail — so the blur
+       has no visible boundary. The rail (and its hamburger) are lifted ABOVE
+       the glass while the Round Table is open, so they stay crisp; the
+       win-controls (z 2000) stay BELOW it, so they frost too. */
+    #rt-backdrop{position:fixed;inset:0;z-index:2100;display:none;
+      background:rgba(0,0,0,.35);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);}
+    #rt-backdrop.rt-open{display:block;}
+    body.rt-open .sidebar,body.rt-open .icon-rail{z-index:2120;}
+    body.rt-open .hamburger-btn{z-index:2130;}
+    /* Top edge aligned with the rail card (10px), matching margins all around. */
+    #rt-overlay{position:absolute;inset:10px 8px 10px 2px;z-index:2150;display:none;flex-direction:column;
+      background:var(--sidebar-bg,var(--panel,#14161b));color:inherit;
+      border:1px solid color-mix(in srgb, var(--fg,#9cdef2) 11%, transparent);
+      border-radius:16px;box-shadow:0 10px 34px rgba(0,0,0,.4);overflow:hidden;}
+    #rt-overlay.rt-fixed{position:fixed;inset:40px 12px 12px 12px;z-index:2150;}
     #rt-overlay.rt-open{display:flex;}
-    #rt-panel{margin:auto;width:min(1180px,96vw);height:min(880px,94vh);display:flex;flex-direction:column;
-      background:var(--bg,#16161a);color:inherit;border:1px solid rgba(127,127,127,.28);border-radius:14px;
-      box-shadow:0 24px 80px rgba(0,0,0,.5);overflow:hidden;}
-    #rt-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(127,127,127,.2);}
-    #rt-head .rt-title{font-weight:700;font-size:15px;letter-spacing:.2px;}
-    #rt-head .rt-title b{color:${ACCENT};}
+    /* Floating thin scrollbars everywhere inside the panel (standard props win
+       over the app's chunky webkit styling on modern Chromium). */
+    #rt-overlay, #rt-overlay *{scrollbar-width:thin;
+      scrollbar-color:color-mix(in srgb, var(--fg,#9cdef2) 22%, transparent) transparent;}
+    #rt-panel{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;}
+    #rt-overlay .rt-i{flex:0 0 auto;}
+    @keyframes rt-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+    @keyframes rt-spin{to{transform:rotate(360deg)}}
+
+    #rt-head{display:flex;align-items:center;gap:12px;padding:12px 16px 8px;flex:0 0 auto;}
+    body.native-app #rt-head{app-region:drag;-webkit-app-region:drag;}
+    body.native-app #rt-head :is(button,a,input){app-region:no-drag;-webkit-app-region:no-drag;}
+    #rt-head .rt-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:13.5px;letter-spacing:.2px;color:${ACCENT};}
+    #rt-chip{display:none;align-items:center;gap:7px;font-size:11.5px;border-radius:999px;padding:4px 12px;
+      background:${ACCENT_SOFT};color:inherit;white-space:nowrap;max-width:40%;overflow:hidden;text-overflow:ellipsis;}
+    #rt-chip.on{display:inline-flex;}
+    #rt-chip .rt-chip-dot{width:7px;height:7px;border-radius:50%;background:${ACCENT};flex:0 0 auto;}
+    #rt-chip.run .rt-chip-dot{animation:rt-pulse 1.6s infinite;}
+    #rt-chip.ok{background:rgba(29,158,117,.14);} #rt-chip.ok .rt-chip-dot{background:${OK};}
+    #rt-chip.bad{background:rgba(216,90,48,.14);} #rt-chip.bad .rt-chip-dot{background:${BAD};}
+    #rt-chip.warn{background:rgba(201,162,39,.14);} #rt-chip.warn .rt-chip-dot{background:${WARN};}
     #rt-head .rt-spacer{flex:1;}
-    #rt-x{cursor:pointer;border:none;background:transparent;color:inherit;font-size:20px;opacity:.7;padding:2px 8px;border-radius:8px;}
-    #rt-x:hover{opacity:1;background:rgba(127,127,127,.15);}
-    #rt-body{flex:1;display:flex;min-height:0;}
-    #rt-left{width:340px;min-width:300px;border-right:1px solid rgba(127,127,127,.2);display:flex;flex-direction:column;padding:14px;gap:10px;overflow:auto;}
+    .rt-tabs{display:inline-flex;background:color-mix(in srgb, var(--fg,#9cdef2) 6%, transparent);
+      border-radius:11px;padding:3px;gap:2px;flex:0 0 auto;}
+    .rt-tab{cursor:pointer;border:none;background:transparent;color:inherit;font:inherit;font-size:12px;
+      padding:4px 13px;border-radius:8px;opacity:.6;transition:.15s;}
+    .rt-tab:hover{opacity:1;}
+    .rt-tab.active{opacity:1;background:${ACCENT_SOFT};color:${ACCENT};font-weight:700;}
+    #rt-x{cursor:pointer;border:none;background:transparent;color:inherit;opacity:.6;padding:6px;border-radius:8px;
+      display:inline-flex;align-items:center;}
+    #rt-x:hover{opacity:1;background:color-mix(in srgb, var(--fg,#9cdef2) 10%, transparent);}
+
+    #rt-body{flex:1;display:flex;min-height:0;gap:4px;padding:0 8px 8px;}
+    #rt-left{width:270px;min-width:240px;display:flex;flex-direction:column;gap:10px;overflow:auto;padding:14px;
+      background:rgba(0,0,0,.14);border-radius:12px;}
     #rt-main{flex:1;display:flex;flex-direction:column;min-width:0;}
-    .rt-field label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.6px;opacity:.65;margin:0 0 4px;}
-    .rt-field input,.rt-field textarea{width:100%;box-sizing:border-box;background:var(--input-bg,rgba(127,127,127,.08));
-      color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:9px;padding:8px 10px;font:inherit;font-size:13px;}
-    .rt-field textarea{resize:vertical;min-height:54px;}
-    #rt-run{margin-top:2px;width:100%;cursor:pointer;border:none;border-radius:10px;padding:11px;font:inherit;font-weight:700;
-      color:#fff;background:${ACCENT};display:flex;align-items:center;justify-content:center;gap:6px;text-align:center;}
+
+    .rt-field label{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;opacity:.55;margin:0 0 4px;}
+    .rt-field input,.rt-field textarea{width:100%;box-sizing:border-box;background:color-mix(in srgb, var(--fg,#9cdef2) 6%, transparent);
+      color:inherit;border:1px solid transparent;border-radius:10px;
+      padding:8px 10px;font:inherit;font-size:12.5px;transition:border-color .15s;}
+    .rt-field input:focus,.rt-field textarea:focus{outline:none;border-color:${ACCENT};}
+    .rt-field textarea{resize:vertical;min-height:52px;}
+    #rt-desc{min-height:100px;}
+    #rt-ws-field{position:relative;}
+    #rt-ws-btn{width:100%;display:flex;align-items:center;gap:8px;box-sizing:border-box;cursor:pointer;text-align:left;
+      background:color-mix(in srgb, var(--fg,#9cdef2) 6%, transparent);color:inherit;
+      border:1px solid transparent;border-radius:10px;
+      padding:8px 10px;font:inherit;font-size:12.5px;transition:border-color .15s;}
+    #rt-ws-btn:hover{border-color:${ACCENT};}
+    #rt-ws-btn > .rt-i:first-child{color:${ACCENT};}
+    #rt-ws-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    #rt-ws-btn > .rt-i:last-child{opacity:.5;}
+    #rt-ws-menu{display:none;position:absolute;left:0;right:0;top:100%;margin-top:6px;z-index:20;
+      background:var(--sidebar-bg,var(--panel,#14161b));
+      border-radius:12px;box-shadow:0 10px 26px rgba(0,0,0,.55);padding:8px;}
+    #rt-ws-menu.open{display:block;}
+    #rt-ws-path{width:100%;box-sizing:border-box;background:color-mix(in srgb, var(--fg,#9cdef2) 6%, transparent);color:inherit;
+      border:1px solid transparent;border-radius:8px;
+      padding:6px 8px;font:inherit;font-size:11.5px;margin-bottom:6px;}
+    #rt-ws-path:focus{outline:none;border-color:${ACCENT};}
+    #rt-ws-list{max-height:210px;overflow:auto;display:flex;flex-direction:column;gap:2px;}
+    .rt-ws-row{display:flex;align-items:center;gap:7px;padding:6px 8px;border-radius:8px;font-size:12px;cursor:pointer;opacity:.85;}
+    .rt-ws-row:hover{background:color-mix(in srgb, ${ACCENT} 12%, transparent);opacity:1;}
+    .rt-ws-row .rt-i{color:${ACCENT};opacity:.8;}
+    .rt-ws-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .rt-ws-empty{padding:8px;font-size:11.5px;opacity:.5;}
+    #rt-ws-foot{display:flex;justify-content:flex-end;margin-top:6px;}
+    #rt-ws-use{cursor:pointer;border:none;border-radius:8px;padding:6px 12px;font:inherit;font-weight:700;font-size:12px;
+      color:#fff;background:${ACCENT};}
+    #rt-ws-use:disabled{opacity:.5;cursor:default;}
+    #rt-run{width:100%;cursor:pointer;border:none;border-radius:10px;padding:10px;font:inherit;font-weight:700;font-size:13px;
+      color:#fff;background:${ACCENT};display:flex;align-items:center;justify-content:center;gap:8px;transition:filter .15s;}
+    #rt-run:hover{filter:brightness(1.1);}
     #rt-run:disabled{opacity:.5;cursor:default;}
-    .rt-recent{margin-top:8px;}
-    .rt-recent h4{margin:6px 0;font-size:11px;text-transform:uppercase;letter-spacing:.6px;opacity:.6;}
-    .rt-recent .rt-run-item{padding:7px 9px;border:1px solid rgba(127,127,127,.18);border-radius:8px;margin-bottom:5px;cursor:pointer;font-size:12px;display:flex;gap:8px;align-items:center;}
-    .rt-recent .rt-run-item:hover{border-color:${ACCENT};}
-    .rt-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:rgba(127,127,127,.5);}
-    #rt-pipeline{display:flex;flex-direction:column;align-items:stretch;gap:5px;}
+
+    #rt-pipeline{display:flex;flex-direction:column;margin-top:6px;}
     #rt-pipeline:empty{display:none;}
-    #rt-pipeline::before{content:"Pipeline";font-size:11px;text-transform:uppercase;letter-spacing:.6px;opacity:.65;margin-bottom:1px;}
-    .rt-chip{display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid rgba(127,127,127,.3);border-radius:8px;font-size:12px;font-weight:600;opacity:.5;transition:.2s;}
-    .rt-chip.run{opacity:1;border-color:${ACCENT};box-shadow:0 0 0 2px rgba(127,119,221,.18);}
-    .rt-chip.done{opacity:1;}
-    .rt-chip .rt-cmodel{font-weight:400;opacity:.6;font-size:10.5px;}
-    .rt-arrow{display:none;}
-    .rt-gatebadge{font-size:14px;}
-    #rt-status{padding:8px 16px;font-size:12px;border-bottom:1px solid rgba(127,127,127,.2);opacity:.85;}
-    #rt-log{flex:1;overflow:auto;padding:14px 16px;}
-    .rt-role-block{margin-bottom:14px;border:1px solid rgba(127,127,127,.18);border-radius:10px;overflow:hidden;}
-    .rt-role-head{padding:7px 12px;font-weight:700;font-size:12px;background:rgba(127,119,221,.10);border-bottom:1px solid rgba(127,127,127,.15);display:flex;gap:8px;align-items:center;}
-    .rt-role-head .rt-iter{font-weight:400;opacity:.6;font-size:11px;}
-    .rt-role-body{padding:10px 12px;white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.5;}
-    .rt-tool{font-size:11px;opacity:.6;font-style:italic;margin:3px 0;}
-    .rt-gate{margin:10px 0;padding:9px 12px;border-radius:9px;font-size:12.5px;font-weight:600;border:1px solid;}
-    .rt-gate.pass{color:${OK};border-color:${OK};background:rgba(29,158,117,.08);}
-    .rt-gate.fail{color:${BAD};border-color:${BAD};background:rgba(216,90,48,.08);}
-    .rt-gate.halt{color:${WARN};border-color:${WARN};background:rgba(201,162,39,.10);}
-    .rt-final{margin:8px 0 0;padding:11px 13px;border-radius:10px;font-weight:700;text-align:center;}
-    .rt-continue{margin:12px 0 4px;border:1px solid ${ACCENT};border-radius:10px;padding:12px;background:rgba(127,119,221,.06);}
-    .rt-continue .rt-continue-h{font-size:12.5px;font-weight:600;margin-bottom:8px;opacity:.9;}
-    .rt-continue textarea{width:100%;box-sizing:border-box;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:9px;padding:8px 10px;font:inherit;font-size:13px;min-height:54px;resize:vertical;}
-    .rt-continue button{margin-top:8px;cursor:pointer;border:none;border-radius:9px;padding:9px 14px;font:inherit;font-weight:700;color:#fff;background:${ACCENT};}
-    #rt-cfg{cursor:pointer;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;font:inherit;font-size:12px;padding:4px 10px;border-radius:8px;opacity:.85;}
-    #rt-cfg:hover{opacity:1;border-color:${ACCENT};}
-    #rt-config{flex:1;min-height:0;overflow:auto;padding:16px 20px;display:none;flex-direction:column;}
-    #rt-config.open{display:flex;}
-    #rt-config h3{margin:0;font-size:15px;}
-    .rt-cfg-sub{opacity:.6;font-size:12px;margin:4px 0 14px;}
-    .rt-cfg-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid rgba(127,127,127,.15);}
-    .rt-cfg-row .rt-cfg-role{flex:0 0 150px;font-weight:600;font-size:13px;}
-    .rt-cfg-row select{flex:1;min-width:0;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:8px;padding:7px 9px;font:inherit;font-size:12.5px;}
-    #rt-cfg-done,#rt-hist-done{cursor:pointer;border:none;border-radius:8px;padding:6px 14px;font:inherit;font-weight:600;color:#fff;background:${ACCENT};}
-    #rt-hist{cursor:pointer;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;font:inherit;font-size:12px;padding:4px 10px;border-radius:8px;opacity:.85;margin-right:6px;}
-    #rt-hist:hover{opacity:1;border-color:${ACCENT};}
-    #rt-history{flex:1;min-height:0;overflow:auto;padding:16px 20px;display:none;flex-direction:column;}
-    #rt-history.open{display:flex;}
-    #rt-history h3{margin:0;font-size:15px;}
-    #rt-hist-list .rt-run-item{padding:9px 11px;border:1px solid rgba(127,127,127,.18);border-radius:8px;margin-bottom:6px;cursor:pointer;font-size:13px;display:flex;gap:10px;align-items:center;}
-    #rt-hist-list .rt-run-item:hover{border-color:${ACCENT};}
-    #rt-hist-list .rt-reuse{flex:0 0 auto;cursor:pointer;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;font:inherit;font-size:11.5px;padding:3px 9px;border-radius:7px;opacity:.85;}
-    #rt-hist-list .rt-reuse:hover{opacity:1;border-color:${ACCENT};color:${ACCENT};}
-    .rt-pr{margin:12px 0;border:1px solid ${ACCENT};border-radius:10px;overflow:hidden;}
-    .rt-pr-head{padding:8px 12px;font-weight:700;font-size:13px;background:rgba(127,119,221,.12);}
-    .rt-pr-mode{font-weight:400;font-size:11px;opacity:.6;border:1px solid rgba(127,127,127,.3);border-radius:6px;padding:1px 6px;margin-left:6px;}
+    #rt-pipeline::before{content:"Pipeline";font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;opacity:.55;margin-bottom:10px;}
+    .rt-step{display:flex;gap:10px;align-items:flex-start;position:relative;padding-bottom:16px;}
+    .rt-step::before{content:"";position:absolute;left:9px;top:22px;bottom:2px;width:2px;border-radius:1px;
+      background:color-mix(in srgb, var(--fg,#9cdef2) 14%, transparent);}
+    .rt-step:last-child{padding-bottom:2px;}
+    .rt-step:last-child::before{display:none;}
+    .rt-step.done::before{background:${ACCENT};opacity:.55;}
+    .rt-step .rt-step-ico{width:20px;height:20px;border-radius:50%;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+      border:1.5px solid color-mix(in srgb, var(--fg,#9cdef2) 22%, transparent);color:transparent;transition:.2s;}
+    .rt-step.run .rt-step-ico{border-color:${ACCENT};background:${ACCENT};color:#fff;animation:rt-pulse 1.6s infinite;}
+    .rt-step.done .rt-step-ico{border-color:transparent;background:${ACCENT_SOFT};color:${ACCENT};}
+    .rt-step.fail .rt-step-ico{border-color:transparent;background:rgba(216,90,48,.18);color:${BAD};animation:none;}
+    .rt-step .rt-step-label{font-size:12px;font-weight:600;display:block;opacity:.55;}
+    .rt-step.run .rt-step-label,.rt-step.done .rt-step-label,.rt-step.fail .rt-step-label{opacity:1;}
+    .rt-step .rt-cmodel{display:block;font-size:10.5px;opacity:.5;font-weight:400;max-width:200px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+    #rt-status{padding:8px 16px 4px;font-size:11.5px;opacity:.6;flex:0 0 auto;}
+    #rt-log{flex:1;overflow:auto;padding:10px 12px 14px;display:flex;flex-direction:column;gap:10px;}
+
+    /* Role cards as terminal windows: near-black surface, titlebar with
+       traffic-light dots, prompt-prefixed command lines, blinking cursor. */
+    @keyframes rt-blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+    .rt-role-block{background:#0b0e14;border-radius:12px;overflow:hidden;flex:0 0 auto;}
+    .rt-role-head{padding:7px 12px;font-weight:700;font-size:11.5px;display:flex;gap:8px;align-items:center;cursor:pointer;
+      background:#151a23;user-select:none;}
+    .rt-role-block.live .rt-role-head{background:#1a1830;}
+    .rt-role-head .rt-role-ico{color:${ACCENT};display:inline-flex;}
+    .rt-role-head .rt-iter{font-weight:400;opacity:.5;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .rt-role-head .rt-head-spacer{flex:1;}
+    .rt-role-head .rt-live-dot{width:7px;height:7px;border-radius:50%;background:${ACCENT};animation:rt-pulse 1.6s infinite;display:none;}
+    .rt-role-block.live .rt-live-dot{display:inline-block;}
+    .rt-role-head .rt-chev{opacity:.45;transition:transform .18s;transform:rotate(90deg);display:inline-flex;}
+    .rt-role-block.collapsed .rt-chev{transform:rotate(0deg);}
+    .rt-role-body{padding:11px 14px;white-space:pre-wrap;word-break:break-word;font-size:12.5px;line-height:1.6;
+      color:color-mix(in srgb, var(--fg,#9cdef2) 88%, #ffffff 0%);}
+    .rt-role-block.collapsed .rt-role-body{display:none;}
+    .rt-role-block.live .rt-role-body::after{content:"▋";color:${ACCENT};margin-left:2px;
+      animation:rt-blink 1.1s steps(1) infinite;}
+
+    /* Tool calls as terminal command lines: ❯ prompt, name, status glyph. */
+    .rt-pill{display:flex;align-items:center;gap:7px;font-size:11.5px;margin:4px 0;
+      background:rgba(255,255,255,.03);border-radius:6px;padding:3px 8px;
+      white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;opacity:.9;}
+    .rt-pill::before{content:"\\276F";color:${ACCENT};font-weight:700;flex:0 0 auto;}
+    .rt-pill .rt-i{opacity:.7;flex:0 0 auto;}
+    .rt-pill.pending .rt-i{animation:rt-spin 1.2s linear infinite;}
+    .rt-pill.more{opacity:.5;}
+    .rt-pill.more::before{content:"\\2026";}
+
+    .rt-gate{display:flex;align-items:center;gap:9px;padding:8px 12px;border-radius:12px;font-size:12px;flex:0 0 auto;}
+    .rt-gate b{font-weight:700;flex:0 0 auto;}
+    .rt-gate span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85;}
+    .rt-gate:hover span{white-space:normal;}
+    .rt-gate.pass{color:${OK};background:rgba(29,158,117,.12);}
+    .rt-gate.fail{color:${BAD};background:rgba(216,90,48,.12);}
+    .rt-gate.halt{color:${WARN};background:rgba(201,162,39,.13);}
+
+    .rt-final{margin:2px 0;padding:11px 13px;border-radius:12px;font-weight:700;text-align:center;color:#fff;flex:0 0 auto;}
+    .rt-continue{border-radius:12px;padding:12px;
+      background:color-mix(in srgb, ${ACCENT} 8%, transparent);flex:0 0 auto;}
+    .rt-continue .rt-continue-h{font-size:12.5px;font-weight:600;margin-bottom:8px;opacity:.9;display:flex;align-items:center;gap:7px;}
+    .rt-continue textarea{width:100%;box-sizing:border-box;background:rgba(0,0,0,.22);
+      color:inherit;border:1px solid transparent;border-radius:10px;
+      padding:8px 10px;font:inherit;font-size:12.5px;min-height:52px;resize:vertical;}
+    .rt-continue textarea:focus{outline:none;border-color:${ACCENT};}
+    .rt-continue button{margin-top:8px;cursor:pointer;border:none;border-radius:9px;padding:8px 14px;font:inherit;font-weight:700;color:#fff;background:${ACCENT};}
+
+    #rt-config,#rt-history{flex:1;min-height:0;overflow:auto;padding:20px 24px;display:none;flex-direction:column;}
+    #rt-config.open,#rt-history.open{display:flex;}
+    #rt-config h3,#rt-history h3{margin:0;font-size:15px;display:flex;align-items:center;gap:9px;}
+    .rt-count{font-size:10.5px;font-weight:700;background:${ACCENT_SOFT};color:${ACCENT};border-radius:999px;padding:2px 9px;}
+    .rt-cfg-sub{opacity:.5;font-size:12px;margin:4px 0 16px;}
+    .rt-sec{font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;opacity:.5;margin:18px 0 8px;}
+    .rt-card-row{display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:8px;
+      border-radius:12px;background:color-mix(in srgb, var(--fg,#9cdef2) 3.5%, transparent);transition:background .15s;}
+    .rt-card-row:hover{background:color-mix(in srgb, ${ACCENT} 9%, transparent);}
+    .rt-role-badge{width:30px;height:30px;border-radius:9px;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+      background:${ACCENT_SOFT};color:${ACCENT};}
+    .rt-card-main{flex:1;min-width:0;}
+    .rt-card-title{font-size:12.5px;font-weight:700;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .rt-card-sub{font-size:11px;opacity:.5;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .rt-card-row select{flex:0 0 44%;min-width:0;background:color-mix(in srgb, var(--fg,#9cdef2) 7%, transparent);color:inherit;
+      border:1px solid transparent;border-radius:9px;padding:7px 9px;font:inherit;font-size:12px;}
+    .rt-card-row select:focus{outline:none;border-color:${ACCENT};}
+    .rt-status-pill{flex:0 0 auto;font-size:10px;font-weight:700;border-radius:999px;padding:3px 10px;
+      text-transform:uppercase;letter-spacing:.5px;}
+    .rt-time{flex:0 0 auto;font-size:11px;opacity:.45;}
+    #rt-hist-list .rt-card-row{cursor:pointer;}
+    #rt-hist-list .rt-reuse{flex:0 0 auto;cursor:pointer;border:none;
+      background:color-mix(in srgb, var(--fg,#9cdef2) 8%, transparent);color:inherit;font:inherit;font-size:11px;
+      padding:5px 12px;border-radius:999px;opacity:.85;
+      display:inline-flex;align-items:center;gap:5px;transition:.15s;}
+    #rt-hist-list .rt-reuse:hover{opacity:1;background:${ACCENT_SOFT};color:${ACCENT};}
+    .rt-slider{-webkit-appearance:none;appearance:none;flex:1;min-width:80px;height:6px;border-radius:3px;cursor:pointer;
+      background:color-mix(in srgb, var(--fg,#9cdef2) 12%, transparent);outline:none;}
+    .rt-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:17px;height:17px;border-radius:50%;
+      background:${ACCENT};border:2.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4);cursor:grab;}
+    .rt-slider::-webkit-slider-thumb:active{cursor:grabbing;}
+    .rt-val{flex:0 0 auto;min-width:34px;text-align:center;font-weight:700;font-size:12.5px;color:${ACCENT};
+      background:${ACCENT_SOFT};border-radius:8px;padding:4px 8px;}
+
+    .rt-pr{background:color-mix(in srgb, var(--fg,#9cdef2) 3.5%, transparent);border-radius:12px;overflow:hidden;flex:0 0 auto;}
+    .rt-pr-head{padding:9px 12px;font-weight:700;font-size:12.5px;background:color-mix(in srgb, ${ACCENT} 10%, transparent);
+      display:flex;align-items:center;gap:8px;}
+    .rt-pr-mode{font-weight:400;font-size:10.5px;opacity:.75;background:color-mix(in srgb, var(--fg,#9cdef2) 9%, transparent);
+      border-radius:999px;padding:2px 9px;}
     .rt-pr-row{padding:5px 12px;font-size:12px;}
-    .rt-pr-row code{background:rgba(127,127,127,.12);padding:1px 5px;border-radius:4px;}
+    .rt-pr-row code{background:color-mix(in srgb, var(--fg,#9cdef2) 8%, transparent);padding:1px 6px;border-radius:5px;}
     .rt-pr-title{padding:6px 12px;font-weight:700;font-size:13px;}
-    .rt-pr-body{padding:4px 12px 10px;white-space:pre-wrap;font-size:12.5px;line-height:1.5;opacity:.9;}
-    .rt-pr-stat{margin:0 12px 12px;padding:8px 10px;background:rgba(127,127,127,.08);border-radius:8px;font-size:11px;overflow:auto;white-space:pre;}
-    .rt-pr-row a{color:var(--color-text-info,#6aa9d9);word-break:break-all;}
+    .rt-pr-body{padding:4px 12px 10px;white-space:pre-wrap;font-size:12px;line-height:1.5;opacity:.85;}
+    .rt-pr-stat{margin:0 12px 12px;padding:8px 10px;background:color-mix(in srgb, var(--fg,#9cdef2) 5%, transparent);
+      border-radius:9px;font-size:11px;overflow:auto;white-space:pre;}
+    .rt-pr-row a{color:${ACCENT};word-break:break-all;}
     .rt-pr-actions{display:flex;align-items:center;gap:8px;padding:8px 12px 12px;flex-wrap:wrap;}
-    .rt-pr-approve{cursor:pointer;border:none;border-radius:8px;padding:7px 13px;font:inherit;font-weight:700;color:#fff;background:${OK};}
-    .rt-pr-reject{cursor:pointer;border:1px solid rgba(127,127,127,.35);border-radius:8px;padding:7px 13px;font:inherit;background:transparent;color:inherit;}
+    .rt-pr-approve{cursor:pointer;border:none;border-radius:9px;padding:7px 14px;font:inherit;font-weight:700;color:#fff;background:${OK};
+      display:inline-flex;align-items:center;gap:6px;}
+    .rt-pr-reject{cursor:pointer;border:none;border-radius:9px;
+      padding:7px 14px;font:inherit;background:color-mix(in srgb, var(--fg,#9cdef2) 8%, transparent);color:inherit;}
     .rt-pr-approve:disabled,.rt-pr-reject:disabled{opacity:.5;cursor:default;}
     .rt-pr-result{font-size:12px;}
     `;
     var s = document.createElement("style"); s.id = "rt-styles"; s.textContent = css; document.head.appendChild(s);
   }
 
-  // ---- overlay construction -----------------------------------------------
+  // ---- panel construction -----------------------------------------------------
   function build() {
     injectStyles();
     var ov = h(`<div id="rt-overlay" role="dialog" aria-label="Round Table">
       <div id="rt-panel">
-        <div id="rt-head">
-          <span class="rt-title">⊹ <b>Round&nbsp;Table</b> — SAFe mission control</span>
+        <div id="rt-head" class="pywebview-drag-region">
+          <span class="rt-title">${icon("table", 16)} Round Table</span>
+          <span id="rt-chip"><span class="rt-chip-dot"></span><span id="rt-chip-text"></span></span>
           <span class="rt-spacer"></span>
-          <button id="rt-hist" title="Run history">🕘 History</button>
-          <button id="rt-cfg" title="Per-role models">⚙ Models</button>
-          <button id="rt-x" title="Close" aria-label="Close">×</button>
+          <span class="rt-tabs">
+            <button class="rt-tab active" id="rt-tab-run">Run</button>
+            <button class="rt-tab" id="rt-hist" title="Run history">History</button>
+            <button class="rt-tab" id="rt-cfg" title="Per-role models">Models</button>
+          </span>
+          <button id="rt-x" title="Close" aria-label="Close">${icon("close", 15)}</button>
         </div>
         <div id="rt-body">
           <div id="rt-left">
-            <div class="rt-field"><label>Ticket title</label><input id="rt-title" placeholder="e.g. Add a hello() function with a test"></div>
-            <div class="rt-field"><label>Description</label><textarea id="rt-desc" placeholder="What needs doing and why"></textarea></div>
-            <div class="rt-field"><label>Acceptance criteria (optional — BSA defines if blank)</label><textarea id="rt-ac" placeholder="- [ ] ..."></textarea></div>
-            <div class="rt-field"><label>Workspace</label><input id="rt-ws" placeholder="Path to your project folder (blank = server default)"></div>
-            <button id="rt-run">▶ Run pipeline</button>
+            <div class="rt-field"><label>Project</label><textarea id="rt-desc" placeholder="Describe what the team should build or change — the BSA turns this into a spec"></textarea></div>
+            <div class="rt-field"><label>Acceptance criteria (optional)</label><textarea id="rt-ac" placeholder="- [ ] ... (BSA defines these if blank)"></textarea></div>
+            <div class="rt-field" id="rt-ws-field"><label>Workspace</label>
+              <input type="hidden" id="rt-ws">
+              <button type="button" id="rt-ws-btn">${icon("folder", 14)}<span id="rt-ws-name">Choose a folder…</span>${icon("chevd", 12)}</button>
+              <div id="rt-ws-menu">
+                <input type="text" id="rt-ws-path" placeholder="Type a path and press Enter" spellcheck="false" autocomplete="off">
+                <div id="rt-ws-list"></div>
+                <div id="rt-ws-foot"><button type="button" id="rt-ws-use">Use this folder</button></div>
+              </div>
+            </div>
+            <button id="rt-run">${icon("discuss", 14)} Discuss</button>
             <div id="rt-pipeline"></div>
           </div>
           <div id="rt-main">
-            <div id="rt-status">Idle. Fill in a ticket and hit Run.</div>
+            <div id="rt-status">Idle. Describe the project and hit Discuss.</div>
             <div id="rt-log"></div>
           </div>
         </div>
         <div id="rt-config">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <h3>Per-role models</h3><span style="flex:1"></span>
-            <button id="rt-cfg-done">Done</button>
-          </div>
-          <div class="rt-cfg-sub">Route each role to a local or API model. "Default" uses its tier (saw_heavy = Claude / saw_cheap = local).</div>
+          <h3>Models</h3>
+          <div class="rt-cfg-sub">Route each role to a local or API model, and tune how the pipeline releases and retries.</div>
           <div id="rt-cfg-list"></div>
         </div>
         <div id="rt-history">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <h3>Run history</h3><span style="flex:1"></span>
-            <button id="rt-hist-done">Done</button>
-          </div>
-          <div class="rt-cfg-sub">Past pipeline runs — click one to view its transcript.</div>
+          <h3>Run history <span class="rt-count" id="rt-hist-count"></span></h3>
+          <div class="rt-cfg-sub">Past pipeline runs — click one to view its transcript, or reuse its ticket.</div>
           <div id="rt-hist-list"></div>
         </div>
-      </div></div>`);
-    document.body.appendChild(ov);
+      </div>
+      </div>`);
+
+    // Window-wide frosted-glass layer; the rail floats above it (see CSS).
+    var bd = h('<div id="rt-backdrop"></div>');
+    document.body.appendChild(bd);
+    bd.addEventListener("click", close);
+
+    // Mount the panel inside the chat column so it sits beside the rail and
+    // follows sidebar resize/collapse. Falls back to a fixed overlay in odd embeds.
+    var host = document.querySelector(".chat-container");
+    if (host) {
+      if (getComputedStyle(host).position === "static") host.style.position = "relative";
+      host.appendChild(ov);
+    } else {
+      ov.classList.add("rt-fixed");
+      document.body.appendChild(ov);
+    }
+
     els = {
-      overlay: ov,
-      title: ov.querySelector("#rt-title"), desc: ov.querySelector("#rt-desc"),
+      overlay: ov, backdrop: bd,
+      desc: ov.querySelector("#rt-desc"),
       ac: ov.querySelector("#rt-ac"), ws: ov.querySelector("#rt-ws"),
+      wsBtn: ov.querySelector("#rt-ws-btn"), wsName: ov.querySelector("#rt-ws-name"),
+      wsMenu: ov.querySelector("#rt-ws-menu"), wsPath: ov.querySelector("#rt-ws-path"),
+      wsList: ov.querySelector("#rt-ws-list"), wsUse: ov.querySelector("#rt-ws-use"),
       run: ov.querySelector("#rt-run"), pipeline: ov.querySelector("#rt-pipeline"),
       status: ov.querySelector("#rt-status"), log: ov.querySelector("#rt-log"),
       recent: ov.querySelector("#rt-hist-list"),
       body: ov.querySelector("#rt-body"), config: ov.querySelector("#rt-config"),
       cfgList: ov.querySelector("#rt-cfg-list"), history: ov.querySelector("#rt-history"),
+      chip: ov.querySelector("#rt-chip"), chipText: ov.querySelector("#rt-chip-text"),
+      tabs: { run: ov.querySelector("#rt-tab-run"), history: ov.querySelector("#rt-hist"), models: ov.querySelector("#rt-cfg") },
     };
     ov.querySelector("#rt-x").addEventListener("click", close);
-    ov.addEventListener("click", function (e) { if (e.target === ov) close(); });
-    ov.querySelector("#rt-cfg").addEventListener("click", toggleConfig);
-    ov.querySelector("#rt-cfg-done").addEventListener("click", closeConfig);
-    ov.querySelector("#rt-hist").addEventListener("click", toggleHistory);
-    ov.querySelector("#rt-hist-done").addEventListener("click", closeHistory);
+    els.tabs.run.addEventListener("click", function () { setTab("run"); });
+    els.tabs.history.addEventListener("click", function () { setTab("history"); loadRecent(); });
+    els.tabs.models.addEventListener("click", function () { setTab("models"); openConfig(); });
     els.run.addEventListener("click", function () {
       if (els.run.dataset.mode === "stop") stopRun(); else startRun();
     });
-    // Remember the workspace the user types so new tickets reuse it instead of the default.
-    els.ws.addEventListener("change", function () {
-      try { localStorage.setItem("saw_ws", els.ws.value.trim()); } catch (e) { /* ignore */ }
+
+    // ---- workspace navigation menu (same /api/workspace/* API as the chat picker,
+    // but scoped to the Round Table's own workspace, not the chat one) ----------
+    var wsCur = "";
+    function wsBase(p) {
+      if (!p) return "";
+      var parts = String(p).replace(/[\\\/]+$/, "").split(/[\\\/]/);
+      return parts[parts.length - 1] || p;
+    }
+    els.setWs = function (p) {
+      els.ws.value = p || "";
+      els.wsName.textContent = p ? wsBase(p) : "Choose a folder…";
+      els.wsBtn.title = p || "";
+      try { if (p) localStorage.setItem("saw_ws", p); } catch (e) { /* ignore */ }
+    };
+    function wsRender(d) {
+      wsCur = d.path || "";
+      els.wsPath.value = wsCur;
+      els.wsList.innerHTML = "";
+      if (d.parent) {
+        var upRow = h('<div class="rt-ws-row">' + icon("up", 12) + '<span>..</span></div>');
+        upRow.addEventListener("click", function () { wsNav(d.parent); });
+        els.wsList.appendChild(upRow);
+      }
+      (d.dirs || []).forEach(function (dir) {
+        var row = h('<div class="rt-ws-row">' + icon("folder", 13) + '<span>' + esc(dir.name) + '</span></div>');
+        row.addEventListener("click", function () { wsNav(dir.path); });
+        els.wsList.appendChild(row);
+      });
+      if (!(d.dirs || []).length && !d.parent) {
+        els.wsList.appendChild(h('<div class="rt-ws-empty">No subfolders</div>'));
+      }
+      els.wsUse.disabled = d.selectable === false;
+      els.wsUse.title = d.selectable === false ? "This folder cannot be used as a workspace" : "";
+    }
+    function wsNav(p) {
+      fetch("/api/workspace/browse" + (p ? ("?path=" + encodeURIComponent(p)) : ""), { credentials: "same-origin" })
+        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(wsRender)
+        .catch(function () { /* ignore — keep the current listing */ });
+    }
+    els.wsBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (els.wsMenu.classList.toggle("open")) wsNav(els.ws.value || "");
+    });
+    els.wsPath.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); var v = els.wsPath.value.trim(); if (v) wsNav(v); }
+    });
+    els.wsUse.addEventListener("click", function () {
+      if (wsCur) { els.setWs(wsCur); els.wsMenu.classList.remove("open"); }
+    });
+    document.addEventListener("click", function (e) {
+      if (els && els.wsMenu.classList.contains("open") &&
+          !els.wsMenu.contains(e.target) && !els.wsBtn.contains(e.target)) {
+        els.wsMenu.classList.remove("open");
+      }
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && els && els.overlay.classList.contains("rt-open")) close();
     });
     return els;
   }
 
+  function setTab(name) {
+    ["run", "history", "models"].forEach(function (t) {
+      els.tabs[t].classList.toggle("active", t === name);
+    });
+    els.body.style.display = name === "run" ? "" : "none";
+    els.config.classList.toggle("open", name === "models");
+    els.history.classList.toggle("open", name === "history");
+  }
+
   function open() {
     if (!els) build();
+    document.body.classList.add("rt-open");   // lifts the rail above the glass
+    // Align the panel's top edge EXACTLY with the rail card's top edge —
+    // measured, not assumed, so container padding/borders can't skew it.
+    try {
+      var sb = document.getElementById("sidebar");
+      var hostEl = els.overlay.parentElement;
+      if (sb && hostEl && sb.offsetParent !== null) {
+        var t = sb.getBoundingClientRect().top - hostEl.getBoundingClientRect().top;
+        if (t >= 0 && t < 80) els.overlay.style.top = Math.round(t) + "px";
+      }
+    } catch (e) { /* keep the CSS default */ }
+    els.backdrop.classList.add("rt-open");
     els.overlay.classList.add("rt-open");
-    if (els.body) els.body.style.display = "";
-    if (els.config) els.config.classList.remove("open");
-    if (els.history) els.history.classList.remove("open");
-    try { var w = localStorage.getItem("saw_ws"); if (w) els.ws.value = w; } catch (e) { /* ignore */ }
+    setTab("run");
+    try { var w = localStorage.getItem("saw_ws"); if (w) els.setWs(w); } catch (e) { /* ignore */ }
     loadRecent();
   }
-  function close() { if (els) els.overlay.classList.remove("rt-open"); }
+  function close() {
+    if (!els) return;
+    els.overlay.classList.remove("rt-open");
+    els.backdrop.classList.remove("rt-open");
+    document.body.classList.remove("rt-open");
+  }
+
+  // ---- live status chip --------------------------------------------------------
+  function setChip(state, text) {
+    if (!els) return;
+    if (!state) { els.chip.classList.remove("on", "run", "ok", "bad", "warn"); return; }
+    els.chip.classList.add("on");
+    ["run", "ok", "bad", "warn"].forEach(function (c) { els.chip.classList.remove(c); });
+    els.chip.classList.add(state);
+    els.chipText.textContent = text || "";
+  }
+  function chipTick() {
+    if (!current || !current.startTs || current.done) return;
+    var base = current.chipBase || "running";
+    setChip("run", base + " · " + fmtDur(Date.now() - current.startTs));
+  }
+  function startChipTimer() { stopChipTimer(); chipTimer = setInterval(chipTick, 1000); }
+  function stopChipTimer() { if (chipTimer) { clearInterval(chipTimer); chipTimer = null; } }
 
   // ---- run lifecycle -------------------------------------------------------
   function setStatus(txt, color) { els.status.textContent = txt; els.status.style.color = color || ""; }
@@ -204,30 +506,106 @@
   function renderPipeline(pipeline) {
     els.pipeline.innerHTML = "";
     current.chips = {};
-    pipeline.forEach(function (role, i) {
-      if (i > 0) els.pipeline.appendChild(h(`<span class="rt-arrow">→</span>`));
-      var chip = h(`<span class="rt-chip" data-role="${role}"><span>${esc(ROLE_LABELS[role] || role)}</span><span class="rt-cmodel"></span></span>`);
-      els.pipeline.appendChild(chip);
-      current.chips[role] = chip;
+    pipeline.forEach(function (role) {
+      var step = h(`<div class="rt-step" data-role="${role}">
+          <span class="rt-step-ico">${icon("check", 11)}</span>
+          <span style="min-width:0"><span class="rt-step-label">${esc(ROLE_LABELS[role] || role)}</span><span class="rt-cmodel"></span></span>
+        </div>`);
+      els.pipeline.appendChild(step);
+      current.chips[role] = step;
     });
   }
 
   function chipState(role, state, model) {
     var c = current.chips[role]; if (!c) return;
-    c.classList.remove("run", "done"); if (state) c.classList.add(state);
-    if (model) c.querySelector(".rt-cmodel").textContent = model;
+    c.classList.remove("run", "done", "fail");
+    if (state) c.classList.add(state);
+    var meta = c.querySelector(".rt-cmodel");
+    if (state === "run") {
+      c.dataset.t0 = String(Date.now());
+      if (model) c.dataset.model = model;
+      meta.textContent = model || c.dataset.model || "";
+    } else if (state === "done" || state === "fail") {
+      var dur = c.dataset.t0 ? fmtDur(Date.now() - Number(c.dataset.t0)) : "";
+      meta.textContent = [(model || c.dataset.model || ""), dur].filter(Boolean).join(" · ");
+    } else if (model) {
+      c.dataset.model = model;
+      meta.textContent = model;
+    }
+  }
+
+  // ---- role cards -----------------------------------------------------------
+  function collapseOthers(exceptKey) {
+    Object.keys(current.blocks).forEach(function (k) {
+      var st = current.blocks[k];
+      if (k !== exceptKey && st && st.blk) {
+        st.blk.classList.remove("live");
+        st.blk.classList.add("collapsed");
+      }
+    });
   }
 
   function roleBlock(role, iter, model) {
     var key = role + "_" + iter;
     if (current.blocks[key]) return current.blocks[key];
     var label = (ROLE_LABELS[role] || role);
-    var blk = h(`<div class="rt-role-block"><div class="rt-role-head">${esc(label)}<span class="rt-iter">${model ? esc(model) : ""}${iter > 1 ? " · attempt " + iter : ""}</span></div><div class="rt-role-body"></div></div>`);
+    var blk = h(`<div class="rt-role-block live">
+        <div class="rt-role-head">
+          <span class="rt-role-ico">${icon(ICONS[role] ? role : "tool", 14)}</span>
+          <span>${esc(label)}</span>
+          <span class="rt-iter">${model ? esc(model) : ""}${iter > 1 ? " · attempt " + iter : ""}</span>
+          <span class="rt-head-spacer"></span>
+          <span class="rt-live-dot"></span>
+          <span class="rt-chev">${icon("chev", 12)}</span>
+        </div>
+        <div class="rt-role-body"></div>
+      </div>`);
     els.log.appendChild(blk);
-    var body = blk.querySelector(".rt-role-body");
-    current.blocks[key] = body;
+    var state = {
+      blk: blk,
+      body: blk.querySelector(".rt-role-body"),
+      pills: 0,            // visible tool pills in this block
+      morePill: null,      // the "+N earlier" pill once we start folding
+      folded: 0,           // how many pills have been folded away
+      pending: [],         // pills awaiting their "output" phase
+    };
+    blk.querySelector(".rt-role-head").addEventListener("click", function () {
+      blk.classList.toggle("collapsed");
+    });
+    current.blocks[key] = state;
+    collapseOthers(key);
     els.log.scrollTop = els.log.scrollHeight;
-    return body;
+    return state;
+  }
+
+  var MAX_PILLS = 10;
+  function addToolPill(state, name) {
+    // Fold the oldest visible pill into a "+N earlier" counter once we exceed the cap.
+    if (state.pills >= MAX_PILLS) {
+      var oldest = state.body.querySelector(".rt-pill:not(.more)");
+      if (oldest) {
+        oldest.remove();
+        state.pills--;
+        state.folded++;
+        if (!state.morePill) {
+          state.morePill = h('<span class="rt-pill more"></span>');
+          state.body.insertBefore(state.morePill, state.body.firstChild);
+        }
+        state.morePill.textContent = "+" + state.folded + " earlier";
+      }
+    }
+    var pill = h('<span class="rt-pill pending">' + icon("tool", 11) + '<span>' + esc(name || "tool") + '</span></span>');
+    state.body.appendChild(pill);
+    state.pills++;
+    state.pending.push(pill);
+    return pill;
+  }
+  function completeToolPill(state) {
+    var pill = state.pending.shift();
+    if (!pill) return;
+    pill.classList.remove("pending");
+    var ico = pill.querySelector(".rt-i");
+    if (ico) ico.outerHTML = icon("check", 11);
   }
 
   function dispatch(ev) {
@@ -236,32 +614,51 @@
         els.log.innerHTML = ""; current.blocks = {};
         renderPipeline(ev.pipeline || []);
         setStatus("Running — workspace: " + (ev.workspace || ""), ACCENT);
+        current.startTs = Date.now();
+        current.chipBase = "starting";
+        setChip("run", "starting");
+        startChipTimer();
         break;
-      case "role_start":
+      case "role_start": {
         chipState(ev.role, "run", ev.model);
         current.active = ev.role + "_" + (ev.iteration || 1);
         roleBlock(ev.role, ev.iteration || 1, ev.model);
         setStatus((ROLE_LABELS[ev.role] || ev.role) + " working… (" + (ev.purpose || "") + " → " + (ev.model || "") + ")", ACCENT);
+        var iterTxt = (ev.iteration && ev.iteration > 1) ? " · attempt " + ev.iteration : "";
+        current.chipBase = (ROLE_LABELS[ev.role] || ev.role) + iterTxt;
+        chipTick();
         break;
+      }
       case "delta": {
-        var body = current.blocks[current.active] || roleBlock(ev.role, 1);
-        body.appendChild(document.createTextNode(ev.text || ""));
+        var st = current.blocks[current.active] || roleBlock(ev.role, 1);
+        st.body.appendChild(document.createTextNode(ev.text || ""));
         els.log.scrollTop = els.log.scrollHeight;
         break;
       }
       case "tool": {
-        var b = current.blocks[current.active]; if (!b) break;
-        b.appendChild(h(`<div class="rt-tool">⚙ ${esc(ev.tool || "tool")} ${ev.phase === "output" ? "✓" : "…"}</div>`));
+        var stt = current.blocks[current.active]; if (!stt) break;
+        if (ev.phase === "output") completeToolPill(stt);
+        else addToolPill(stt, ev.tool);
         els.log.scrollTop = els.log.scrollHeight;
         break;
       }
-      case "role_done":
+      case "role_done": {
         chipState(ev.role, "done");
+        // Collapse every finished card for this role; the next role_start expands its own.
+        Object.keys(current.blocks).forEach(function (k) {
+          if (k.indexOf(ev.role + "_") === 0) {
+            var s = current.blocks[k];
+            s.blk.classList.remove("live");
+            s.blk.classList.add("collapsed");
+          }
+        });
         break;
+      }
       case "gate": {
         var cls = ev.status === "pass" ? "pass" : (ev.status === "halt" ? "halt" : "fail");
-        var icon = ev.status === "pass" ? "✓" : (ev.status === "halt" ? "✋" : "✗");
-        els.log.appendChild(h(`<div class="rt-gate ${cls}">${icon} GATE · ${esc(ev.gate)} — ${esc(ev.detail || "")}</div>`));
+        var ico = ev.status === "pass" ? "check" : (ev.status === "halt" ? "halt" : "cross");
+        els.log.appendChild(h('<div class="rt-gate ' + cls + '" title="' + esc(ev.detail || "") + '">' +
+          icon(ico, 14) + '<b>' + esc(ev.gate || "gate") + '</b><span>' + esc(ev.detail || "") + '</span></div>'));
         els.log.scrollTop = els.log.scrollHeight;
         break;
       }
@@ -270,11 +667,11 @@
         var isDry = ev.mode === "dry_run";
         // Local mode commits straight to your branch — there's nothing to "approve & merge".
         var actions = isDry
-          ? '<div class="rt-pr-row" style="opacity:.75">Committed to <code>' + esc(ev.branch || "") + '</code> in your workspace — the files are right there. Switch RTE to <b>GitHub</b> mode (⚙ Models) to open a real PR instead.</div>'
-          : '<div class="rt-pr-actions"><button class="rt-pr-approve">✓ Approve &amp; Merge</button><button class="rt-pr-reject">Reject</button><span class="rt-pr-result"></span></div>';
+          ? '<div class="rt-pr-row" style="opacity:.75">Committed to <code>' + esc(ev.branch || "") + '</code> in your workspace — the files are right there. Switch RTE to <b>GitHub</b> mode (Models tab) to open a real PR instead.</div>'
+          : '<div class="rt-pr-actions"><button class="rt-pr-approve">' + icon("check", 12) + ' Approve &amp; Merge</button><button class="rt-pr-reject">Reject</button><span class="rt-pr-result"></span></div>';
         var card = h(
           '<div class="rt-pr">' +
-            '<div class="rt-pr-head">' + (isDry ? '✅ Committed to your branch' : '📦 Pull Request') +
+            '<div class="rt-pr-head">' + icon("branch", 14) + (isDry ? 'Committed to your branch' : 'Pull Request') +
               ' <span class="rt-pr-mode">' + esc(isDry ? "local" : (ev.mode || "")) + '</span></div>' +
             '<div class="rt-pr-row"><b>branch</b> <code>' + esc(ev.branch || "") + '</code>' +
               (ev.committed ? ' <span style="color:' + OK + '">✓ committed</span>' : ' <span style="color:' + BAD + '">not committed</span>') + '</div>' +
@@ -297,10 +694,17 @@
       }
       case "run_done": {
         var color = ev.status === "passed" ? OK : (ev.status === "halted" ? WARN : BAD);
-        var word = { passed: "✓ SHIPPED", failed: "✗ FAILED", halted: "✋ HALTED", error: "⚠ ERROR" }[ev.status] || ev.status;
-        els.log.appendChild(h(`<div class="rt-final" style="color:#fff;background:${color}">${word}${ev.detail ? " — " + esc(ev.detail) : ""}</div>`));
+        var word = { passed: "SHIPPED", failed: "FAILED", halted: "HALTED", error: "ERROR" }[ev.status] || ev.status;
+        els.log.appendChild(h('<div class="rt-final" style="background:' + color + '">' + word + (ev.detail ? " — " + esc(ev.detail) : "") + '</div>'));
         setStatus(word + (ev.detail ? " — " + ev.detail : ""), color);
         current.done = true;
+        stopChipTimer();
+        var chipCls = ev.status === "passed" ? "ok" : (ev.status === "halted" ? "warn" : "bad");
+        setChip(chipCls, word.toLowerCase() + " · " + fmtDur(Date.now() - (current.startTs || Date.now())));
+        if (ev.status !== "passed" && current.active) {
+          var failedRole = current.active.split("_")[0];
+          chipState(failedRole, "fail");
+        }
         loadRecent();
         if (ev.status === "passed") showContinue(current.runId);
         break;
@@ -310,10 +714,10 @@
 
   function setRunBtn(mode) {
     if (mode === "stop") {
-      els.run.dataset.mode = "stop"; els.run.textContent = "■ Stop";
+      els.run.dataset.mode = "stop"; els.run.innerHTML = icon("stop", 13) + " Stop";
       els.run.disabled = false; els.run.style.background = BAD;
     } else {
-      els.run.dataset.mode = "run"; els.run.textContent = "▶ Run pipeline";
+      els.run.dataset.mode = "run"; els.run.innerHTML = icon("discuss", 14) + " Discuss";
       els.run.disabled = false; els.run.style.background = "";
     }
   }
@@ -328,7 +732,7 @@
 
   // Shared launch path for both a fresh run and a follow-up ("continue the discussion").
   async function launchRun(payload) {
-    current = { runId: null, blocks: {}, chips: {}, active: null, done: false };
+    current = { runId: null, blocks: {}, chips: {}, active: null, done: false, startTs: null, chipBase: "" };
     els.pipeline.innerHTML = ""; els.log.innerHTML = "";
     setStatus(payload.parent_run_id ? "Starting follow-up…" : "Starting…", ACCENT);
     setRunBtn("stop");
@@ -342,31 +746,39 @@
       if (!resp.ok) { setStatus("Error: " + (data.error || resp.status), BAD); return; }
       current.runId = data.run_id;
       await streamRun(data.run_id);
-      if (!current.done) setStatus("⏹ Stopped.", WARN);   // stream ended without run_done
+      if (!current.done) {
+        setStatus("Stopped.", WARN);   // stream ended without run_done
+        setChip("warn", "stopped");
+      }
     } catch (e) {
       setStatus("Failed: " + e, BAD);
+      setChip("bad", "failed to start");
     } finally {
       setRunBtn("run");
+      stopChipTimer();
     }
   }
 
   async function startRun() {
-    var title = els.title.value.trim();
-    if (!title) { setStatus("A ticket title is required.", BAD); els.title.focus(); return; }
-    await launchRun({ title: title, description: els.desc.value,
+    var desc = els.desc.value.trim();
+    if (!desc) { setStatus("Describe the project first.", BAD); els.desc.focus(); return; }
+    await launchRun({ title: deriveTitle(desc), description: desc,
                       acceptance: els.ac.value, workspace: els.ws.value.trim() });
   }
 
-  // Follow-up: keep the workspace + title, send the user's requested change, and link the
+  // Follow-up: keep the workspace + project, send the user's requested change, and link the
   // parent run so the team builds on what already exists (reads prior SPEC.md + files).
   async function continueRun(parentId, changes) {
-    await launchRun({ title: els.title.value.trim() || "Follow-up", description: changes,
+    await launchRun({ title: deriveTitle(els.desc.value) , description: changes,
                       acceptance: "", workspace: els.ws.value.trim(), parent_run_id: parentId });
   }
 
   // After a successful run, offer a box to request changes and re-run on top of the result.
   function showContinue(parentId) {
-    var card = h(`<div class="rt-continue"><div class="rt-continue-h">↻ Continue the discussion — the team keeps everything it just built and applies your changes</div><textarea class="rt-change" placeholder="Describe the changes you want, e.g. 'make the header blue and add a Friends counter'"></textarea><button class="rt-change-go">Send changes to the team</button></div>`);
+    var card = h('<div class="rt-continue"><div class="rt-continue-h">' + icon("refresh", 13) +
+      ' Continue the discussion — the team keeps everything it just built and applies your changes</div>' +
+      '<textarea class="rt-change" placeholder="Describe the changes you want, e.g. \'make the header blue and add a Friends counter\'"></textarea>' +
+      '<button class="rt-change-go">Send changes to the team</button></div>');
     els.log.appendChild(card);
     var box = card.querySelector(".rt-change");
     card.querySelector(".rt-change-go").addEventListener("click", function () {
@@ -399,15 +811,31 @@
     }
   }
 
+  var STATUS_PILL = {
+    passed:  ["rgba(29,158,117,.16)", OK],
+    failed:  ["rgba(216,90,48,.16)", BAD],
+    halted:  ["rgba(201,162,39,.16)", WARN],
+    stopped: ["rgba(140,146,160,.14)", "#8a93a3"],
+    running: [ACCENT_SOFT, ACCENT],
+  };
+
   async function loadRecent() {
     try {
       var resp = await fetch("/api/roundtable/runs");
       var data = await resp.json();
       els.recent.innerHTML = "";
-      (data.runs || []).slice(0, 12).forEach(function (run) {
-        var color = run.status === "passed" ? OK : (run.status === "failed" ? BAD : (run.status === "halted" ? WARN : "rgba(127,127,127,.5)"));
-        var item = h(`<div class="rt-run-item" title="View transcript — ${esc(run.run_id)}"><span class="rt-dot" style="background:${color}"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(run.title)}</span><span style="opacity:.5">${esc(run.status)}</span><button class="rt-reuse" title="Load this ticket into the form to run again">↻ Reuse</button></div>`);
-        item.addEventListener("click", function () { closeHistory(); loadRun(run.run_id); });
+      var runs = (data.runs || []).slice(0, 20);
+      var cnt = document.getElementById("rt-hist-count");
+      if (cnt) cnt.textContent = runs.length ? String(runs.length) : "";
+      runs.forEach(function (run) {
+        var p = STATUS_PILL[run.status] || STATUS_PILL.stopped;
+        var item = h('<div class="rt-card-row" title="View transcript — ' + esc(run.run_id) + '">' +
+          '<span class="rt-status-pill" style="background:' + p[0] + ';color:' + p[1] + '">' + esc(run.status || "?") + '</span>' +
+          '<span class="rt-card-main"><span class="rt-card-title">' + esc(run.title) + '</span>' +
+          '<span class="rt-card-sub">' + esc(run.run_id) + '</span></span>' +
+          '<span class="rt-time">' + relTime(run.created_at) + '</span>' +
+          '<button class="rt-reuse" title="Load this ticket into the form to run again">' + icon("refresh", 11) + ' Reuse</button></div>');
+        item.addEventListener("click", function () { setTab("run"); loadRun(run.run_id); });
         item.querySelector(".rt-reuse").addEventListener("click", function (e) { e.stopPropagation(); reuseRun(run.run_id); });
         els.recent.appendChild(item);
       });
@@ -421,13 +849,12 @@
       var resp = await fetch("/api/roundtable/" + runId);
       var run = await resp.json();
       if (run.error) return;
-      els.title.value = run.title || "";
-      els.desc.value = run.description || "";
+      els.desc.value = run.description || run.title || "";
       els.ac.value = run.acceptance || "";
-      if (run.workspace) els.ws.value = run.workspace;
-      closeHistory();
-      setStatus("Loaded ticket from " + runId + " — review and hit ▶ Run pipeline.", ACCENT);
-      els.title.focus();
+      if (run.workspace) els.setWs(run.workspace);
+      setTab("run");
+      setStatus("Loaded project from " + runId + " — review and hit Discuss.", ACCENT);
+      els.desc.focus();
     } catch (e) { /* ignore */ }
   }
 
@@ -440,33 +867,29 @@
       renderPipeline(Array.from(new Set((run.steps || []).map(function (s) { return s.role; }))));
       els.log.innerHTML = "";
       setStatus("Loaded run " + runId + " — " + run.status, ACCENT);
+      setChip(run.status === "passed" ? "ok" : (run.status === "failed" ? "bad" : "warn"), esc(run.status));
       (run.steps || []).forEach(function (s) {
         chipState(s.role, "done", s.model);
-        var body = roleBlock(s.role, s.iteration || 1, s.model);
-        body.textContent = s.output || "";
+        var st = roleBlock(s.role, s.iteration || 1, s.model);
+        st.body.textContent = s.output || "";
+        st.blk.classList.remove("live");
+        st.blk.classList.add("collapsed");
         if (s.verdict && s.verdict !== "unknown") {
           var pass = s.verdict === "pass";
-          els.log.appendChild(h(`<div class="rt-gate ${pass ? "pass" : "fail"}">${pass ? "✓" : "✗"} GATE · qas — verdict ${esc(s.verdict.toUpperCase())}</div>`));
+          els.log.appendChild(h('<div class="rt-gate ' + (pass ? "pass" : "fail") + '">' +
+            icon(pass ? "check" : "cross", 14) + '<b>qas</b><span>verdict ' + esc(s.verdict.toUpperCase()) + '</span></div>'));
         }
       });
     } catch (e) { /* ignore */ }
   }
 
   // ---- per-role model config -----------------------------------------------
-  function toggleConfig() { if (els.config.classList.contains("open")) closeConfig(); else openConfig(); }
-  function closeConfig() { els.config.classList.remove("open"); if (els.body) els.body.style.display = ""; }
-  function toggleHistory() { if (els.history.classList.contains("open")) closeHistory(); else openHistory(); }
-  function closeHistory() { els.history.classList.remove("open"); if (els.body) els.body.style.display = ""; }
-  function openHistory() {
-    closeConfig();
-    els.history.classList.add("open");
-    if (els.body) els.body.style.display = "none";
-    loadRecent();
-  }
+  var TIER_LABELS = {
+    saw_heavy: "heavy tier — code, review & judgment",
+    saw_cheap: "light tier — docs & analysis",
+  };
+
   async function openConfig() {
-    closeHistory();
-    els.config.classList.add("open");
-    if (els.body) els.body.style.display = "none";
     els.cfgList.innerHTML = '<div style="opacity:.6">Loading…</div>';
     try {
       var resp = await fetch("/api/roundtable/config");
@@ -474,11 +897,19 @@
       var eps = data.endpoints || [];
       els.cfgList.innerHTML = "";
       if (!eps.length) { els.cfgList.innerHTML = '<div style="opacity:.6">No enabled model endpoints. Add one in Settings → Models.</div>'; return; }
+      els.cfgList.appendChild(h('<div class="rt-sec">Roles</div>'));
       (data.roles || []).forEach(function (role) {
-        var row = h('<div class="rt-cfg-row"><span class="rt-cfg-role">' + esc(ROLE_LABELS[role.key] || role.title) + '</span></div>');
+        var row = h('<div class="rt-card-row">' +
+          '<span class="rt-role-badge">' + icon(ICONS[role.key] ? role.key : "tool", 15) + '</span>' +
+          '<span class="rt-card-main"><span class="rt-card-title">' + esc(ROLE_LABELS[role.key] || role.title) + '</span>' +
+          '<span class="rt-card-sub">' + esc(TIER_LABELS[role.purpose] || role.purpose || "") + '</span></span></div>');
         var sel = document.createElement("select");
-        var def = document.createElement("option");
-        def.value = ""; def.textContent = "Default (" + role.purpose + ")"; sel.appendChild(def);
+        if (!role.endpoint_id || !role.model) {
+          var ph = document.createElement("option");
+          ph.value = ""; ph.textContent = "Choose a model…";
+          ph.disabled = true; ph.selected = true;
+          sel.appendChild(ph);
+        }
         eps.forEach(function (ep) {
           (ep.models || []).forEach(function (m) {
             var o = document.createElement("option");
@@ -492,7 +923,12 @@
         row.appendChild(sel);
         els.cfgList.appendChild(row);
       });
-      var modeRow = h('<div class="rt-cfg-row" style="border-top:1px solid rgba(127,127,127,.25);margin-top:10px;padding-top:14px;"><span class="rt-cfg-role">Release mode</span></div>');
+
+      els.cfgList.appendChild(h('<div class="rt-sec">Pipeline settings</div>'));
+      var modeRow = h('<div class="rt-card-row">' +
+        '<span class="rt-role-badge">' + icon("branch", 15) + '</span>' +
+        '<span class="rt-card-main"><span class="rt-card-title">Release mode</span>' +
+        '<span class="rt-card-sub">what the RTE does with a shipped change</span></span></div>');
       var modeSel = document.createElement("select");
       [["dry_run", "Dry-run — local branch + commit"], ["github", "GitHub — push + open a real PR"]].forEach(function (opt) {
         var o = document.createElement("option"); o.value = opt[0]; o.textContent = opt[1];
@@ -501,18 +937,30 @@
       });
       modeSel.addEventListener("change", function () { saveRteMode(modeSel.value, modeSel); });
       modeRow.appendChild(modeSel); els.cfgList.appendChild(modeRow);
-      var iterRow = h('<div class="rt-cfg-row"><span class="rt-cfg-role">Max attempts</span></div>');
-      var iterVal = Math.max(1, Math.min(parseInt(data.max_iterations, 10) || 3, 10));
+
+      var iterRow = h('<div class="rt-card-row">' +
+        '<span class="rt-role-badge">' + icon("refresh", 15) + '</span>' +
+        '<span class="rt-card-main" style="flex:0 1 220px"><span class="rt-card-title">Max attempts</span>' +
+        '<span class="rt-card-sub">Dev↔QA retries — ∞ keeps going until it passes</span></span></div>');
+      // Server stores 0 = infinite; the slider represents ∞ as its top position (11).
+      var rawIter = parseInt(data.max_iterations, 10);
+      var iterVal = (rawIter === 0) ? 11 : Math.max(1, Math.min(rawIter || 3, 10));
+      var fmtIter = function (v) { return parseInt(v, 10) >= 11 ? "∞" : String(v); };
       var iterSlider = document.createElement("input");
-      iterSlider.type = "range"; iterSlider.min = "1"; iterSlider.max = "10"; iterSlider.step = "1";
+      iterSlider.type = "range"; iterSlider.min = "1"; iterSlider.max = "11"; iterSlider.step = "1";
+      iterSlider.className = "rt-slider";
       iterSlider.value = String(iterVal);
-      iterSlider.style.cssText = "flex:1;min-width:0;accent-color:" + ACCENT + ";cursor:pointer;";
-      var iterNum = h('<span style="flex:0 0 auto;width:20px;text-align:center;font-weight:700;font-size:13px">' + iterVal + '</span>');
-      iterSlider.addEventListener("input", function () { iterNum.textContent = iterSlider.value; });
-      iterSlider.addEventListener("change", function () { saveMaxIterations(iterSlider.value, iterSlider); iterNum.textContent = iterSlider.value; });
+      var track = "color-mix(in srgb, var(--fg,#9cdef2) 12%, transparent)";
+      var paint = function () {
+        var p = (parseInt(iterSlider.value, 10) - 1) / 10 * 100;
+        iterSlider.style.background = "linear-gradient(90deg, " + ACCENT + " " + p + "%, " + track + " " + p + "%)";
+      };
+      var iterNum = h('<span class="rt-val">' + fmtIter(iterVal) + '</span>');
+      iterSlider.addEventListener("input", function () { iterNum.textContent = fmtIter(iterSlider.value); paint(); });
+      iterSlider.addEventListener("change", function () { saveMaxIterations(iterSlider.value, iterSlider); iterNum.textContent = fmtIter(iterSlider.value); paint(); });
+      paint();
       iterRow.appendChild(iterSlider);
       iterRow.appendChild(iterNum);
-      iterRow.appendChild(h('<span style="flex:0 0 auto;font-size:11px;opacity:.55;margin-left:10px">Dev↔QA retries</span>'));
       els.cfgList.appendChild(iterRow);
     } catch (e) {
       els.cfgList.innerHTML = '<div style="color:' + BAD + '">Failed to load: ' + esc(String(e)) + '</div>';
@@ -550,9 +998,11 @@
   }
 
   async function saveMaxIterations(n, el) {
-    var v = Math.max(1, Math.min(parseInt(n, 10) || 3, 10));
-    el.value = String(v); el.disabled = true;
-    try { await fetch("/api/roundtable/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_iterations: v }) }); }
+    var raw = parseInt(n, 10) || 3;
+    // Slider's top position (11) means ∞, stored server-side as 0.
+    var send = raw >= 11 ? 0 : Math.max(1, Math.min(raw, 10));
+    el.disabled = true;
+    try { await fetch("/api/roundtable/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_iterations: send }) }); }
     catch (e) { /* ignore */ }
     el.disabled = false;
   }

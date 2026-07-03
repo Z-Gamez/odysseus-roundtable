@@ -246,6 +246,56 @@ body.bg-pattern-sparkles {
     body.sidebar-collapsed.hamburger-right .chat-top-bar {
       padding-right: 38px;
     }
+
+    /* ── Native window chrome (frameless desktop app only) ──
+       body.native-app is set by the pywebview bootstrap in index.html. The
+       window controls float top-right; the top bar + sidebar header become
+       drag regions (native `app-region` on new WebView2, pywebview JS drag
+       as fallback). Hidden entirely in a normal browser. */
+    .win-controls {
+      display: none;
+      position: fixed;
+      top: 0;
+      right: 0;
+      z-index: 2000;
+      height: 34px;
+      app-region: no-drag;
+      -webkit-app-region: no-drag;
+    }
+    body.native-app .win-controls { display: flex; }
+    .win-btn {
+      width: 42px;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding: 0;
+      color: color-mix(in srgb, var(--fg) 62%, transparent);
+      cursor: default;
+    }
+    .win-btn:hover {
+      background: color-mix(in srgb, var(--fg) 12%, transparent);
+      color: var(--fg);
+    }
+    .win-btn.win-close:hover { background: #e81123; color: #fff; }
+    body.native-app .chat-top-bar,
+    body.native-app .sidebar-header {
+      app-region: drag;
+      -webkit-app-region: drag;
+    }
+    /* Interactive children of drag regions must stay clickable. */
+    body.native-app .chat-top-bar :is(button, a, input, select, .export-dropdown-wrap),
+    body.native-app .sidebar-header :is(button, a, input, select) {
+      app-region: no-drag;
+      -webkit-app-region: no-drag;
+    }
+    /* Keep the top bar clear of the floating window controls, and drop
+       toasts below them. */
+    body.native-app .chat-top-bar { padding-right: 130px; }
+    body.native-app .toast { top: 42px; }
     .incognito-indicator {
       position: absolute;
       left: 12px;
@@ -436,6 +486,32 @@ body.bg-pattern-sparkles {
       backdrop-filter: blur(10px);
       border: 1px solid color-mix(in srgb, var(--fg) 11%, transparent);
       position: relative;
+    }
+    /* Desktop app: float the rail as a rounded card. Inset it from the window
+       edges so the app background shows around it and round all four corners,
+       instead of a flush full-height slab. Scoped to body.native-app so the
+       browser and the mobile off-canvas drawer keep their flush layout. */
+    body.native-app .sidebar {
+      margin: 10px 8px 10px 10px;
+      border-radius: 16px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+    }
+    body.native-app .sidebar.right-side {
+      margin: 10px 10px 10px 8px;
+    }
+    /* Collapsing to width:0 must not leave the inset margins as a sliver. */
+    body.native-app .sidebar.hidden {
+      margin: 0;
+    }
+    /* Nudge the fixed hamburger in by the inset so it sits inside the rounded
+       rail rather than floating in the margin next to it. */
+    body.native-app .hamburger-btn {
+      top: 20px;
+      left: 19px;
+    }
+    body.native-app.hamburger-right .hamburger-btn {
+      left: auto;
+      right: 19px;
     }
     .sidebar-resize-handle {
       position: absolute;
@@ -693,6 +769,17 @@ body.bg-pattern-sparkles {
       /* Allow hover labels (e.g. the rail-new-chat "New" tooltip) to extend
          outside the 48px column. overflow:hidden was clipping them. */
       overflow: visible;
+    }
+    /* Desktop app: the collapsed state swaps the sidebar for this icon rail, so
+       give it the SAME floating rounded card as the sidebar — otherwise
+       collapsing turns the rounded rail into a square slab. */
+    body.native-app .icon-rail {
+      margin: 10px 8px 10px 10px;
+      border-radius: 16px;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+    }
+    body.native-app .icon-rail.right-side {
+      margin: 10px 10px 10px 8px;
     }
     .rail-resize-handle {
       position: absolute;
@@ -38355,4 +38442,91 @@ body.theme-frosted .modal {
 }
 .log-line-default {
   color: var(--fg, #9cdef2);
+}
+
+/* ═════════ Minimal terminal chat ═════════
+   Same treatment as the Round Table: no hairline borders, surfaces separated
+   by DEPTH (darker terminal blocks sitting on the theme background), thin
+   floating scrollbars, and a prompt glyph in the composer. Everything derives
+   from the theme vars via color-mix, so custom themes keep working; the
+   high-contrast theme's !important rules still win where they exist. */
+
+/* Messages: assistant = near-black terminal block, user = accent-tinted
+   prompt block. Uniform radii (no chat tails), no borders. */
+.msg-ai {
+  background: color-mix(in srgb, #06080c 62%, var(--bg));
+  border: none;
+  border-radius: 12px;
+}
+.msg-user {
+  background: color-mix(in srgb, var(--accent, var(--red)) 10%, var(--bg));
+  border: none;
+  border-radius: 12px;
+}
+/* User role marker becomes a terminal prompt glyph instead of a gray dot. */
+.msg-user .role::before {
+  content: "\276F";
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: none;
+  color: var(--accent, var(--red));
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Composer: borderless dark block; accent ring only while typing. */
+.chat-input-bar {
+  background: color-mix(in srgb, #06080c 62%, var(--bg));
+  border: 1px solid transparent;
+}
+.chat-input-bar:focus-within {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
+}
+/* Prompt glyph in front of the message box. */
+.chat-input-top::before {
+  content: "\276F";
+  position: absolute;
+  left: 0;
+  top: 1px;
+  color: var(--accent, var(--red));
+  font-weight: 700;
+  z-index: 2;
+  pointer-events: none;
+}
+.chat-input-bar textarea#message { padding-left: 18px; }
+.ghost-text-overlay { padding-left: 18px; }
+
+/* Composer controls: tints instead of outlines. */
+.mode-toggle {
+  border: none;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+.input-icon-btn { border: none; }
+.model-picker-btn { border: none; }
+
+/* Thin floating scrollbars in the conversation + composer. */
+.chat-history,
+.chat-input-bar textarea#message {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--fg) 22%, transparent) transparent;
+}
+
+/* Terminal chat refinements: flat-gray user bubble (no accent tint), and
+   truly zero borders — no composer focus ring, no pill/button outlines. */
+.msg-user {
+  background: color-mix(in srgb, var(--fg) 8%, var(--bg));
+}
+.msg-user .role::before {
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+.chat-input-bar:focus-within {
+  border-color: transparent;
+}
+.memory-used-pill {
+  border: none;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+.send-btn.newchat-mode {
+  border: none;
 }

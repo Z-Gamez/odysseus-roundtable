@@ -51,6 +51,13 @@ def _available_models(owner):
 def setup_roundtable_routes():
     router = APIRouter(prefix="/api/roundtable", tags=["roundtable"])
 
+    # Runs don't survive a server restart; any row still 'running' now is an
+    # orphan from a crash/kill and would show as running in History forever.
+    try:
+        store.reconcile_orphaned_runs()
+    except Exception:
+        pass
+
     @router.post("/start")
     async def start_run(request: Request) -> Any:
         user = get_current_user(request)  # username, or None when auth disabled
@@ -83,7 +90,25 @@ def setup_roundtable_routes():
 
     @router.post("/{run_id}/stop")
     async def stop_run(request: Request, run_id: str) -> Dict[str, Any]:
-        return {"stopped": agent_runs.stop(run_id)}
+        stopped = agent_runs.stop(run_id)
+        if stopped:
+            # The orchestrator writes "stopped" to saw.db when the cancel
+            # unwinds — but a task wedged in a dead await never unwinds, and
+            # the run then shows "running" forever (even across restarts,
+            # since nothing reconciles it on boot). Failsafe the DB row.
+            import asyncio
+
+            async def _db_failsafe() -> None:
+                await asyncio.sleep(20)
+                try:
+                    run = store.get_run(run_id)
+                    if run and run.get("status") == "running":
+                        store.set_run_status(run_id, "stopped")
+                except Exception:
+                    pass
+
+            asyncio.get_running_loop().create_task(_db_failsafe())
+        return {"stopped": stopped}
 
     @router.post("/{run_id}/merge")
     async def merge_run_ep(request: Request, run_id: str) -> Any:

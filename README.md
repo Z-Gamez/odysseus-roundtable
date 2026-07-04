@@ -41,6 +41,10 @@ Instead of one chatbot guessing at an entire task, a small **team of role-specia
 
 Open it from the **⊹ Round Table** button in the left rail. Full walkthrough in the **[Round Table guide](docs/round-table.md)**.
 
+<p align="center">
+  <img src="docs/round-table.gif" alt="The Round Table shipping a ticket — Analyst → Architect → Developer → QA → Security → Tech Writer → Release" width="820">
+</p>
+
 ---
 
 ## Quick Start
@@ -65,10 +69,15 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 - **Deep Research** — multi-step web research with source reading and report generation.
 - **Compare** — blind side-by-side model testing and synthesis.
 - **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
-- **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
+- **Email** — IMAP/SMTP inbox with triage, tags, summaries, and reply drafts. Agents can compose and send, gated behind an in-chat **Approve / Decline** card so nothing leaves without your click.
 - **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
 - **Round Table** — a SAFe multi-agent team (BSA → Architect → Developer → QA → Security → Tech Writer → RTE) that ships a ticket through real quality gates, with per-role model routing, a deterministic build gate, follow-up iterations, and human-in-the-loop merge. See [docs/round-table.md](docs/round-table.md).
-- **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
+- **Themes** — a borderless, minimal restyle with a dozen presets and live animated backgrounds, including a **Matrix** theme with digital rain.
+- **Extras** — gallery/image editor, uploads, web search, presets, sessions, and 2FA.
+
+<p align="center">
+  <img src="docs/odysseus-matrix.jpg" alt="Odysseus in the Matrix theme with animated digital rain" width="760">
+</p>
 
 ## Demo
 

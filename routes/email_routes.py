@@ -2403,6 +2403,26 @@ def setup_email_routes():
             logger.error(f"approve_agent_draft {sid!r} failed: {e}")
             return {"success": False, "error": "Mail operation failed"}
 
+    @router.get("/pending/{sid}/status")
+    async def agent_draft_status(sid: str, owner: str = Depends(require_owner)):
+        """Delivery status of a (formerly) staged agent draft — lets the chat
+        approval card flip from 'sending' to 'Sent' when the scheduler actually
+        delivers ('sent'), or surface the SMTP error ('failed')."""
+        import sqlite3
+        try:
+            conn = sqlite3.connect(SCHEDULED_DB)
+            row = conn.execute(
+                "SELECT status, error FROM scheduled_emails WHERE id = ? AND owner = ?",
+                (sid, owner or ""),
+            ).fetchone()
+            conn.close()
+            if not row:
+                return {"status": "unknown"}
+            return {"status": row[0], "error": row[1]}
+        except Exception as e:
+            logger.error(f"agent_draft_status {sid!r} failed: {e}")
+            return {"status": "unknown", "error": "Mail operation failed"}
+
     @router.delete("/pending/{sid}")
     async def cancel_agent_draft(sid: str, owner: str = Depends(require_owner)):
         """Discard a draft the agent staged for approval."""

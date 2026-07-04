@@ -118,7 +118,13 @@ class EditFileTool:
             return {"error": f"edit_file: {path}: {e}", "exit_code": 1}
 
         if status == "not_found":
-            return {"error": f"edit_file: old_string not found in {path}. Read the file and match it exactly.", "exit_code": 1}
+            # Weak models loop on this error with re-guessed text (observed: 5
+            # consecutive misses on one file). Name the reliable way out.
+            return {"error": (f"edit_file: old_string not found in {path}. Do NOT retry edit_file with "
+                              "guessed text. Either read_file the EXACT current section first and copy it "
+                              "verbatim, or — more reliably — REWRITE the whole file with write_file "
+                              "(read it, apply your change, write the complete new contents)."),
+                    "exit_code": 1}
         if status.startswith("not_unique"):
             n = status.split(":", 1)[1]
             return {"error": f"edit_file: old_string is not unique in {path} ({n} matches). Add surrounding context or set replace_all=true.", "exit_code": 1}

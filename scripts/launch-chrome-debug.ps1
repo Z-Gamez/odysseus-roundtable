@@ -2,20 +2,24 @@
   launch-chrome-debug.ps1 — start Chrome so Odysseus's `browser` tool can drive it.
 
   Odysseus attaches to Chrome over the DevTools protocol (CDP). Chrome only exposes
-  that when started with --remote-debugging-port, so run this once before asking the
-  agent to use the browser.
+  that when started with --remote-debugging-port — and since Chrome 136 that flag is
+  silently IGNORED for your default profile folder, so driving your everyday Chrome
+  directly is impossible.
 
-  Default: a dedicated "OdysseusAutomation" profile that runs ALONGSIDE your normal
-  Chrome. Log into the sites you want the agent to use once; the profile remembers them.
+  Default mode therefore uses a CLONE of your real profile: your logins, cookies,
+  bookmarks and extensions are mirrored (caches excluded) into "OdysseusChrome" and
+  re-synced on every launch, then Chrome starts from the clone with the debug port.
+  It runs alongside your normal Chrome. Changes you make in normal Chrome show up
+  in the agent's browser on its next launch.
 
-  -RealProfile: use your everyday Chrome profile (existing logins/tabs). For this the
-  debug port only enables if Chrome is FULLY closed first — quit Chrome, then run this.
+  -Automation: use the old blank "OdysseusAutomation" profile instead (no personal
+  data exposed to the agent — log into sites manually there as needed).
 
   Usage:
     powershell -ExecutionPolicy Bypass -File scripts\launch-chrome-debug.ps1
-    powershell -ExecutionPolicy Bypass -File scripts\launch-chrome-debug.ps1 -RealProfile
+    powershell -ExecutionPolicy Bypass -File scripts\launch-chrome-debug.ps1 -Automation
 #>
-param([int]$Port = 9222, [switch]$RealProfile)
+param([int]$Port = 9222, [switch]$Automation)
 
 $chrome = @(
   "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
@@ -25,21 +29,49 @@ $chrome = @(
 
 if (-not $chrome) { Write-Error "Chrome not found. Install Google Chrome and retry."; exit 1 }
 
-if ($RealProfile) {
-  $udd = "$env:LOCALAPPDATA\Google\Chrome\User Data"
-  Write-Host "Using your REAL Chrome profile. If Chrome is already open, fully quit it first or the debug port will NOT enable." -ForegroundColor Yellow
-} else {
+# Already listening? Nothing to do.
+try {
+  $null = Invoke-WebRequest -Uri "http://localhost:$Port/json/version" -UseBasicParsing -TimeoutSec 2
+  Write-Host "Chrome is already listening for automation on port $Port." -ForegroundColor Green
+  return
+} catch {}
+
+if ($Automation) {
   $udd = "$env:LOCALAPPDATA\Google\Chrome\OdysseusAutomation"
-  Write-Host "Using a dedicated automation profile: $udd" -ForegroundColor Cyan
-  Write-Host "Log into sites once here; it remembers. Runs alongside your normal Chrome." -ForegroundColor Cyan
+  Write-Host "Using the blank automation profile: $udd" -ForegroundColor Cyan
+} else {
+  $src = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+  $udd = "$env:LOCALAPPDATA\Google\Chrome\OdysseusChrome"
+  if (-not (Test-Path "$udd\Local State")) {
+    # First run: seed the clone from the real profile (bookmarks/history/
+    # extensions come through; Chrome's app-bound encryption means COOKIES
+    # cannot survive a copy — sign into sites once in the clone, it persists).
+    Write-Host "Seeding the agent browser from your Chrome profile (one-time)..." -ForegroundColor Cyan
+    robocopy $src $udd /E /R:0 /W:0 /MT:8 /NFL /NDL /NJH /NJS /NP `
+      /XF lockfile *.tmp `
+      /XD Cache "Code Cache" GPUCache GrShaderCache ShaderCache DawnGraphiteCache `
+          DawnWebGPUCache "Media Cache" "Service Worker" Crashpad CrashpadMetrics `
+          Snapshots component_crx_cache extensions_crx_cache OptimizationGuidePredictionModels | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+      Write-Host "Profile seed reported problems (robocopy exit $LASTEXITCODE) - continuing with what copied." -ForegroundColor Yellow
+    }
+  } else {
+    # Persistent clone — only refresh bookmarks so logins made in it survive.
+    try { Copy-Item "$src\Default\Bookmarks" "$udd\Default\Bookmarks" -Force -ErrorAction SilentlyContinue } catch {}
+  }
+  if (-not (Test-Path "$udd\Local State")) {
+    Write-Error "Profile clone is missing 'Local State' - cannot launch. Is Chrome installed with a profile at `"$src`"?"
+    exit 1
+  }
+  Write-Host "Agent browser profile ready: $udd" -ForegroundColor Cyan
 }
 
-& $chrome "--remote-debugging-port=$Port" "--user-data-dir=$udd" "about:blank"
-Start-Sleep -Milliseconds 1200
+& $chrome "--remote-debugging-port=$Port" "--user-data-dir=$udd" "--start-maximized" "about:blank"
+Start-Sleep -Milliseconds 1500
 try {
   $r = Invoke-WebRequest -Uri "http://localhost:$Port/json/version" -UseBasicParsing -TimeoutSec 4
   Write-Host "OK - Chrome is listening for automation on port $Port." -ForegroundColor Green
   Write-Host "In Odysseus, the agent's browser tool will connect automatically (browser_cdp_url = http://localhost:$Port)."
 } catch {
-  Write-Host "Chrome launched but port $Port isn't responding yet. If you used -RealProfile, make sure Chrome was fully closed first." -ForegroundColor Yellow
+  Write-Host "Chrome launched but port $Port isn't responding yet; give it a few seconds." -ForegroundColor Yellow
 }

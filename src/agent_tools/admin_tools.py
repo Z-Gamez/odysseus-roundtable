@@ -706,7 +706,8 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 "tasks": ["manage_tasks"],
                 "notes": ["manage_notes"],
                 "calendar": ["manage_calendar"],
-                "email": ["mcp__email__list_emails", "mcp__email__read_email", "mcp__email__send_email"],
+                "email": ["mcp__email__list_emails", "mcp__email__read_email", "mcp__email__send_email",
+                          "mcp__email__approve_pending_email", "mcp__email__cancel_pending_email"],
                 "research": ["web_search", "web_fetch"],  # research is a per-request flag, not a tool (closest analog)
             }
 

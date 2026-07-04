@@ -1020,11 +1020,69 @@ def _stash_agent_draft(*, to, subject, body, in_reply_to=None, references=None,
         "subject": subject or "",
         "body": body or "",
         "message": (
-            "✋ Draft staged for your approval — nothing has been sent yet.\n"
-            "Review the To/Subject/Body above. Reply 'send' to deliver, or "
-            "'cancel' to discard."
+            "✋ Draft staged — NOTHING HAS BEEN SENT. The user now sees an "
+            "approval card with Approve/Decline buttons in the chat; tell them "
+            "to review it and press one (the buttons handle delivery — you do "
+            "not need to do anything else). If the user instead confirms in "
+            f"words, call approve_pending_email with pending_id='{pending_id}'; "
+            "if they decline in words, call cancel_pending_email with the same "
+            "id. Do NOT claim the email was sent until the card or "
+            "approve_pending_email says so."
         ),
     }
+
+
+def _approve_pending(pending_id: str) -> dict:
+    """Release a staged agent draft for delivery: flip status → 'pending' and
+    backdate send_at so the app's scheduled-send poller SMTPs it within its
+    next cycle. Mirrors routes/email_routes.py approve_agent_draft."""
+    try:
+        from src.constants import SCHEDULED_EMAILS_DB
+    except Exception:
+        return {"success": False, "error": "Pending-email storage unavailable"}
+    try:
+        conn = sqlite3.connect(SCHEDULED_EMAILS_DB)
+        cur = conn.execute(
+            """UPDATE scheduled_emails SET status='pending', send_at=?
+               WHERE id=? AND status='agent_draft'""",
+            (datetime.utcnow().isoformat(), str(pending_id)),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT to_addr, subject FROM scheduled_emails WHERE id=?",
+            (str(pending_id),),
+        ).fetchone()
+        conn.close()
+        if not cur.rowcount:
+            return {"success": False,
+                    "error": f"No pending draft with id '{pending_id}' (already sent, cancelled, or bad id)"}
+        return {"success": True,
+                "message": (f"Approved — email to {row[0] if row else '?'} "
+                            f"(subject: {row[1] if row else '?'}) is being delivered by the scheduler now.")}
+    except Exception as e:
+        return {"success": False, "error": f"Approve failed: {e}"}
+
+
+def _cancel_pending(pending_id: str) -> dict:
+    """Discard a staged agent draft the user declined."""
+    try:
+        from src.constants import SCHEDULED_EMAILS_DB
+    except Exception:
+        return {"success": False, "error": "Pending-email storage unavailable"}
+    try:
+        conn = sqlite3.connect(SCHEDULED_EMAILS_DB)
+        cur = conn.execute(
+            "DELETE FROM scheduled_emails WHERE id=? AND status='agent_draft'",
+            (str(pending_id),),
+        )
+        conn.commit()
+        conn.close()
+        if not cur.rowcount:
+            return {"success": False,
+                    "error": f"No pending draft with id '{pending_id}' (already sent, cancelled, or bad id)"}
+        return {"success": True, "message": "Draft discarded — nothing was sent."}
+    except Exception as e:
+        return {"success": False, "error": f"Cancel failed: {e}"}
 
 
 def _send_email(to, subject, body, in_reply_to=None, references=None, cc=None, bcc=None, account=None):
@@ -1750,6 +1808,36 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="approve_pending_email",
+            description=(
+                "Deliver an email that send_email/reply_to_email staged for approval "
+                "(they return a pending_id). Call this ONLY after the user has "
+                "explicitly confirmed they want that specific email sent — never "
+                "on your own initiative."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pending_id": {"type": "string", "description": "The pending_id returned when the draft was staged"},
+                },
+                "required": ["pending_id"],
+            },
+        ),
+        Tool(
+            name="cancel_pending_email",
+            description=(
+                "Discard a staged email draft (from send_email/reply_to_email) that "
+                "the user declined or no longer wants. Nothing is sent."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pending_id": {"type": "string", "description": "The pending_id returned when the draft was staged"},
+                },
+                "required": ["pending_id"],
+            },
+        ),
+        Tool(
             name="draft_email",
             description=(
                 "Create a new Odysseus email compose draft document. This DOES NOT send. "
@@ -2176,15 +2264,30 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if "error" in result:
                 return [TextContent(type="text", text=f"Error: {result['error']}")]
             if result.get("pending"):
-                return [TextContent(
-                    type="text",
-                    text=(
-                        f"Draft staged for approval (pending id: {result.get('pending_id')}). "
-                        "Nothing has been sent yet. Review and approve it in Odysseus before delivery."
-                    ),
-                )]
+                return [TextContent(type="text", text=result.get("message") or (
+                    f"Draft staged for approval (pending id: {result.get('pending_id')}). "
+                    "Nothing has been sent yet."
+                ))]
             acct_note = f" (from {result['account']})" if result.get("account") else ""
             return [TextContent(type="text", text=f"Sent email to {result['to']} with subject '{result['subject']}'{acct_note}.")]
+
+        elif name == "approve_pending_email":
+            pid = arguments.get("pending_id")
+            if not pid:
+                return [TextContent(type="text", text="Error: pending_id is required")]
+            result = _approve_pending(pid)
+            if not result.get("success"):
+                return [TextContent(type="text", text=f"Error: {result.get('error')}")]
+            return [TextContent(type="text", text=result.get("message") or "Approved for delivery.")]
+
+        elif name == "cancel_pending_email":
+            pid = arguments.get("pending_id")
+            if not pid:
+                return [TextContent(type="text", text="Error: pending_id is required")]
+            result = _cancel_pending(pid)
+            if not result.get("success"):
+                return [TextContent(type="text", text=f"Error: {result.get('error')}")]
+            return [TextContent(type="text", text=result.get("message") or "Draft discarded.")]
 
         elif name == "draft_email":
             to = arguments.get("to")
@@ -2225,6 +2328,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
             if "error" in result:
                 return [TextContent(type="text", text=f"Error: {result['error']}")]
+            if result.get("pending"):
+                return [TextContent(type="text", text=result.get("message") or (
+                    f"Reply staged for approval (pending id: {result.get('pending_id')}). "
+                    "Nothing has been sent yet."
+                ))]
             # Mark original as answered
             try:
                 _set_flag(uid, arguments.get("folder", "INBOX"), "\\Answered", add=True, account=acct)

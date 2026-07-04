@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 import time
 import collections
@@ -100,18 +101,68 @@ async def _run_subprocess_streaming(
         timed_out,
     )
 
+def _find_bash_on_windows() -> str:
+    """Path to a real bash on Windows (Git Bash), or '' if unavailable.
+
+    create_subprocess_shell uses cmd.exe on Windows, but the tool is NAMED
+    'bash' — models rightly emit POSIX (heredocs, head, ls, redirects) and it
+    exploded on cmd (observed: `python << 'EOF'` and `... | head` both exit 1
+    while the model flailed for rounds). Run their commands through actual
+    bash when one exists."""
+    import shutil
+    for cand in (
+        shutil.which("bash"),
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ):
+        if cand and os.path.exists(cand):
+            return cand
+    return ""
+
+
+_WIN_BASH = _find_bash_on_windows() if os.name == "nt" else ""
+
+
 class BashTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import agent_cwd, _truncate
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
-        proc = await asyncio.create_subprocess_shell(
-            content,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_subproc_env,
-            cwd=agent_cwd(),
-        )
+        if _WIN_BASH:
+            # Models write cmd-style null redirects ("2>nul") out of Windows
+            # habit; under real bash that creates a literal file named 'nul' —
+            # which Windows then can't delete (NUL is a reserved DOS device
+            # name). Translate to the POSIX null device.
+            import re as _re
+            content = _re.sub(r"(\d*\s*>>?)\s*nul\b", r"\1/dev/null", content, flags=_re.IGNORECASE)
+            # Models also emit Windows backslash paths (C:\foo\bar). Git Bash
+            # mangles those into LITERAL directories inside the cwd: quoted,
+            # mkdir -p "C:\a\b" walks components without recognizing the drive
+            # (creating a dir literally named "C:" via Cygwin's reserved-char
+            # mapping, undeletable from Explorer); unquoted, bash eats the
+            # backslashes entirely ("C:ab"). Forward-slash drive paths resolve
+            # natively, so rewrite. The {2,} floor keeps escape sequences like
+            # "C:\n" (path-less single char) untouched.
+            content = _re.sub(
+                r"""([A-Za-z]):\\([^\s"'`<>|;&()]{2,})""",
+                lambda m: m.group(1) + ":/" + m.group(2).replace("\\", "/"),
+                content,
+            )
+            proc = await asyncio.create_subprocess_exec(
+                _WIN_BASH, "-c", content,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=_subproc_env,
+                cwd=agent_cwd(),
+            )
+        else:
+            proc = await asyncio.create_subprocess_shell(
+                content,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=_subproc_env,
+                cwd=agent_cwd(),
+            )
         stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
             proc,
             timeout=DEFAULT_BASH_TIMEOUT,

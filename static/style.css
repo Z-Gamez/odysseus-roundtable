@@ -38530,3 +38530,172 @@ body.theme-frosted .modal {
 .send-btn.newchat-mode {
   border: none;
 }
+
+/* ═════════ Minimal borderless menus (rail sections + settings) ═════════
+   One skinning layer for every modal (Brain, Calendar, Compare, Cookbook,
+   Deep Research, Gallery, Library, Notes, Tasks, Theme, Settings, ...):
+   no hairlines anywhere, depth from shadows + tinted fills instead. Border
+   WIDTHS are preserved (only colors go transparent) so nothing shifts.
+   Exemptions: border-drawn glyphs (spinners/loaders/checkmarks/dots). */
+.modal-content {
+  border: none;
+  border-radius: 16px;
+  box-shadow: 0 18px 56px rgba(0,0,0,.55);
+}
+.modal-content *:not([class*="spin"]):not([class*="load"]):not([class*="check"]):not([class*="dot"]),
+.modal-content *:not([class*="spin"]):not([class*="load"]):not([class*="check"]):not([class*="dot"])::before,
+.modal-content *:not([class*="spin"]):not([class*="load"]):not([class*="check"]):not([class*="dot"])::after {
+  border-color: transparent !important;
+}
+/* Text fields become tinted borderless blocks; focus is an accent OUTLINE
+   (outlines are untouched by the border kill above). */
+.modal-content :is(input[type="text"], input[type="password"], input[type="number"],
+  input[type="search"], input[type="email"], input[type="url"], input:not([type]),
+  textarea, select) {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-radius: 10px;
+}
+.modal-content :is(input, textarea, select):focus {
+  outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+  outline-offset: -1px;
+}
+/* Floating popover menus get the same treatment. */
+.export-dropdown-menu, .overflow-menu, .msg-overflow-menu, .ctx-popup,
+.ctx-detail-popup, .memory-used-detail, .model-picker-menu {
+  border: none;
+  box-shadow: 0 12px 36px rgba(0,0,0,.5);
+}
+/* Thin floating scrollbars inside all menus. */
+.modal-content, .modal-content * {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--fg) 22%, transparent) transparent;
+}
+
+/* Notes renders as its own pane (.notes-pane), not a .modal-content modal —
+   give it the identical borderless treatment. */
+.notes-pane {
+  border: none;
+  border-radius: 16px;
+  box-shadow: 0 18px 56px rgba(0,0,0,.55);
+}
+.notes-pane *:not([class*="spin"]):not([class*="load"]):not([class*="check"]):not([class*="dot"]),
+.notes-pane *:not([class*="spin"]):not([class*="load"]):not([class*="check"]):not([class*="dot"])::before,
+.notes-pane *:not([class*="spin"]):not([class*="load"]):not([class*="check"]):not([class*="dot"])::after {
+  border-color: transparent !important;
+}
+.notes-pane :is(input[type="text"], input[type="password"], input[type="number"],
+  input[type="search"], input[type="email"], input[type="url"], input:not([type]),
+  textarea, select) {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-radius: 10px;
+}
+.notes-pane :is(input, textarea, select):focus {
+  outline: 1px solid color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+  outline-offset: -1px;
+}
+.notes-pane, .notes-pane * {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--fg) 22%, transparent) transparent;
+}
+/* Note cards keep their identity through fills, not outlines. */
+.note-card {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+/* Notes docked right becomes a FLOATING card like the rail: inset from the
+   window edges (clear of the floating window controls at the top), rounded
+   on all corners. !important so it wins over the dock's inline geometry. */
+.notes-pane.modal-right-docked {
+  top: 44px !important;
+  right: 10px !important;
+  bottom: 10px !important;
+  left: auto !important;
+  height: auto !important;
+  max-height: none !important;
+  border-radius: 16px !important;
+}
+/* The quick-add input lives inside an already-styled row — kill the inner
+   field box the pane-wide input tint gave it, and pad the text start so the
+   caret doesn't hug the edge. */
+.notes-pane input.notes-quick-input {
+  background: transparent;
+  border-radius: 0;
+  padding: 6px 8px;
+}
+
+/* Fix the preset sliders (Brain > skills confidence, etc.): a custom webkit
+   thumb on an appearance:none track needs explicit vertical centering —
+   ((18px thumb - 6px track) / 2) — or it renders floating below the track. */
+.preset-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 4px;
+  background: transparent;
+}
+.preset-range::-webkit-slider-thumb {
+  margin-top: -6px;
+  border: 2.5px solid #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.4);
+}
+.preset-range {
+  background: color-mix(in srgb, var(--fg) 14%, transparent);
+}
+
+/* ── Email approval card (agent-staged mail: Approve/Decline in chat) ── */
+.email-approval-card {
+  background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%);
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin: 10px 0 12px;
+  max-width: 620px;
+}
+.email-approval-head {
+  font-weight: 600;
+  font-size: 0.92em;
+  margin-bottom: 8px;
+  color: var(--fg);
+}
+.email-approval-meta { font-size: 0.86em; opacity: 0.9; margin-bottom: 8px; }
+.email-approval-meta .email-approval-k {
+  display: inline-block;
+  min-width: 62px;
+  opacity: 0.55;
+  text-transform: uppercase;
+  font-size: 0.78em;
+  letter-spacing: 0.05em;
+}
+.email-approval-body {
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 0 0 10px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.email-approval-actions { display: flex; gap: 10px; align-items: center; }
+.email-approve-btn, .email-decline-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 7px 18px;
+  font-size: 0.86em;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.email-approve-btn {
+  background: var(--red);
+  color: var(--bg);
+  font-weight: 600;
+}
+.email-approve-btn:hover { filter: brightness(1.15); }
+.email-approve-btn:disabled { opacity: 0.5; cursor: default; }
+.email-decline-btn {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  color: var(--fg);
+}
+.email-decline-btn:hover { filter: brightness(1.25); }
+.email-approval-result { font-size: 0.88em; font-weight: 600; }
+.email-approval-result.ok { color: var(--red); }
+.email-approval-result.no { opacity: 0.65; }

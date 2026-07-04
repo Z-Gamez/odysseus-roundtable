@@ -32,6 +32,12 @@ if (-not (Test-Path $chromaPy)) {
 
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 
+# Memory discipline: evict cold collection segments under an LRU policy and
+# cap the segment cache at 512MB, instead of Chroma's default keep-everything
+# behaviour (which grows RAM with every collection touched).
+$env:CHROMA_SEGMENT_CACHE_POLICY = 'LRU'
+$env:CHROMA_MEMORY_LIMIT_BYTES = '536870912'
+
 # Prefer the chroma.exe CLI; fall back to the module entry point.
 if (Test-Path $chromaExe) {
     Start-Process -FilePath $chromaExe -ArgumentList 'run','--host','127.0.0.1','--port',"$Port",'--path',"$DataDir" -WindowStyle Hidden

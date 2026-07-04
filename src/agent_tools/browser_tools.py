@@ -62,10 +62,70 @@ def _port_from_url(url: str) -> int:
         return 9222
 
 
+# The user's real profile, and the automation clone of it. Chrome 136+ silently
+# IGNORES --remote-debugging-port when pointed at the default User Data dir, so
+# "just open my Chrome with CDP" is impossible on modern Chrome. Instead the
+# real profile is mirrored into a clone (bookmarks, cookies, logins, extensions
+# — caches excluded) and refreshed on every launch. Same machine + same
+# chrome.exe means the encrypted cookie/password stores decrypt in the copy.
+_REAL_USER_DATA = os.path.expandvars(r"%LocalAppData%\Google\Chrome\User Data")
+_CLONE_USER_DATA = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusChrome")
+_CLONE_EXCLUDE_DIRS = (
+    "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache",
+    "DawnGraphiteCache", "DawnWebGPUCache", "Media Cache", "Service Worker",
+    "Crashpad", "CrashpadMetrics", "Snapshots", "component_crx_cache",
+    "extensions_crx_cache", "OptimizationGuidePredictionModels",
+)
+
+
+def _sync_profile_clone(timeout_s: int = 300) -> bool:
+    """Seed-once, persist-after profile clone.
+
+    First launch: copy the real profile (bookmarks/history/extensions/autofill
+    come through; caches excluded). Chrome's app-bound encryption refuses to
+    decrypt cookies at a different profile path, so saved LOGINS can never be
+    copied — the user signs into sites once IN the clone instead, and those
+    logins persist because subsequent launches only refresh Bookmarks (plain
+    JSON) rather than re-mirroring. Re-mirroring would wipe the clone's own
+    cookie jar every launch. Returns True if the clone looks launchable."""
+    import shutil
+    import subprocess
+    if not os.path.isdir(_REAL_USER_DATA):
+        return False
+    seeded = os.path.exists(os.path.join(_CLONE_USER_DATA, "Local State"))
+    if not seeded:
+        cmd = ["robocopy", _REAL_USER_DATA, _CLONE_USER_DATA,
+               "/E", "/R:0", "/W:0", "/MT:8", "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
+               "/XF", "lockfile", "*.tmp"]
+        cmd += ["/XD"] + list(_CLONE_EXCLUDE_DIRS)
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            logger.warning("[browser] profile clone seed timed out — will resume on next launch")
+        except Exception as e:
+            logger.warning("[browser] profile clone seed failed: %s", e)
+    else:
+        # Keep bookmarks current from the real Chrome; touch nothing else.
+        for prof in ("Default",):
+            src = os.path.join(_REAL_USER_DATA, prof, "Bookmarks")
+            dst = os.path.join(_CLONE_USER_DATA, prof, "Bookmarks")
+            try:
+                if os.path.exists(src):
+                    shutil.copy2(src, dst)
+            except Exception:
+                pass
+    # Launchable = the encryption keystore + at least the default profile exist.
+    return (os.path.exists(os.path.join(_CLONE_USER_DATA, "Local State"))
+            and os.path.isdir(os.path.join(_CLONE_USER_DATA, "Default")))
+
+
 def _try_launch_chrome(port: int) -> bool:
     """Best-effort: start Chrome with remote debugging if nothing is on the port,
     so the tool self-heals instead of failing when the debug Chrome isn't running.
-    Uses a dedicated automation profile (runs alongside the user's normal Chrome).
+    Default mode 'my-chrome': launch a freshly-synced CLONE of the user's real
+    profile (their logins/bookmarks/extensions). Setting browser_profile_mode to
+    'automation' keeps the old blank OdysseusAutomation profile instead.
     Returns True if the debug port is reachable afterward."""
     import socket
     import subprocess
@@ -92,7 +152,19 @@ def _try_launch_chrome(port: int) -> bool:
     chrome = next((c for c in candidates if os.path.exists(c)), None) or shutil.which("chrome")
     if not chrome:
         return False
-    profile = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusAutomation")
+
+    try:
+        from src.settings import get_setting
+        mode = str(get_setting("browser_profile_mode", "my-chrome") or "my-chrome")
+    except Exception:
+        mode = "my-chrome"
+    if mode == "my-chrome" and _sync_profile_clone():
+        profile = _CLONE_USER_DATA
+    else:
+        if mode == "my-chrome":
+            logger.warning("[browser] real-profile clone unavailable — falling back to automation profile")
+        profile = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusAutomation")
+
     try:
         subprocess.Popen(
             [chrome, f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
@@ -155,10 +227,10 @@ class _BrowserSession:
 _SESSION = _BrowserSession()
 
 _CONNECT_HINT = (
-    "Could not connect to Chrome at {url}. Start Chrome with remote debugging first:\n"
-    '  Windows:  & "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" '
-    "--remote-debugging-port=9222\n"
-    "  (or run scripts/launch-chrome-debug.ps1). Then retry. Detail: {err}"
+    "Could not connect to Chrome at {url}. The tool normally launches a clone of "
+    "the user's Chrome profile automatically; the first-time profile sync can take "
+    "a few minutes, so simply RETRY this call. Manual start: run "
+    "scripts/launch-chrome-debug.ps1. Detail: {err}"
 )
 
 

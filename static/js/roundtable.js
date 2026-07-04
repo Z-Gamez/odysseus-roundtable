@@ -47,7 +47,7 @@
 
   // ---- inline SVG icons (no emoji) ------------------------------------------
   var ICONS = {
-    table:   '<path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8z"/><circle cx="12" cy="19.5" r="1.4"/>',
+    table:   '<circle cx="12" cy="12" r="5"/><circle cx="12" cy="3.6" r="1.5"/><circle cx="12" cy="20.4" r="1.5"/><circle cx="3.6" cy="12" r="1.5"/><circle cx="20.4" cy="12" r="1.5"/>',
     play:    '<path d="M7 4.5v15l12-7.5z"/>',
     stop:    '<rect x="6" y="6" width="12" height="12" rx="2"/>',
     close:   '<path d="M6 6l12 12M18 6L6 18"/>',
@@ -91,7 +91,11 @@
     #rt-overlay{position:absolute;inset:10px 8px 10px 2px;z-index:2150;display:none;flex-direction:column;
       background:var(--sidebar-bg,var(--panel,#14161b));color:inherit;
       border:1px solid color-mix(in srgb, var(--fg,#9cdef2) 11%, transparent);
-      border-radius:16px;box-shadow:0 10px 34px rgba(0,0,0,.4);overflow:hidden;}
+      border-radius:16px;overflow:hidden;}
+    /* No shadow while docked — it paints a dark halo over the flat frost that
+       reads as a blurred ghost of the panel. Windowed mode (over live UI)
+       keeps a real drop shadow. */
+    #rt-overlay.rt-windowed{box-shadow:0 16px 44px rgba(0,0,0,.5);}
     #rt-overlay.rt-fixed{position:fixed;inset:40px 12px 12px 12px;z-index:2150;}
     #rt-overlay.rt-open{display:flex;}
     /* Floating thin scrollbars everywhere inside the panel (standard props win
@@ -103,9 +107,33 @@
     @keyframes rt-pulse{0%,100%{opacity:1}50%{opacity:.35}}
     @keyframes rt-spin{to{transform:rotate(360deg)}}
 
-    #rt-head{display:flex;align-items:center;gap:12px;padding:12px 16px 8px;flex:0 0 auto;}
-    body.native-app #rt-head{app-region:drag;-webkit-app-region:drag;}
-    body.native-app #rt-head :is(button,a,input){app-region:no-drag;-webkit-app-region:no-drag;}
+    #rt-head{display:flex;align-items:center;gap:12px;padding:12px 16px 8px;flex:0 0 auto;cursor:grab;user-select:none;}
+    #rt-head:active{cursor:grabbing;}
+    #rt-overlay.rt-floating{inset:auto;}
+    /* Windowed (dragged-out) mode: a compact monitor — slim stepper + log,
+       form hidden, no frost behind. Double-click the header to re-dock.
+       Sits BELOW the window controls so min/max/close stay usable. */
+    #rt-overlay.rt-windowed{z-index:600;}
+    #rt-overlay.rt-windowed .rt-field,
+    #rt-overlay.rt-windowed #rt-run,
+    #rt-overlay.rt-windowed #rt-status{display:none;}
+    #rt-overlay.rt-windowed #rt-left{width:172px;min-width:150px;padding:10px;}
+    #rt-overlay.rt-windowed #rt-head{padding:9px 12px 6px;}
+    #rt-overlay.rt-windowed .rt-tabs{display:none;}
+    #rt-overlay.rt-windowed #rt-chip{max-width:55%;}
+    #rt-min{cursor:pointer;border:none;background:transparent;color:inherit;opacity:.6;padding:6px;border-radius:8px;
+      display:inline-flex;align-items:center;}
+    #rt-min:hover{opacity:1;background:color-mix(in srgb, var(--fg,#9cdef2) 10%, transparent);}
+    #rt-mini{position:fixed;right:18px;bottom:18px;z-index:2160;display:none;align-items:center;gap:9px;
+      background:var(--sidebar-bg,var(--panel,#14161b));border-radius:999px;padding:10px 16px;cursor:pointer;
+      box-shadow:0 10px 30px rgba(0,0,0,.5);font-size:12px;font-weight:600;color:inherit;}
+    #rt-mini.on{display:inline-flex;}
+    #rt-mini .rt-mini-ico{color:${ACCENT};display:inline-flex;}
+    #rt-mini .rt-chip-dot{width:8px;height:8px;border-radius:50%;background:${ACCENT};flex:0 0 auto;}
+    #rt-mini.run .rt-chip-dot{animation:rt-pulse 1.6s infinite;}
+    #rt-mini.ok .rt-chip-dot{background:${OK};animation:none;}
+    #rt-mini.bad .rt-chip-dot{background:${BAD};animation:none;}
+    #rt-mini.warn .rt-chip-dot{background:${WARN};animation:none;}
     #rt-head .rt-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:13.5px;letter-spacing:.2px;color:${ACCENT};}
     #rt-chip{display:none;align-items:center;gap:7px;font-size:11.5px;border-radius:999px;padding:4px 12px;
       background:${ACCENT_SOFT};color:inherit;white-space:nowrap;max-width:40%;overflow:hidden;text-overflow:ellipsis;}
@@ -172,7 +200,7 @@
 
     #rt-pipeline{display:flex;flex-direction:column;margin-top:6px;}
     #rt-pipeline:empty{display:none;}
-    #rt-pipeline::before{content:"Pipeline";font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;opacity:.55;margin-bottom:10px;}
+    #rt-pipeline::before{content:"Team";font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;opacity:.55;margin-bottom:10px;}
     .rt-step{display:flex;gap:10px;align-items:flex-start;position:relative;padding-bottom:16px;}
     .rt-step::before{content:"";position:absolute;left:9px;top:22px;bottom:2px;width:2px;border-radius:1px;
       background:color-mix(in srgb, var(--fg,#9cdef2) 14%, transparent);}
@@ -302,7 +330,7 @@
     injectStyles();
     var ov = h(`<div id="rt-overlay" role="dialog" aria-label="Round Table">
       <div id="rt-panel">
-        <div id="rt-head" class="pywebview-drag-region">
+        <div id="rt-head">
           <span class="rt-title">${icon("table", 16)} Round Table</span>
           <span id="rt-chip"><span class="rt-chip-dot"></span><span id="rt-chip-text"></span></span>
           <span class="rt-spacer"></span>
@@ -311,6 +339,9 @@
             <button class="rt-tab" id="rt-hist" title="Run history">History</button>
             <button class="rt-tab" id="rt-cfg" title="Per-role models">Models</button>
           </span>
+          <button id="rt-min" title="Minimize — the run keeps going" aria-label="Minimize">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg>
+          </button>
           <button id="rt-x" title="Close" aria-label="Close">${icon("close", 15)}</button>
         </div>
         <div id="rt-body">
@@ -352,6 +383,14 @@
     document.body.appendChild(bd);
     bd.addEventListener("click", close);
 
+    // Minimized pill: the run keeps streaming while collapsed; this shows the
+    // live status (active role, attempt, elapsed) and restores on click.
+    var mini = h('<div id="rt-mini" title="Round Table is running — click to reopen" role="button">' +
+      '<span class="rt-mini-ico">' + icon("table", 14) + '</span>' +
+      '<span class="rt-chip-dot"></span><span id="rt-mini-text">Round Table</span></div>');
+    document.body.appendChild(mini);
+    mini.addEventListener("click", restore);
+
     // Mount the panel inside the chat column so it sits beside the rail and
     // follows sidebar resize/collapse. Falls back to a fixed overlay in odd embeds.
     var host = document.querySelector(".chat-container");
@@ -364,7 +403,7 @@
     }
 
     els = {
-      overlay: ov, backdrop: bd,
+      overlay: ov, backdrop: bd, mini: mini, miniText: mini.querySelector("#rt-mini-text"),
       desc: ov.querySelector("#rt-desc"),
       ac: ov.querySelector("#rt-ac"), ws: ov.querySelector("#rt-ws"),
       wsBtn: ov.querySelector("#rt-ws-btn"), wsName: ov.querySelector("#rt-ws-name"),
@@ -379,6 +418,69 @@
       tabs: { run: ov.querySelector("#rt-tab-run"), history: ov.querySelector("#rt-hist"), models: ov.querySelector("#rt-cfg") },
     };
     ov.querySelector("#rt-x").addEventListener("click", close);
+    ov.querySelector("#rt-min").addEventListener("click", minimize);
+
+    // Drag the panel around by its header, like the Notes mini-window. First
+    // drag freezes the current size and switches to fixed positioning;
+    // double-click the header to snap back to the docked column position.
+    (function wireDrag() {
+      var head = ov.querySelector("#rt-head");
+      head.addEventListener("mousedown", function (e) {
+        if (e.button !== 0 || e.target.closest("button")) return;
+        var windowed = ov.classList.contains("rt-windowed");
+        var W, H, oxx, oyy;
+        if (!windowed) {
+          // First drag DETACHES: shrink to a compact monitor window near the
+          // cursor and drop the frost so the app behind is fully usable.
+          W = Math.min(620, Math.round(window.innerWidth * 0.55));
+          H = Math.min(560, Math.round(window.innerHeight * 0.68));
+          oxx = Math.max(0, Math.min(window.innerWidth - W, e.clientX - 120));
+          oyy = Math.max(0, Math.min(window.innerHeight - H, e.clientY - 18));
+          ov.classList.add("rt-floating", "rt-windowed");
+          els.backdrop.classList.remove("rt-open");
+          document.body.classList.remove("rt-open");
+        } else {
+          var r = ov.getBoundingClientRect();
+          W = r.width; H = r.height; oxx = r.left; oyy = r.top;
+        }
+        ov.style.position = "fixed";
+        ov.style.width = W + "px";
+        ov.style.height = H + "px";
+        ov.style.left = oxx + "px";
+        ov.style.top = oyy + "px";
+        ov.style.right = "auto";
+        ov.style.bottom = "auto";
+        var sx = e.clientX, sy = e.clientY;
+        e.preventDefault();
+        function mv(ev) {
+          var nx = Math.max(0, Math.min(window.innerWidth - 140, oxx + ev.clientX - sx));
+          var ny = Math.max(0, Math.min(window.innerHeight - 60, oyy + ev.clientY - sy));
+          ov.style.left = nx + "px";
+          ov.style.top = ny + "px";
+        }
+        function up() {
+          document.removeEventListener("mousemove", mv);
+          document.removeEventListener("mouseup", up);
+        }
+        document.addEventListener("mousemove", mv);
+        document.addEventListener("mouseup", up);
+      });
+      head.addEventListener("dblclick", function (e) {
+        if (e.target.closest("button")) return;
+        // Re-dock: full edge-to-edge panel with the frost back, re-aligned
+        // to the rail's top edge.
+        ov.classList.remove("rt-floating", "rt-windowed");
+        ["position", "left", "top", "right", "bottom", "width", "height"].forEach(function (p) {
+          ov.style.removeProperty(p);
+        });
+        alignTop();
+        if (ov.classList.contains("rt-open")) {
+          els.backdrop.classList.add("rt-open");
+          document.body.classList.add("rt-open");
+        }
+      });
+    })();
+
     els.tabs.run.addEventListener("click", function () { setTab("run"); });
     els.tabs.history.addEventListener("click", function () { setTab("history"); loadRecent(); });
     els.tabs.models.addEventListener("click", function () { setTab("models"); openConfig(); });
@@ -459,18 +561,15 @@
 
   function open() {
     if (!els) build();
-    document.body.classList.add("rt-open");   // lifts the rail above the glass
-    // Align the panel's top edge EXACTLY with the rail card's top edge —
-    // measured, not assumed, so container padding/borders can't skew it.
-    try {
-      var sb = document.getElementById("sidebar");
-      var hostEl = els.overlay.parentElement;
-      if (sb && hostEl && sb.offsetParent !== null) {
-        var t = sb.getBoundingClientRect().top - hostEl.getBoundingClientRect().top;
-        if (t >= 0 && t < 80) els.overlay.style.top = Math.round(t) + "px";
-      }
-    } catch (e) { /* keep the CSS default */ }
-    els.backdrop.classList.add("rt-open");
+    els.mini.classList.remove("on");
+    var windowed = els.overlay.classList.contains("rt-windowed");
+    // Frost + rail-lift only in docked (modal) mode — the dragged-out compact
+    // window leaves the app usable behind it.
+    if (!windowed) {
+      document.body.classList.add("rt-open");
+      els.backdrop.classList.add("rt-open");
+    }
+    alignTop();
     els.overlay.classList.add("rt-open");
     setTab("run");
     try { var w = localStorage.getItem("saw_ws"); if (w) els.setWs(w); } catch (e) { /* ignore */ }
@@ -480,7 +579,44 @@
     if (!els) return;
     els.overlay.classList.remove("rt-open");
     els.backdrop.classList.remove("rt-open");
+    els.mini.classList.remove("on");
     document.body.classList.remove("rt-open");
+  }
+
+  // Align the panel's top edge EXACTLY with the rail card's top edge —
+  // measured, not assumed, so container padding/borders can't skew it.
+  // Skipped while the panel is floating/windowed.
+  function alignTop() {
+    if (!els) return;
+    try {
+      var sb = document.getElementById("sidebar");
+      var hostEl = els.overlay.parentElement;
+      if (sb && hostEl && sb.offsetParent !== null && !els.overlay.classList.contains("rt-floating")) {
+        var t = sb.getBoundingClientRect().top - hostEl.getBoundingClientRect().top;
+        if (t >= 0 && t < 80) els.overlay.style.top = Math.round(t) + "px";
+      }
+    } catch (e) { /* keep the CSS default */ }
+  }
+
+  // Minimize: hide the panel + frost but keep everything alive — the SSE
+  // stream keeps dispatching into the (hidden) log and the mini pill mirrors
+  // the live status chip (active role, attempt, elapsed).
+  function minimize() {
+    if (!els) return;
+    els.overlay.classList.remove("rt-open");
+    els.backdrop.classList.remove("rt-open");
+    document.body.classList.remove("rt-open");
+    els.mini.classList.add("on");
+  }
+  function restore() {
+    if (!els) return;
+    els.mini.classList.remove("on");
+    // Windowed mode restores as the frost-free compact window it was.
+    if (!els.overlay.classList.contains("rt-windowed")) {
+      document.body.classList.add("rt-open");
+      els.backdrop.classList.add("rt-open");
+    }
+    els.overlay.classList.add("rt-open");
   }
 
   // ---- live status chip --------------------------------------------------------
@@ -491,6 +627,12 @@
     ["run", "ok", "bad", "warn"].forEach(function (c) { els.chip.classList.remove(c); });
     els.chip.classList.add(state);
     els.chipText.textContent = text || "";
+    // Mirror into the minimized pill so it shows live progress while collapsed.
+    if (els.mini) {
+      ["run", "ok", "bad", "warn"].forEach(function (c) { els.mini.classList.remove(c); });
+      els.mini.classList.add(state);
+      els.miniText.textContent = text || "Round Table";
+    }
   }
   function chipTick() {
     if (!current || !current.startTs || current.done) return;
@@ -1021,5 +1163,17 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wire);
   else wire();
 
-  window.RoundTable = { open: open, close: close };
+  // `_dispatch` / `_demoReset` are internal hooks for automated UI tests and
+  // demo capture: _demoReset seeds the run state launchRun would normally
+  // create, then _dispatch feeds a scripted event through the exact same
+  // render path the live SSE stream uses, so a replay renders identically to
+  // a real run. Not part of the public API.
+  window.RoundTable = {
+    open: open, close: close, minimize: minimize, restore: restore,
+    _dispatch: dispatch,
+    _demoReset: function () {
+      current = { runId: "rt_demo", blocks: {}, chips: {}, active: null,
+                  done: false, startTs: null, chipBase: "" };
+    },
+  };
 })();

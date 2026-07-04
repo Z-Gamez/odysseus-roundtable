@@ -460,6 +460,33 @@ def _parse_verdict(text: str) -> Optional[str]:     # qas: pass|fail
     return _parse(_QAS_VERDICT, text)
 
 
+async def _clarify_verdict(url: str, model: str, headers: dict, review_text: str) -> Optional[str]:
+    """Convert a verdict-less QA review into a verdict with one tiny follow-up call.
+
+    Local models often write a thorough review but drop the required
+    'QAS VERDICT:' line (observed: 'All 7 acceptance criteria are fully
+    implemented and verified' parsed as unknown and was treated as FAIL,
+    burning iterations on work that had already passed)."""
+    try:
+        from src.llm_core import llm_call_async
+        out = await llm_call_async(url, model, [
+            {"role": "system",
+             "content": "You are a strict formatter. Reply with EXACTLY one line and nothing else."},
+            {"role": "user",
+             "content": ("Below is a QA review. Decide its verdict from ITS OWN findings — do not "
+                         "re-review the code. Reply with exactly one line:\n"
+                         "QAS VERDICT: PASS\nor\nQAS VERDICT: FAIL — <the blocking reasons it lists>\n\n"
+                         + review_text[-6000:])},
+        ], temperature=0.0, max_tokens=120, headers=headers, timeout=120)
+        v = _parse(_QAS_VERDICT, out or "")
+        if v:
+            logger.info("[saw] verdict clarifier resolved unknown -> %s", v)
+        return v
+    except Exception as e:
+        logger.warning("[saw] verdict clarifier failed: %s", e)
+        return None
+
+
 def _parse_arch(text: str) -> Optional[str]:        # approve|revise
     return _parse(_ARCH_VERDICT, text)
 
@@ -506,16 +533,23 @@ def _bsa_messages(role: RoleSpec, title: str, description: str, acceptance: str,
     )
     user = (
         f"# Workspace\n{workspace}\n\n"
-        f"# Ticket\nTitle: {title}\n\nDescription:\n{description or '(none)'}\n\n{ac_block}"
+        f"# Ticket\nTitle: {title}\n\nDescription:\n{description or '(none)'}\n\n{ac_block}\n\n"
+        "VERIFICATION STEPS MUST BE STATIC: the team cannot run the app, open a browser, or play a "
+        "game — never write verification steps like 'test gameplay' or 'run the app'. Verification "
+        "means reading the code, checking the wiring between files, and syntax/analyzer checks only."
     )
     if prior_spec.strip():
         user = (
-            "# FOLLOW-UP — change request on existing, working software\n"
-            "A previous round already shipped a working implementation; ALL of its files are still in "
-            "the workspace and its spec is shown below. Do NOT start over. Explore the existing files "
-            "(ls/glob/grep/read_file), then re-emit the FULL spec UPDATED to fold in only the user's "
-            "requested change while preserving everything that already works. In the ticket below, the "
-            "Description is the user's requested change — not a brand-new project.\n\n"
+            "# FOLLOW-UP — change request on an EXISTING project\n"
+            "A previous round already built this project; its files are still in the workspace and its "
+            "spec is shown below. Do NOT start over and do NOT re-derive the project from scratch. "
+            "Explore the existing files (ls/glob/grep/read_file), then re-emit the FULL spec UPDATED to "
+            "fold in only the user's requested change while preserving everything that already exists. "
+            "Keep the original acceptance criteria that still apply, and add criteria ONLY for the "
+            "requested change. Use the project's EXISTING file names and structure in your "
+            "Implementation Notes — never invent new names for files that already exist (QA will "
+            "fail finished work hunting for files that were never meant to exist). In the ticket "
+            "below, the Description is the user's requested change — not a brand-new project.\n\n"
             "## Existing SPEC.md (what already exists)\n" + prior_spec.strip() + "\n\n---\n\n" + user
         )
     if arch_feedback:
@@ -556,6 +590,14 @@ def _dev_messages(role: RoleSpec, title: str, spec_text: str,
         "one (e.g. cat/type on a big file). Use grep to find the relevant function/section, then "
         "read_file with offset+limit to pull just that chunk (~120 lines). Filter big command output "
         "with grep/head/tail.\n"
+        "YOU ARE AUTONOMOUS — there is no user in the loop during your turn. NEVER pause to wait "
+        "for a reply, confirmation, or 'next message'; decide yourself and keep working until the "
+        "task is done.\n"
+        "NEVER RUN THE APP — do not start servers (python -m http.server, npm run dev/start, "
+        "flutter run), open browsers, or launch the game/app in any way. You cannot see or interact "
+        "with it, the blocking process stalls the pipeline, and it wastes memory. Verify STATICALLY "
+        "instead: read the code, check wiring/imports match, and use quick syntax checks "
+        "(e.g. `node --check file.js`, `python -m py_compile`).\n"
         "SCAFFOLDING A PROJECT — `flutter create my_app` makes a SUBFOLDER `<workspace>/my_app/`, and "
         "THAT subfolder is then the project root. Every file you write afterwards MUST live inside it "
         "(e.g. `<workspace>/my_app/lib/main.dart`), NEVER the workspace root — splitting files between "
@@ -590,7 +632,13 @@ def _qas_messages(role: RoleSpec, title: str, spec_text: str, dev_text: str,
         "The files listed above DO exist — READ them yourself; never claim files are missing "
         "without checking, and do not just trust the report. Read each changed file, run the "
         "verification steps from SPEC.md, validate against the acceptance criteria, then end "
-        "with the verdict line."
+        "with the verdict line. VERIFY STATICALLY ONLY: never start servers, open browsers, or "
+        "run/play the app — read the code, check the wiring, use syntax checks (node --check, "
+        "py_compile). Criteria that genuinely require runtime behaviour are satisfied by correct, "
+        "complete code that implements them. FILE NAMES IN THE SPEC ARE ADVISORY: judge whether "
+        "the BEHAVIOUR each criterion demands exists in the ACTUAL files on disk (ls/grep for the "
+        "functionality) — never fail work solely because a specifically-named file is absent when "
+        "the same functionality lives in a differently-named file."
     )
     return [{"role": "system", "content": role.system_prompt},
             {"role": "user", "content": user}]
@@ -683,6 +731,7 @@ async def _run_role(role: RoleSpec, url: str, model: str, headers: dict, message
             max_tokens=_saw_max_tokens(),
             stream_timeout=_saw_stream_timeout(),
             max_rounds=role.max_rounds,
+            autonomous=True,   # no user in the loop — permission-questions are stalls
             session_id=sid,
             disabled_tools=disabled or None,
             relevant_tools=set(role.allowed_tools) or None,
@@ -709,7 +758,13 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
     store.create_run(run_id, title, description, acceptance, workspace, owner)
     # Follow-up run: the prior round's SPEC.md and files are still in the workspace and
     # serve as the team's memory of what already exists, so we build on it instead of anew.
-    prior_spec = _read_spec(workspace) if parent_run_id else ""
+    # Follow-up detection is keyed on the WORKSPACE STATE, not just an explicit
+    # parent_run_id: users also continue shipped projects by reusing a ticket
+    # from History or re-hitting Discuss on the same folder — those runs carry
+    # no parent id, and without this the BSA re-specs the whole project from
+    # scratch as if the existing implementation didn't exist.
+    prior_spec = _read_spec(workspace)
+    is_followup = bool(parent_run_id) or bool(prior_spec.strip())
     yield _sse({"type": "run_start", "run_id": run_id, "title": title, "parent_run_id": parent_run_id,
                 "pipeline": [r.key for r in PIPELINE], "workspace": workspace})
     state = {"idx": 0}
@@ -806,7 +861,7 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
             dres: Dict[str, str] = {"text": ""}
             async for ev in _run_role(dev, durl, dmodel, dheaders,
                                       _dev_messages(dev, title, bsa_text, feedback, workspace, arch_text,
-                                                    continuation=bool(parent_run_id)),
+                                                    continuation=is_followup),
                                       workspace, owner, run_id, universe, iteration, dres):
                 yield ev
             dev_text = dres["text"]
@@ -844,7 +899,25 @@ async def run_pipeline(run_id: str, title: str, description: str, acceptance: st
                                       workspace, owner, run_id, universe, iteration, qres):
                 yield ev
             qas_text = qres["text"]
+            # An EMPTY review is an infrastructure hiccup, not a judgment —
+            # retry the role once instead of burning an iteration on nothing.
+            if not qas_text.strip():
+                yield _sse({"type": "delta", "role": qas.key,
+                            "text": "\n[QAS returned nothing — retrying once]\n"})
+                qres = {"text": ""}
+                async for ev in _run_role(qas, qurl, qmodel, qheaders,
+                                          _qas_messages(qas, title, bsa_text, dev_text, workspace, _list_workspace(workspace), build_note),
+                                          workspace, owner, run_id, universe, iteration, qres):
+                    yield ev
+                qas_text = qres["text"]
             qverdict = _parse_verdict(qas_text)
+            # Review present but no 'QAS VERDICT:' line — resolve it with a tiny
+            # deterministic follow-up instead of failing possibly-passing work.
+            if qverdict is None and qas_text.strip():
+                qverdict = await _clarify_verdict(qurl, qmodel, qheaders, qas_text)
+                if qverdict:
+                    yield _sse({"type": "delta", "role": qas.key,
+                                "text": f"\n[verdict line was missing — clarified: {qverdict.upper()}]\n"})
             store.add_step(run_id, state["idx"], qas.key, iteration, qmodel, qas.endpoint_purpose,
                            qas_text, gate="qas", verdict=qverdict or "unknown")
             state["idx"] += 1

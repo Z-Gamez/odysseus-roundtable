@@ -92,6 +92,22 @@ def create_run(run_id: str, title: str, description: str, acceptance: str,
         )
 
 
+def reconcile_orphaned_runs() -> int:
+    """Mark every 'running' run as 'stopped' at server boot.
+
+    Runs live in the server process (src.agent_runs is in-memory), so any row
+    still 'running' when the server starts is an orphan — a crash, a forced
+    kill, or a stop whose cancel never unwound. Without this they show as
+    running in History forever. Returns the number of rows reconciled."""
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE saw_runs SET status='stopped', updated_at=? WHERE status='running'",
+            (time.time(),),
+        )
+        return cur.rowcount
+
+
 def set_run_status(run_id: str, status: str) -> None:
     init_db()
     with _connect() as conn:

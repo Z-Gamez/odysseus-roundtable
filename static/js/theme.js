@@ -21,6 +21,7 @@ export const THEMES = {
   ume:        { bg:'#2b1b2e', fg:'#f5c2e7', panel:'#1e1420', border:'#6c4675', red:'#f5a0c0' },
   copper:     { bg:'#1c1410', fg:'#e8c39e', panel:'#140f0a', border:'#7a5533', red:'#d4764e' },
   terminal:   { bg:'#000000', fg:'#00ff41', panel:'#0a0a0a', border:'#003b00', red:'#00ff41' },
+  matrix:     { bg:'#020a05', fg:'#3cff6e', panel:'#03130a', border:'#0d3b1f', red:'#00d939' },
   organs:     { bg:'#0a0406', fg:'#efe1c8', panel:'#15080a', border:'#3a1519', red:'#c83240' },
   lavender:   { bg:'#f3eef8', fg:'#3d3551', panel:'#faf7ff', border:'#cec3de', red:'#9b6dcc' },
   gpt:        { bg:'#212121', fg:'#ececec', panel:'#171717', border:'#424242', red:'#949494',
@@ -56,6 +57,7 @@ const THEME_DEFAULT_PATTERN = {
   forest:     'petals',
   ocean:      'constellations',
   terminal:   'perlin-flow',
+  matrix:     'matrix',
   organs:     'rain',
   ume:        'petals',
   cute:       'sparkles',
@@ -64,6 +66,7 @@ const THEME_DEFAULT_PATTERN = {
 // Default effect colors for specific themes (overrides --fg)
 const THEME_DEFAULT_EFFECT_COLOR = {
   midnight:   '#ffffff',
+  matrix:     '#00ff41',
   organs:     '#451616',
   cute:       '#ff8cb8',
   ume:        '#f5a0c0',
@@ -73,6 +76,7 @@ const THEME_DEFAULT_EFFECT_COLOR = {
 const THEME_DEFAULT_INTENSITY = {
   midnight:   0.5,
   terminal:   0.8,
+  matrix:     0.6,
   organs:     0.65,
 };
 
@@ -403,10 +407,10 @@ export function applyUiScale(scale) {
 }
 
 const _BG_CLASSES = ['bg-pattern-dots',
-  'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
+  'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-matrix', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
   'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
-const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
+const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, matrix: _initMatrix, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
 
@@ -446,7 +450,7 @@ export function applyBgPattern(pattern) {
   const p = pattern || 'none';
   document.body.classList.remove(..._BG_CLASSES);
   // Clean up any canvas backgrounds
-  document.querySelectorAll('#synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
+  document.querySelectorAll('#synapse-canvas, #rain-canvas, #matrix-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
   if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
   if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
   // Hide sliders that do nothing on static patterns.
@@ -1688,6 +1692,152 @@ function _initRain() {
     ctx.globalAlpha = 1;
   }
   draw();
+}
+
+// ── Matrix — digital rain: falling glyph columns with bright heads + trails ──
+function _initMatrix() {
+  if (document.getElementById('matrix-canvas')) return;
+  const canvas = document.createElement('canvas');
+  canvas.id = 'matrix-canvas';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  // Decorative background effect — hide from assistive tech so screen readers
+  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
+  canvas.setAttribute('aria-hidden', 'true');
+  document.body.prepend(canvas);
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let W, H;
+  const BASE_FONT = 15;
+  let fontSize = BASE_FONT;
+  let cols = [];
+  // Half-width katakana (the film's glyph set) + digits + a sprinkle of code.
+  const GLYPHS = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ0123456789<>{}[]=+*/$#@&%';
+  const rndGlyph = () => GLYPHS[(Math.random() * GLYPHS.length) | 0];
+
+  function initCols() {
+    fontSize = Math.max(9, Math.round(BASE_FONT * _getEffectSize()));
+    const n = Math.ceil(W / fontSize) + 1;
+    cols = [];
+    for (let i = 0; i < n; i++) {
+      cols.push({
+        y: -Math.floor(Math.random() * (H / fontSize) * 1.2), // stagger starts above the fold
+        last: 0,
+        // Per-column step interval (ms) — mixed speeds sell the effect.
+        interval: 55 + Math.random() * 100,
+        seed: Math.random(), // stable density gate — intensity parks high-seed columns
+        glyphs: [],          // trail characters, newest last (= the head)
+      });
+    }
+  }
+
+  function resize() {
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    initCols();
+  }
+  resize();
+  const _onResize = () => resize();
+  window.addEventListener('resize', _onResize);
+
+  function getColor() {
+    const s = getComputedStyle(document.documentElement);
+    return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#00ff41';
+  }
+  function toRgb(c) {
+    return hexToRgb(c) || { r: 0, g: 255, b: 65 };
+  }
+
+  let lastColor = '', headColor = '', bodyColor = '';
+  function refreshPalette() {
+    const c = getColor();
+    if (c === lastColor) return;
+    lastColor = c;
+    const { r, g, b } = toRgb(c);
+    // Head glyph: the effect color pushed most of the way to white.
+    const mix = (v) => Math.round(v + (255 - v) * 0.75);
+    headColor = `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+    bodyColor = `rgb(${r},${g},${b})`;
+  }
+
+  // Trails are kept in memory and the canvas is fully redrawn each frame with
+  // computed per-glyph alphas. NEVER fade via translucent overlay fills: 8-bit
+  // alpha rounding means low-alpha washes asymptote before reaching the
+  // background color, so trails smear into permanent ghosts — and re-stamping
+  // heads between washes strobes. Deterministic redraw can do neither.
+  const FRAME_MS = 40; // ~25fps — chunky digital-rain cadence, cheap to draw
+  let lastFrame = 0;
+
+  function draw(now) {
+    if (!document.body.classList.contains('bg-pattern-matrix')) {
+      window.removeEventListener('resize', _onResize);
+      canvas.remove();
+      return;
+    }
+    requestAnimationFrame(draw);
+    if (now - lastFrame < FRAME_MS) return;
+    lastFrame = now;
+
+    const intenCss = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity'));
+    const inten = isNaN(intenCss) ? 1 : intenCss;
+    // Size slider changed mid-flight — rebuild the column grid live.
+    if (fontSize !== Math.max(9, Math.round(BASE_FONT * _getEffectSize()))) initCols();
+    refreshPalette();
+
+    // Intensity maps to how MUCH rain there is (columns, tail length, speed),
+    // not to glyph brightness — modulating alpha by the slider is what made
+    // the old version pulse.
+    const trailLen = Math.round(9 + inten * 15);
+    const speedMult = 0.5 + inten * 0.5;
+    const density = 0.35 + inten * 0.65;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = fontSize + "px 'Fira Code', 'MS Gothic', monospace";
+    ctx.textBaseline = 'top';
+
+    for (let i = 0; i < cols.length; i++) {
+      const col = cols[i];
+      if (col.seed > density) continue; // column parked at this intensity
+
+      if ((now - col.last) * speedMult >= col.interval) {
+        col.last = now;
+        col.y++;
+        col.glyphs.push(rndGlyph());
+        if (col.glyphs.length > trailLen) col.glyphs.splice(0, col.glyphs.length - trailLen);
+        // Occasional single mid-trail mutation — the film's shimmer, kept
+        // subtle and only at step time so it reads as life, not flicker.
+        if (col.glyphs.length > 4 && Math.random() < 0.3) {
+          col.glyphs[(Math.random() * (col.glyphs.length - 2)) | 0] = rndGlyph();
+        }
+        // Recycle once the entire trail has cleared the bottom edge.
+        if ((col.y - col.glyphs.length) * fontSize > H) {
+          col.y = -((Math.random() * 30) | 0);
+          col.glyphs = [];
+          col.interval = 55 + Math.random() * 100;
+        }
+      }
+
+      // Repaint the trail: newest glyph is the head at col.y, older ones above.
+      const x = i * fontSize;
+      const n = col.glyphs.length;
+      for (let g = 0; g < n; g++) {
+        const age = n - 1 - g; // 0 = head
+        const rowY = (col.y - age) * fontSize;
+        if (rowY < -fontSize || rowY > H) continue;
+        if (age === 0) {
+          ctx.globalAlpha = 0.92;
+          ctx.fillStyle = headColor;
+        } else {
+          const t = 1 - age / trailLen; // 1 near head → 0 at tail
+          ctx.globalAlpha = t * t * 0.55;
+          ctx.fillStyle = bodyColor;
+        }
+        ctx.fillText(col.glyphs[g], x, rowY);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+  requestAnimationFrame(draw);
 }
 
 // ── Constellations — static dots that slowly form/dissolve connecting lines ──

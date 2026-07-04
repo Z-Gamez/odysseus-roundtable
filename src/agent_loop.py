@@ -1893,6 +1893,10 @@ _VERIFIER_EFFECTFUL_TOOLS = {
     "create_document", "update_document", "edit_document",
     "bash", "python", "write_file",
 }
+
+# Read-only tools whose EXACT repeat within one turn returns the same result —
+# eligible for the duplicate-call short-circuit in the execution loop.
+_READONLY_DEDUPE_TOOLS = {"read_file", "grep", "glob", "ls", "get_workspace"}
 _VERIFIER_MAX_ROUNDS = 2  # cap re-verify cycles per turn — never loop forever
 
 
@@ -2047,6 +2051,43 @@ def _detect_runaway_call(call_freq, threshold=15):
     return sig.split(":", 1)[0] if sig else None
 
 
+async def _guard_first_event(agen, first_timeout: float):
+    """Bound the wait for the FIRST event of an LLM stream.
+
+    A crashed/reloading local endpoint (Ollama after std::bad_alloc) can accept
+    the request and then never send a byte. The per-read inactivity timeout may
+    be an hour for SAW runs, so without this a dead runner pins the round — and
+    the whole pipeline — for that entire window (observed 2026-07-03: round 95
+    hung on a bad_alloc'd runner until the server had to be killed). Once the
+    first event arrives, the normal inactivity timeout governs. On timeout the
+    silence is converted into a crash-shaped error event ("first-token
+    watchdog") so the runner-crash backoff/retry handles it like any other
+    runner death instead of losing the run."""
+    first = True
+    while True:
+        try:
+            if first:
+                item = await asyncio.wait_for(agen.__anext__(), timeout=first_timeout)
+            else:
+                item = await agen.__anext__()
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            try:
+                await agen.aclose()
+            except Exception:
+                pass
+            yield ("event: error\ndata: " + json.dumps({
+                "status": 503,
+                "text": (f"no first token from model endpoint within "
+                         f"{int(first_timeout)}s (first-token watchdog) — "
+                         f"endpoint likely crashed or is reloading"),
+            }) + "\n\n")
+            return
+        first = False
+        yield item
+
+
 async def stream_agent_loop(
     endpoint_url: str,
     model: str,
@@ -2073,6 +2114,7 @@ async def stream_agent_loop(
     uploaded_files: Optional[List[Dict]] = None,
     _is_teacher_run: bool = False,
     stream_timeout: Optional[int] = None,
+    autonomous: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -2505,7 +2547,15 @@ async def stream_agent_loop(
         soft_budget = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
         if soft_budget > 0:
             before_trim_tokens = estimate_tokens(messages)
-            reserve_tokens = min(max(max_tokens or 1024, 512), 2048)
+            # Reserve GENERATION room inside the real window: prompt trimming
+            # keeps input under (budget - reserve), so this is how much space
+            # the model gets to think + emit its answer/tool call. The old flat
+            # 2048 cap suffocated big single-file writes on small-window local
+            # models (12K window - 8.4K prompt = ~3.9K for thinking + a 3K-token
+            # file -> Ollama cut generation mid-think, an empty round, every
+            # attempt). Scale with max_tokens: SAW dev turns (8192) reserve
+            # 4096; default chat (4096) keeps the old 2048.
+            reserve_tokens = min(max((max_tokens or 1024) // 2, 512), 4096)
             # Ceiling for the auto-derived budget (no effect on an explicit budget;
             # see #1230). Falls back to DEFAULT_HARD_MAX on missing/malformed values
             # so misconfig can't zero the budget.
@@ -2617,6 +2667,9 @@ async def stream_agent_loop(
     # all 20 rounds, looks like the chat "died". Track recent call
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
+    # Exact read-only calls already executed this turn (see the duplicate
+    # short-circuit in the tool-execution loop). Cleared by effectful calls.
+    _ro_calls_seen: set = set()
     _stuck_rounds = 0
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
@@ -2627,7 +2680,10 @@ async def stream_agent_loop(
     # an action without emitting the tool call. Capped to prevent a model
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
-    _MAX_INTENT_NUDGES = 3
+    # Long tool-heavy dev turns can stall several times spread across the turn
+    # (observed: a 28-round turn that burned 3 nudges and then stalled again).
+    # Each nudge costs one cheap round out of up to 160 — be generous.
+    _MAX_INTENT_NUDGES = 5
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -2647,7 +2703,8 @@ async def stream_agent_loop(
         r"verify|diagnose|examine|debug|capture|grab|pull|view|run|call|"
         r"trigger|launch|start|kick off|stop|kill|restart|adopt|serve|"
         r"register|list|search|find|query|hit|ping|test|use|perform|do|"
-        r"implement|write|create|build|code|add|fix|rewrite|update|scaffold|generate|make)"
+        r"implement|write|create|build|code|add|fix|rewrite|update|scaffold|generate|make|"
+        r"wait|pause|continue|proceed)"
         r"\b[^.\n]{0,140}",
         re.IGNORECASE,
     )
@@ -2785,7 +2842,11 @@ async def stream_agent_loop(
             bool(all_tool_schemas),
             agent_stream_timeout,
         )
-        async for chunk in stream_llm_with_fallback(
+        # First-token watchdog: independent of (and much shorter than) the
+        # inactivity timeout, which SAW sets to an hour. Generous enough for a
+        # cold model load + prompt eval on a 20GB+ local model.
+        _first_event_timeout = max(60, int(get_setting("agent_first_event_timeout_seconds", 300) or 300))
+        async for chunk in _guard_first_event(stream_llm_with_fallback(
             _candidates,
             messages,
             temperature=temperature,
@@ -2794,7 +2855,7 @@ async def stream_agent_loop(
             tools=all_tool_schemas if all_tool_schemas else None,
             timeout=agent_stream_timeout,
             session_id=session_id,
-        ):
+        ), _first_event_timeout):
             if not _round_first_event_logged:
                 _round_first_event_logged = True
                 logger.info(
@@ -2819,10 +2880,16 @@ async def stream_agent_loop(
                     time.time() - _round_start,
                     chunk[:500],
                 )
-                if "model runner has unexpectedly stopped" in chunk:
+                if ("model runner has unexpectedly stopped" in chunk
+                        or "bad_alloc" in chunk
+                        or "first-token watchdog" in chunk):
                     # Ollama runner crash (memory pressure) — flag for the
                     # post-round recovery retry instead of surfacing the raw
-                    # error and losing the turn.
+                    # error and losing the turn. bad_alloc surfaces as a plain
+                    # HTTP 500 ("llama-server chat error: ... std::bad_alloc"),
+                    # not as "runner has unexpectedly stopped" — both are the
+                    # same OOM death. The watchdog marker is a request the
+                    # crashed runner accepted but never answered.
                     _runner_crashed = True
                     continue
                 yield chunk
@@ -3164,16 +3231,41 @@ async def stream_agent_loop(
             # (tool_events), NOT _effectful_used: that flag ignores reads, so a
             # turn that only read files and then went silent slipped through.
             _empty_round = not _intent_text and bool(tool_events)
+            # Autonomous turns (SAW roles) have no user to ask — a turn ending
+            # on an offer/permission question ("Want me to apply all the fixes
+            # now?") is a stall there, while in normal chat it's correct
+            # behaviour, hence the `autonomous` gate.
+            _asks_permission = (
+                autonomous
+                and _intent_text.rstrip().endswith("?")
+                and re.search(r"\b(want me to|should i|shall i|would you like|do you want|"
+                              r"let me know|is that ok|proceed\?)\b",
+                              _intent_text[-220:], re.IGNORECASE) is not None
+            )
             # Only nudge when the round REALLY looks like an unfinished
-            # promise: short response (<400 chars), no fenced code/answer,
-            # and an action-intent phrase was matched. Long answers that
-            # happen to contain "let me know" are not stalls.
+            # promise. Guards differ by signal strength:
+            #  - intent phrase: short responses only (<400 chars) — long answers
+            #    that happen to contain "let me know" are not stalls;
+            #  - trailing colon: allowed up to 2000 chars — a plan that ENDS
+            #    with "Let me implement all of these:" is a stall no matter how
+            #    detailed the plan was (observed: 494-char stall missed by the
+            #    short guard);
+            #  - empty round: always.
             _looks_like_promise = (
                 not guide_only
-                and (_intent_match is not None or _ends_with_colon or _empty_round)
-                and len(_intent_text) < 400
                 and "```" not in _intent_text
                 and _intent_nudge_count < _MAX_INTENT_NUDGES
+                and (
+                    _empty_round
+                    or _asks_permission
+                    or (_ends_with_colon and len(_intent_text) < 2000)
+                    or (_intent_match is not None and len(_intent_text) < 400)
+                    # A LONG response whose TAIL is a promise ("...I need to
+                    # read the remaining files and implement these features")
+                    # is a stall too — the length guard only protects answers
+                    # that merely mention an action somewhere in the middle.
+                    or (_INTENT_RE.search(_intent_text[-250:]) is not None)
+                )
             )
             if _looks_like_promise:
                 _intent_nudge_count += 1
@@ -3196,7 +3288,13 @@ async def stream_agent_loop(
                 # read, full-dump command). Point it at the small version of
                 # the same action so the retry is actually completable.
                 _action_hint = ""
-                if _empty_round and not _intent_text:
+                if _asks_permission:
+                    _action_hint = (
+                        " There is NO user in this loop to answer you. Decide yourself: "
+                        "apply your own recommendations NOW with tool calls, starting "
+                        "with the highest-priority fix."
+                    )
+                elif _empty_round and not _intent_text:
                     # No phrase to classify — cover all three escape hatches.
                     _action_hint = (
                         " Continue with ONE SMALL tool call right now: use grep or "
@@ -3368,7 +3466,26 @@ async def stream_agent_loop(
             else:
                 cmd_display = block.content.strip()
 
-            if tool_policy and tool_policy.blocks(block.tool_type):
+            # Duplicate read-only call short-circuit: looping models re-issue the
+            # exact same read/grep over and over (observed: SPEC.md read 6x in
+            # 80s, one grep fired 12x). The world hasn't changed, so skip the
+            # execution and hand back a corrective note — models react to tool
+            # results far better than to system nudges. Any EFFECTFUL call
+            # (write/edit/bash/python/...) clears the cache, since it may
+            # genuinely change what a re-read would return.
+            _dedupe_key = f"{block.tool_type}:{(block.content or '').strip()}"
+            _is_ro_dup = (block.tool_type in _READONLY_DEDUPE_TOOLS
+                          and _dedupe_key in _ro_calls_seen)
+            if _is_ro_dup:
+                desc = f"{block.tool_type}: duplicate"
+                result = {
+                    "output": ("[duplicate call skipped — you already made this exact call this "
+                               "turn and NOTHING has changed since. Use the result you already "
+                               "have and PROCEED with the task. Do not repeat calls."),
+                    "exit_code": 0,
+                }
+                logger.info("[agent] duplicate read-only call skipped: %s", _dedupe_key[:100])
+            elif tool_policy and tool_policy.blocks(block.tool_type):
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
                     "error": tool_policy.reason_for(block.tool_type),
@@ -3416,6 +3533,11 @@ async def stream_agent_loop(
                         f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
                     )
                 desc, result = await _tool_task
+                if block.tool_type in _READONLY_DEDUPE_TOOLS:
+                    _ro_calls_seen.add(_dedupe_key)
+                else:
+                    # Effectful call — the world may have changed; allow re-reads.
+                    _ro_calls_seen.clear()
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its

@@ -91,6 +91,10 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "browser", "read_file"
              "resolve_contact", "manage_contact", "list_email_accounts", "send_email", "list_emails",
              "read_email", "reply_to_email", "bulk_email", "archive_email",
              "delete_email", "mark_email_read",
+             # Without these, the model can STAGE an email (send_email) but its
+             # approve/cancel call after the user's decision is rejected as an
+             # unknown function — the draft then rots in the queue forever.
+             "approve_pending_email", "cancel_pending_email",
              # Cookbook tools (LLM serving + downloads). Without these
              # entries, native function calls to e.g. list_served_models
              # are rejected as "Unknown function call" before reaching

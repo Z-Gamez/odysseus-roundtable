@@ -213,6 +213,7 @@ if AUTH_ENABLED:
         "/api/auth/setup",
         "/api/auth/signup",
         "/api/auth/login",
+        "/api/auth/quick-login",  # desktop quick-panel loopback login (own secret)
         "/api/auth/logout",
         "/api/auth/status",
         "/api/auth/features",

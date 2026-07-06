@@ -63,13 +63,36 @@ _SPLASH_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
   <div class="wrap">
     <svg class="boat" viewBox="0 0 32 32"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>
     <div class="name">Odysseus</div>
-    <div class="status"><span id="st">Starting the ship</span><span class="dots"></span></div>
+    <div class="status"><span id="st">Setting sail</span><span class="dots"></span></div>
   </div>
   <script>
     function armClose(){var b=document.getElementById('cls');b.style.display='flex';
       b.onclick=function(){try{window.pywebview.api.win_close()}catch(e){}}}
     if (window.pywebview) armClose();
     else window.addEventListener('pywebviewready', armClose);
+
+    // Cycle the loading line through seafaring / Odysseus-legend phrases.
+    var PHRASES = [
+      "Setting sail", "Weighing anchor", "Hoisting the sails",
+      "Charting a course", "Manning the oars", "Trimming the sails",
+      "Catching the trade winds", "Reading the stars",
+      "Braving the wine-dark sea", "Steering past the sirens",
+      "Threading Scylla and Charybdis", "Outwitting the Cyclops",
+      "Calming the winds of Aeolus", "Rounding the cape",
+      "Plotting the voyage home", "Returning home to Ithaca"
+    ];
+    (function cyclePhrases(){
+      var st = document.getElementById('st');
+      var last = -1;
+      function pick(){
+        var i; do { i = Math.floor(Math.random() * PHRASES.length); }
+        while (i === last && PHRASES.length > 1);
+        last = i;
+        if (st) st.textContent = PHRASES[i];
+      }
+      pick();  // random from the very first frame, no "Setting sail" flash
+      setInterval(pick, 1900);
+    })();
   </script>
 </body></html>"""
 
@@ -458,16 +481,51 @@ def open_native_window(url: str) -> bool:
 
         def _flip_when_ready():
             ok = wait_for_server(url, timeout=120)
-            try:
-                if ok:
-                    win.load_url(url)
-                else:
+            if not ok:
+                try:
                     win.evaluate_js(
                         "document.getElementById('st').textContent="
                         "'Server did not start — check launch logs';"
                         "document.querySelector('.dots').style.display='none';")
-            except Exception as e:
-                _dbg(f"splash flip failed: {e}")
+                except Exception as e:
+                    _dbg(f"splash error-note failed: {e}")
+                return
+            # With the keep-warm server, wait_for_server returns near-instantly —
+            # often BEFORE webview.start() has created the browser control. A
+            # load_url() fired into that gap is silently dropped (black window)
+            # or leaves the splash markup rendered as plain text ("raw HTML").
+            # Wait for the window to actually exist, then flip with a
+            # verify-and-retry loop instead of one fire-and-forget attempt.
+            try:
+                win.events.shown.wait(30)
+            except Exception:
+                pass
+            for attempt in range(8):
+                try:
+                    win.load_url(url)
+                except Exception as e:
+                    _dbg(f"splash flip attempt {attempt + 1} failed: {e}")
+                    time.sleep(1.2)
+                    continue
+                time.sleep(2.0)  # give the navigation a moment to commit
+                # Verify the app really rendered: right URL AND a non-empty body.
+                # A dropped navigation or a renderer glitch fails one of these,
+                # and we simply navigate again.
+                try:
+                    cur = win.get_current_url() or ""
+                except Exception:
+                    cur = ""
+                if "127.0.0.1" in cur or cur.startswith(url):
+                    try:
+                        rendered = bool(win.evaluate_js(
+                            "!!document.body && document.body.children.length > 0"))
+                    except Exception:
+                        rendered = True  # can't probe — assume the flip landed
+                    if rendered:
+                        return
+                _dbg(f"splash flip attempt {attempt + 1}: page not rendered yet (url={cur[:60]!r}) — retrying")
+                time.sleep(1.0)
+            _dbg("splash flip: exhausted retries — leaving window as-is")
 
         threading.Thread(target=_flip_when_ready, daemon=True).start()
         # private_mode=False keeps the profile on disk; the callback dresses the window.

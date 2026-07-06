@@ -1249,7 +1249,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
 
     tool_type = _TOOL_NAME_MAP.get(name, name)
     _BUILTIN_EMAIL_TOOLS = {"list_email_accounts", "send_email", "list_emails", "read_email", "reply_to_email",
-                            "archive_email", "delete_email", "mark_email_read", "bulk_email", "download_attachment"}
+                            "archive_email", "delete_email", "mark_email_read", "bulk_email", "download_attachment",
+                            "approve_pending_email", "cancel_pending_email"}
 
     # Some models emit valid JSON that isn't an object (e.g. a bare array
     # ["ls -la"], string, or number) as function arguments. Most local tools keep

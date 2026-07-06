@@ -22,17 +22,29 @@ TITLE = "Odysseus"
 _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW - keep spawned processes console-less
 
 
+_FROZEN = getattr(sys, "frozen", False)
+
+
 def app_root() -> str:
     """The Odysseus repo dir (where venv/ and app.py live). For the frozen exe this
     is the folder the exe sits in, so place Odysseus.exe in the repo root."""
-    if getattr(sys, "frozen", False):
+    if _FROZEN:
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _bundle_root() -> str:
+    """Where bundled resources (static/, scripts/, mcp_servers/) live. In the
+    full standalone build that's PyInstaller's _internal dir, not the exe dir."""
+    if _FROZEN:
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return app_root()
+
+
 ROOT = app_root()
+BUNDLE = _bundle_root()
 VENV_PY = os.path.join(ROOT, "venv", "Scripts", "python.exe")
-ICON = os.path.join(ROOT, "static", "odysseus.ico")
+ICON = os.path.join(BUNDLE, "static", "odysseus.ico")
 
 
 def _server_up() -> bool:
@@ -46,7 +58,10 @@ def _server_up() -> bool:
 
 
 def _run_helper(rel_path: str) -> None:
-    p = os.path.join(ROOT, rel_path)
+    # Helpers ship inside the bundle in the frozen build.
+    p = os.path.join(BUNDLE, rel_path)
+    if not os.path.exists(p):
+        p = os.path.join(ROOT, rel_path)
     if os.path.exists(p):
         try:
             subprocess.Popen(["powershell", "-ExecutionPolicy", "Bypass", "-File", p],
@@ -63,10 +78,27 @@ def start_background():
     _run_helper(os.path.join("scripts", "launch-ollama.ps1"))
     _run_helper(os.path.join("scripts", "launch-chromadb.ps1"))
     proc = None
-    if not _server_up() and os.path.exists(VENV_PY):
-        proc = subprocess.Popen(
-            [VENV_PY, "-m", "uvicorn", "app:app", "--host", HOST, "--port", str(PORT)],
-            cwd=ROOT, creationflags=_NO_WINDOW)
+    if not _server_up():
+        if _FROZEN:
+            # The standalone exe is its own server (standalone_app --server).
+            proc = subprocess.Popen([sys.executable, "--server"],
+                                    cwd=ROOT, creationflags=_NO_WINDOW)
+        elif os.path.exists(VENV_PY):
+            proc = subprocess.Popen(
+                [VENV_PY, "-m", "uvicorn", "app:app", "--host", HOST, "--port", str(PORT)],
+                cwd=ROOT, creationflags=_NO_WINDOW)
+    # Global-hotkey quick panel (Ctrl+Alt+O). Persistent background process with
+    # a tray icon; single-instance (named mutex in quick_panel), so safe every
+    # launch. Opt out with ODYSSEUS_NO_QUICK_PANEL=1.
+    if os.environ.get("ODYSSEUS_NO_QUICK_PANEL", "").strip() not in ("1", "true", "yes"):
+        if _FROZEN:
+            try:
+                subprocess.Popen([sys.executable, "--quick-panel"],
+                                 cwd=ROOT, creationflags=_NO_WINDOW)
+            except Exception:
+                pass
+        else:
+            _run_helper(os.path.join("scripts", "launch-quickpanel.ps1"))
     return proc
 
 

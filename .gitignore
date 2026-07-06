@@ -106,3 +106,10 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Standalone build / installer artifacts (distribute via GitHub Releases, not git)
+installer/Output/
+native/**/target/
+native/target/
+*.iss~
+native/

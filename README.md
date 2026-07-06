@@ -49,10 +49,16 @@ Open it from the **⊹ Round Table** button in the left rail. Full walkthrough i
 
 ## Quick Start
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/pewdiepie-archdaemon/odysseus/tree/main) if you want the more curated branch.
+### 🪟 Windows — one-click installer (easiest)
+
+Grab **`OdysseusSetup.exe`** from the [latest release](https://github.com/Z-Gamez/odysseus-roundtable/releases/latest) and run it. It installs a fully self-contained app (no Python, no Docker, no setup) with a Start Menu shortcut, and includes the global-hotkey **quick panel** (press **Ctrl+Alt+O** anywhere for a Spotlight-style chat). For local AI models, install [Ollama](https://ollama.com/download) — the installer offers this if it's not found; cloud API models work without it.
+
+### 🐳 Docker (any platform)
+
+> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/Z-Gamez/odysseus-roundtable/tree/main) if you want the more curated branch.
 
 ```bash
-git clone https://github.com/pewdiepie-archdaemon/odysseus.git
+git clone https://github.com/Z-Gamez/odysseus-roundtable.git
 cd odysseus
 cp .env.example .env
 docker compose up -d --build
@@ -60,7 +66,14 @@ docker compose up -d --build
 
 Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
 
-Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](docs/setup.md).
+### Building the Windows installer yourself
+
+```powershell
+venv\Scripts\python.exe -m PyInstaller --noconfirm OdysseusFull.spec   # -> dist\OdysseusStandalone
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\odysseus.iss   # -> installer\Output\OdysseusSetup.exe
+```
+
+Native installs, GPU notes, macOS instructions, HTTPS, and configuration live in the [setup guide](docs/setup.md).
 
 ## Features
 

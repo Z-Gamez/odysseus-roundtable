@@ -52,6 +52,16 @@ jobs:
       - name: Ad-hoc sign the app
         run: codesign --force --deep -s - dist/Odysseus.app
 
+      - name: Verify signature integrity
+        # An invalid signature ALSO produces macOS's "app is damaged" dialog,
+        # so prove the bundle verifies before shipping. (Gatekeeper will still
+        # quarantine the download — un-notarized apps need `xattr -cr` or
+        # Privacy & Security -> Open Anyway on first launch; that part is
+        # documented, not fixable without an Apple Developer account.)
+        run: |
+          codesign --verify --deep --strict --verbose=2 dist/Odysseus.app
+          codesign -dv dist/Odysseus.app 2>&1 | head -5
+
       - name: Smoke test the frozen server
         run: |
           ODYSSEUS_PORT=7100 ./dist/Odysseus.app/Contents/MacOS/Odysseus --server &

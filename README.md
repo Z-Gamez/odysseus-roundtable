@@ -55,7 +55,15 @@ Grab **`OdysseusSetup.exe`** from the [latest release](https://github.com/Z-Game
 
 ### 🍎 macOS — drag-and-drop app (Apple Silicon)
 
-Grab **`Odysseus-macOS-arm64.dmg`** from the [latest release](https://github.com/Z-Gamez/odysseus-roundtable/releases/latest), open it, and drag **Odysseus** into **Applications**. The app is self-contained (no Python, no Docker). It isn't notarized with Apple, so the **first** launch needs a right-click → **Open** → **Open** (after that it opens normally). For local AI models, install [Ollama for macOS](https://ollama.com/download/mac); cloud API models work without it.
+Grab **`Odysseus-macOS-arm64.dmg`** from the [latest release](https://github.com/Z-Gamez/odysseus-roundtable/releases/latest), open it, and drag **Odysseus** into **Applications**. The app is self-contained (no Python, no Docker).
+
+It isn't notarized with Apple, so recent macOS versions block the first launch with a misleading *"Odysseus is damaged"* dialog (the app is fine — that's Gatekeeper-speak for "not notarized"). Unblock it once with:
+
+```bash
+xattr -cr /Applications/Odysseus.app
+```
+
+then open it normally. (Alternative: **System Settings → Privacy & Security → Open Anyway**.) For local AI models, install [Ollama for macOS](https://ollama.com/download/mac); cloud API models work without it.
 
 ### 🐳 Docker (any platform)
 

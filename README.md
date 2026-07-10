@@ -53,6 +53,10 @@ Open it from the **⊹ Round Table** button in the left rail. Full walkthrough i
 
 Grab **`OdysseusSetup.exe`** from the [latest release](https://github.com/Z-Gamez/odysseus-roundtable/releases/latest) and run it. It installs a fully self-contained app (no Python, no Docker, no setup) with a Start Menu shortcut. For local AI models, install [Ollama](https://ollama.com/download) — the installer offers this if it's not found; cloud API models work without it.
 
+### 🍎 macOS — drag-and-drop app (Apple Silicon)
+
+Grab **`Odysseus-macOS-arm64.dmg`** from the [latest release](https://github.com/Z-Gamez/odysseus-roundtable/releases/latest), open it, and drag **Odysseus** into **Applications**. The app is self-contained (no Python, no Docker). It isn't notarized with Apple, so the **first** launch needs a right-click → **Open** → **Open** (after that it opens normally). For local AI models, install [Ollama for macOS](https://ollama.com/download/mac); cloud API models work without it.
+
 ### 🐳 Docker (any platform)
 
 > `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/Z-Gamez/odysseus-roundtable/tree/main) if you want the more curated branch.

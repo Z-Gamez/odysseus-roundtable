@@ -6,7 +6,6 @@ binary dispatches on argv:
   Odysseus.exe                     -> desktop app: ensure server, open the
                                       frameless window (odysseus_app/app_window)
   Odysseus.exe --server            -> run the FastAPI server (uvicorn) in-process
-  Odysseus.exe --quick-panel       -> global-hotkey quick panel (quick_panel.py)
   Odysseus.exe <bundled script.py> -> run a bundled Python script. This is how
                                       the built-in MCP servers keep working when
                                       frozen: src/builtin_mcp.py spawns
@@ -61,10 +60,6 @@ def main() -> None:
         return
     if args and args[0] == "--server":
         _run_server()
-        return
-    if args and args[0] == "--quick-panel":
-        import quick_panel
-        quick_panel.main()
         return
     import odysseus_app
     odysseus_app.main()

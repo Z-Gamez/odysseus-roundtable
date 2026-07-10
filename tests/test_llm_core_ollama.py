@@ -126,9 +126,13 @@ def test_ollama_payload_tolerates_malformed_arguments():
 # ---------------------------------------------------------------------------
 
 
-def test_build_ollama_payload_emits_num_ctx_when_known_and_large():
+def test_build_ollama_payload_emits_num_ctx_when_known_and_large(monkeypatch):
     """num_ctx passes through when the caller supplies a trusted value
-    larger than Ollama's 2048 default."""
+    larger than Ollama's 2048 default. (The builder consults the live
+    ollama_num_ctx cap setting — neutralize it so the machine's real
+    settings.json can't leak into the test.)"""
+    import src.settings as settings
+    monkeypatch.setattr(settings, "get_setting", lambda key, default=None: default)
     payload = llm_core._build_ollama_payload(
         "kimi-k2", [{"role": "user", "content": "x"}],
         temperature=0.5, max_tokens=100, num_ctx=131072,
@@ -174,6 +178,8 @@ def test_build_ollama_payload_omits_default_context_fallback():
 def test_llm_call_threads_discovered_num_ctx(monkeypatch):
     """When get_context_length returns a real, large value, it ends up
     in the outgoing Ollama request as options.num_ctx (issue #909)."""
+    import src.settings as settings
+    monkeypatch.setattr(settings, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(llm_core, "get_context_length",
                         lambda url, model: 32768)
 
@@ -198,6 +204,85 @@ def test_llm_call_threads_discovered_num_ctx(monkeypatch):
     )
 
     assert seen["json"]["options"]["num_ctx"] == 32768
+
+
+# ---------------------------------------------------------------------------
+# Temperature parity with `ollama run`
+#
+# Ollama applies the model's Modelfile temperature when the request omits one.
+# Odysseus's unset sentinel is DEFAULT_TEMPERATURE (1.0); sending it would
+# override the model's tuned default (usually 0.6-0.8) and make local models
+# more random than `ollama run`. The sentinel must be OMITTED for Ollama
+# targets (native /api and /v1 OpenAI-compat) and still sent to API providers
+# (whose server-side default is 1.0 anyway).
+# ---------------------------------------------------------------------------
+
+
+def test_ollama_payload_omits_unset_temperature():
+    payload = llm_core._build_ollama_payload(
+        "qwen3:14b", [{"role": "user", "content": "x"}],
+        temperature=llm_core.LLMConfig.DEFAULT_TEMPERATURE, max_tokens=0,
+    )
+    assert "temperature" not in payload.get("options", {})
+
+
+def test_ollama_payload_keeps_explicit_temperature():
+    payload = llm_core._build_ollama_payload(
+        "qwen3:14b", [{"role": "user", "content": "x"}],
+        temperature=0.2, max_tokens=0,
+    )
+    assert payload["options"]["temperature"] == 0.2
+
+
+def _fake_openai_post(seen):
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["json"] = json
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            200, request=request,
+            json={"choices": [{"message": {"content": "OK"}}]},
+        )
+    return fake_post
+
+
+def test_ollama_v1_compat_omits_unset_temperature(monkeypatch):
+    """A local Ollama endpoint configured as /v1 (OpenAI-compat) must get the
+    same treatment as the native path."""
+    seen = {}
+    monkeypatch.setattr(llm_core.httpx, "post", _fake_openai_post(seen))
+    llm_core.llm_call(
+        "http://localhost:11434/v1/chat/completions",
+        "qwen3:14b",
+        [{"role": "user", "content": "Say OK"}],
+        temperature=llm_core.LLMConfig.DEFAULT_TEMPERATURE,
+    )
+    assert "temperature" not in seen["json"]
+
+
+def test_ollama_v1_compat_keeps_explicit_temperature(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(llm_core.httpx, "post", _fake_openai_post(seen))
+    llm_core.llm_call(
+        "http://localhost:11434/v1/chat/completions",
+        "qwen3:14b",
+        [{"role": "user", "content": "Say OK"}],
+        temperature=0.3,
+    )
+    assert seen["json"]["temperature"] == 0.3
+
+
+def test_api_provider_still_gets_default_temperature(monkeypatch):
+    """Non-Ollama OpenAI-compat providers keep receiving the sentinel — their
+    server default is 1.0, so sending it is harmless and unchanged behavior."""
+    seen = {}
+    monkeypatch.setattr(llm_core.httpx, "post", _fake_openai_post(seen))
+    llm_core.llm_call(
+        "https://openrouter.ai/api/v1/chat/completions",
+        "meta-llama/llama-3-8b-instruct",
+        [{"role": "user", "content": "Say OK"}],
+        temperature=llm_core.LLMConfig.DEFAULT_TEMPERATURE,
+    )
+    assert seen["json"]["temperature"] == llm_core.LLMConfig.DEFAULT_TEMPERATURE
 
 
 def test_stream_llm_threads_discovered_num_ctx(monkeypatch):

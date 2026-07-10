@@ -1146,6 +1146,14 @@
               <path d="M13 2L3 14h9l-1 8 10-12h-9z"/>
             </svg>
           </button>
+          <!-- Ponytail — lazy-senior-dev minimal-code rules (/ponytail, /ponytail-help) -->
+          <button type="button" class="input-icon-btn" title="Ponytail — lazy senior dev mode: minimal code, YAGNI, stdlib first. /ponytail-help for levels &amp; commands." id="ponytail-toggle-btn" aria-label="Ponytail mode" aria-pressed="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M8 3c-2.5 2.8-4 6.4-4 10a8 8 0 0 0 16 0c0-3.6-1.5-7.2-4-10"/>
+              <path d="M8 3c1.2 1.5 2.7 2.3 4 2.3S14.8 4.5 16 3"/>
+              <path d="M12 21v-8"/>
+            </svg>
+          </button>
           <!-- Workspace indicator (hidden until a folder is set) -->
           <button type="button" class="input-icon-btn tool-indicator" title="Workspace - click to clear" id="workspace-indicator-btn" aria-label="Clear workspace" style="display:none;">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -2555,7 +2563,6 @@
 <script type="module" src="/static/app.js"></script>  <!-- app.js must be LAST -->
 <script type="module" src="/static/js/init.js"></script>
 <script type="module" src="/static/js/a11y.js"></script>
-<script type="module" src="/static/js/quickmode.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
 </body>
 </html>

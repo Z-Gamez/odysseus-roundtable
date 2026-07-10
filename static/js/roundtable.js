@@ -1104,6 +1104,26 @@
       iterRow.appendChild(iterSlider);
       iterRow.appendChild(iterNum);
       els.cfgList.appendChild(iterRow);
+
+      // Ponytail — lazy-senior-dev minimal-code rules for the Developer role only
+      // (github.com/DietrichGebert/ponytail, MIT; config/ponytail.md).
+      var ptRow = h('<div class="rt-card-row">' +
+        '<span class="rt-role-badge">' + icon("developer", 15) + '</span>' +
+        '<span class="rt-card-main" style="flex:0 1 220px"><span class="rt-card-title">Ponytail (Developer)</span>' +
+        '<span class="rt-card-sub">Lazy senior dev rules — minimal code, YAGNI, stdlib first</span></span></div>');
+      var ptChk = document.createElement("input");
+      ptChk.type = "checkbox";
+      ptChk.checked = !!data.ponytail;
+      ptChk.style.cssText = "width:16px;height:16px;accent-color:" + ACCENT + ";cursor:pointer;margin-left:auto";
+      ptChk.setAttribute("aria-label", "Ponytail rules for the Developer role");
+      ptChk.addEventListener("change", async function () {
+        ptChk.disabled = true;
+        try { await fetch("/api/roundtable/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ponytail: ptChk.checked }) }); }
+        catch (e) { /* ignore */ }
+        ptChk.disabled = false;
+      });
+      ptRow.appendChild(ptChk);
+      els.cfgList.appendChild(ptRow);
     } catch (e) {
       els.cfgList.innerHTML = '<div style="color:' + BAD + '">Failed to load: ' + esc(String(e)) + '</div>';
     }

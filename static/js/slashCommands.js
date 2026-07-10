@@ -5739,12 +5739,151 @@ async function _cmdHelp(args, ctx) {
   return true;
 }
 
+// ── Ponytail commands ─────────────────────────────────────────────
+// Lazy-senior-dev minimal-code mode, from github.com/DietrichGebert/ponytail
+// (MIT © 2026 DietrichGebert; ruleset vendored at config/ponytail.md, command
+// prompts adapted below). /ponytail switches the injected level; review/
+// audit/debt expand their prompt into the chat so the model (with agent
+// tools) does the work; gain/help are local one-shot cards.
+
+const _PONYTAIL_LEVELS = ['off', 'lite', 'full', 'ultra'];
+
+const _PONYTAIL_PROMPTS = {
+  review: "Review the current code changes for over-engineering only, not correctness. " +
+    "One line per finding: L<line>: <tag> <what to cut>. <replacement>. Tags: delete " +
+    "(dead code/speculative feature), stdlib (reinvented standard library), native " +
+    "(dependency doing what the platform does), yagni (abstraction with one implementation), " +
+    "shrink (same logic, fewer lines). End with the net lines removable. If nothing to cut: " +
+    "'Lean already. Ship.'",
+  audit: "Audit the entire repository for over-engineering only, not correctness. Scan the " +
+    "whole tree, not a diff. One line per finding, ranked biggest cut first: <tag> <what to " +
+    "cut>. <replacement>. [path]. Tags: delete (dead code/speculative feature), stdlib " +
+    "(reinvented standard library), native (dependency doing what the platform does), yagni " +
+    "(abstraction with one implementation), shrink (same logic, fewer lines). End with the " +
+    "net lines and dependencies removable. If nothing to cut: 'Lean already. Ship.'",
+  debt: "Harvest every `ponytail:` comment in this repository into a debt ledger so deferrals " +
+    "do not rot into 'later means never'. Grep the whole tree for comment markers " +
+    "(grep -rnE '(#|//) ?ponytail:' ., skipping node_modules/.git/build output). One row per " +
+    "marker, grouped by file: <file>:<line>, <what was simplified>. ceiling: <the limit named " +
+    "in the comment>. upgrade: <the trigger to revisit>. Tag any marker that names no upgrade " +
+    "path or trigger as no-trigger, those rot silently. End with the count of markers and how " +
+    "many lack a trigger. If none: 'No ponytail: debt. Clean ledger.' Report only, change nothing.",
+};
+
+async function _cmdPonytail(args, ctx) {
+  const level = (args[0] || 'full').toLowerCase();
+  if (!_PONYTAIL_LEVELS.includes(level)) {
+    slashReply(`<pre>Unknown level '${level}'. Usage: /ponytail [lite|full|ultra|off]</pre>`);
+    return true;
+  }
+  try {
+    await fetch('/api/auth/settings', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ponytail_mode: level }),
+    });
+  } catch (e) {
+    slashReply('<pre>Could not save ponytail mode.</pre>');
+    return true;
+  }
+  if (window.__ponytailSync) window.__ponytailSync(level);
+  slashReply(level === 'off'
+    ? '<pre>Ponytail off — normal mode.</pre>'
+    : `<pre>Ponytail ${level} — lazy senior dev mode. The minimal-code ladder now rides along in the system prompt.\n/ponytail-help for the full card.</pre>`);
+  return true;
+}
+
+async function _cmdPonytailReview(args, ctx) { _submitComposedMessage(_PONYTAIL_PROMPTS.review); return true; }
+async function _cmdPonytailAudit(args, ctx) { _submitComposedMessage(_PONYTAIL_PROMPTS.audit); return true; }
+async function _cmdPonytailDebt(args, ctx) { _submitComposedMessage(_PONYTAIL_PROMPTS.debt); return true; }
+
+async function _cmdPonytailGain(args, ctx) {
+  // Published benchmark medians from the ponytail repo (5 everyday tasks;
+  // Haiku/Sonnet/Opus). Deliberately NOT per-repo numbers: the unbuilt version
+  // was never written, so there is no real baseline to subtract from.
+  slashReply('<pre style="line-height:1.6">Ponytail gain scoreboard (benchmark medians, not this repo)\n\n' +
+    'Lines of code   no-skill  ████████████████████ 100%\n' +
+    '                ponytail  █▓░░                 6–20%   (down 80–94%)\n' +
+    'Cost            no-skill  ████████████████████ 100%\n' +
+    '                ponytail  █████▓░░░░           23–53%  (down 47–77%)\n' +
+    'Speed           ponytail  3–6× faster\n\n' +
+    'For real per-repo figures: /ponytail-debt (counted shortcut ledger)\n' +
+    'and /ponytail-audit (what is still cuttable).</pre>');
+  return true;
+}
+
+async function _cmdPonytailHelp(args, ctx) {
+  slashReply('<pre style="line-height:1.7">Ponytail — lazy senior dev mode (the best code is the code never written)\n\n' +
+    'Levels:\n' +
+    '  /ponytail lite    build what\'s asked, name the lazier alternative in one line\n' +
+    '  /ponytail         full (default): YAGNI → stdlib → native → one line → minimum\n' +
+    '  /ponytail ultra   deletion before addition, challenges the requirement itself\n' +
+    '  /ponytail off     back to normal mode\n\n' +
+    'Commands:\n' +
+    '  /ponytail-review  over-engineering review of the current changes\n' +
+    '  /ponytail-audit   whole-repo over-engineering audit\n' +
+    '  /ponytail-debt    harvest ponytail: comments into a tracked ledger\n' +
+    '  /ponytail-gain    measured-impact scoreboard from the benchmark\n' +
+    '  /ponytail-help    this card\n\n' +
+    'The pony-tail button in the chat bar toggles off ↔ full.\n' +
+    'Round Table: enable it for the Developer role in the ⚙ config panel.</pre>');
+  return true;
+}
+
 // ── Command registry ──────────────────────────────────────────────
 // Each top-level key is a command group.  Flat commands have a handler
 // directly; grouped commands use `subs`.  `default` is the sub run
 // when the command is invoked bare (e.g. `/chats` -> info).
 
 const COMMANDS = {
+  ponytail: {
+    alias: ['pt'],
+    category: 'Agent',
+    help: 'Lazy senior dev mode — minimal code (lite|full|ultra|off)',
+    handler: _cmdPonytail,
+    noUserBubble: true,
+    usage: '/ponytail [lite|full|ultra|off]',
+  },
+  'ponytail-review': {
+    alias: [],
+    category: 'Agent',
+    help: 'Review current changes for over-engineering',
+    handler: _cmdPonytailReview,
+    noUserBubble: true,
+    usage: '/ponytail-review',
+  },
+  'ponytail-audit': {
+    alias: [],
+    category: 'Agent',
+    help: 'Audit the whole repo for over-engineering',
+    handler: _cmdPonytailAudit,
+    noUserBubble: true,
+    usage: '/ponytail-audit',
+  },
+  'ponytail-debt': {
+    alias: [],
+    category: 'Agent',
+    help: 'Harvest ponytail: comments into a debt ledger',
+    handler: _cmdPonytailDebt,
+    noUserBubble: true,
+    usage: '/ponytail-debt',
+  },
+  'ponytail-gain': {
+    alias: [],
+    category: 'Agent',
+    help: "Ponytail's measured-impact scoreboard",
+    handler: _cmdPonytailGain,
+    noUserBubble: true,
+    usage: '/ponytail-gain',
+  },
+  'ponytail-help': {
+    alias: [],
+    category: 'Agent',
+    help: 'Ponytail quick reference (levels + commands)',
+    handler: _cmdPonytailHelp,
+    noUserBubble: true,
+    usage: '/ponytail-help',
+  },
   chats: {
     alias: ['chat', 'session', 'sessions', 's'],
     category: 'Chats',

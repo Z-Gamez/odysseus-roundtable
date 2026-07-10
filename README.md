@@ -51,7 +51,7 @@ Open it from the **⊹ Round Table** button in the left rail. Full walkthrough i
 
 ### 🪟 Windows — one-click installer (easiest)
 
-Grab **`OdysseusSetup.exe`** from the [latest release](https://github.com/Z-Gamez/odysseus-roundtable/releases/latest) and run it. It installs a fully self-contained app (no Python, no Docker, no setup) with a Start Menu shortcut, and includes the global-hotkey **quick panel** (press **Ctrl+Alt+O** anywhere for a Spotlight-style chat). For local AI models, install [Ollama](https://ollama.com/download) — the installer offers this if it's not found; cloud API models work without it.
+Grab **`OdysseusSetup.exe`** from the [latest release](https://github.com/Z-Gamez/odysseus-roundtable/releases/latest) and run it. It installs a fully self-contained app (no Python, no Docker, no setup) with a Start Menu shortcut. For local AI models, install [Ollama](https://ollama.com/download) — the installer offers this if it's not found; cloud API models work without it.
 
 ### 🐳 Docker (any platform)
 

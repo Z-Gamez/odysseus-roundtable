@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Full standalone Odysseus: window host + FastAPI server + MCP servers +
-# quick panel in ONE onedir bundle (entry: standalone_app.py, which dispatches
-# on argv). Build: venv\Scripts\python.exe -m PyInstaller --noconfirm OdysseusFull.spec
+# Full standalone Odysseus: window host + FastAPI server + MCP servers in ONE
+# onedir bundle (entry: standalone_app.py, which dispatches on argv).
+# Build: venv\Scripts\python.exe -m PyInstaller --noconfirm OdysseusFull.spec
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas = [
@@ -13,7 +13,7 @@ datas = [
     (".env.example", "."),
 ]
 binaries = []
-hiddenimports = ["app", "odysseus_app", "app_window", "quick_panel"]
+hiddenimports = ["app", "odysseus_app", "app_window"]
 
 # Window host stack (same as the old Odysseus.spec).
 for pkg in ("webview", "clr_loader", "pythonnet"):
@@ -23,7 +23,7 @@ for pkg in ("webview", "clr_loader", "pythonnet"):
 # Server stack: packages with dynamic imports / bundled data / native DLLs
 # that PyInstaller's static analysis misses.
 for pkg in ("uvicorn", "chromadb", "fastembed", "onnxruntime", "tokenizers",
-            "tiktoken", "tiktoken_ext", "mcp", "playwright", "pystray", "PIL",
+            "tiktoken", "tiktoken_ext", "mcp", "playwright", "PIL",
             "bcrypt", "passlib"):
     try:
         d, b, h = collect_all(pkg)

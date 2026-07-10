@@ -467,7 +467,10 @@ def _build_ollama_payload(
         "stream": stream,
     }
     options: Dict = {}
-    if temperature is not None:
+    # Unset temperature (the DEFAULT_TEMPERATURE sentinel) is omitted so the
+    # model's Modelfile default applies — parity with `ollama run` (see
+    # _is_unset_temperature).
+    if temperature is not None and not _is_unset_temperature(temperature):
         options["temperature"] = temperature
     if max_tokens and max_tokens > 0:
         options["num_predict"] = max_tokens
@@ -973,6 +976,68 @@ def _omit_temperature(provider: str, model: str) -> bool:
     return _restricts_temperature(model) or _moonshot_rejects_custom_temperature(
         provider, model
     )
+
+
+# Ollama applies the model's own Modelfile temperature when the request omits
+# one — exactly what `ollama run` does. Odysseus's "unset" sentinel is
+# DEFAULT_TEMPERATURE (1.0), and actually SENDING it overrides the model's
+# tuned default (most instruct models ship 0.6–0.8), making local models
+# noticeably more random than `ollama run`. So for Ollama targets an unset
+# temperature is omitted and the model default wins. (A preset explicitly set
+# to 1.0 is indistinguishable from the sentinel and also falls back to the
+# model default. API providers are unaffected — their server-side default is
+# already 1.0, so the sentinel was a no-op there all along.)
+def _is_unset_temperature(temperature) -> bool:
+    try:
+        return temperature is None or float(temperature) == float(LLMConfig.DEFAULT_TEMPERATURE)
+    except (TypeError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Ponytail — "lazy senior dev" minimal-code rules
+# (github.com/DietrichGebert/ponytail, MIT; vendored at config/ponytail.md).
+# Injected into the system prompt of chat/agent streaming when the chat-bar
+# toggle / /ponytail command turns it on. Levels come from ponytail's own
+# help card: lite softens the ladder, ultra sharpens it, full IS the ruleset.
+# ---------------------------------------------------------------------------
+_PONYTAIL_LEVELS = {
+    "lite": ("Ponytail level: LITE — build exactly what is asked; when a lazier "
+             "alternative exists, name it in one line instead of building it."),
+    "full": "",
+    "ultra": ("Ponytail level: ULTRA — deletion before addition: challenge the "
+              "requirement itself before building anything, and prefer removing "
+              "code over adding it."),
+}
+
+
+def _ponytail_rules_text() -> str:
+    """The vendored ruleset, cached after first read ('' when missing)."""
+    cached = getattr(_ponytail_rules_text, "_cache", None)
+    if cached is not None:
+        return cached
+    text = ""
+    try:
+        from src.runtime_paths import get_app_root
+        path = os.path.join(get_app_root(), "config", "ponytail.md")
+        with open(path, encoding="utf-8") as f:
+            text = f.read().strip()
+    except Exception:
+        logger.warning("ponytail: config/ponytail.md unreadable — mode disabled", exc_info=True)
+    _ponytail_rules_text._cache = text
+    return text
+
+
+def _ponytail_system_text(level: str) -> str:
+    """Ruleset + level modifier for an active level, else ''."""
+    level = (level or "").strip().lower()
+    if level not in ("lite", "full", "ultra"):
+        return ""
+    rules = _ponytail_rules_text()
+    if not rules:
+        return ""
+    modifier = _PONYTAIL_LEVELS[level]
+    return (rules + "\n\n" + modifier).strip()
 
 
 # Anthropic removed the sampling parameters (temperature, top_p, top_k) starting
@@ -1590,7 +1655,9 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             "messages": messages_copy,
             "temperature": temperature,
         }
-        if _omit_temperature(provider, model):
+        if _omit_temperature(provider, model) or (
+            _is_ollama_openai_compat_url(url) and _is_unset_temperature(temperature)
+        ):
             payload.pop("temperature", None)
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
@@ -1795,7 +1862,9 @@ async def llm_call_async(
             "messages": messages_copy,
             "temperature": temperature,
         }
-        if _omit_temperature(provider, model):
+        if _omit_temperature(provider, model) or (
+            _is_ollama_openai_compat_url(url) and _is_unset_temperature(temperature)
+        ):
             payload.pop("temperature", None)
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
@@ -1903,6 +1972,22 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     except Exception:
         pass
 
+    # Ponytail (chat-bar toggle / the /ponytail command): append the lazy-senior-
+    # dev ruleset to the consolidated system message. Appended LAST so it stays
+    # after the stable prompt prefix (KV-cache friendliness) and reads as the
+    # final word on code style.
+    try:
+        from src.settings import get_setting
+        _pt = _ponytail_system_text(get_setting("ponytail_mode", "off"))
+        if _pt:
+            if messages_copy and messages_copy[0].get("role") == "system":
+                messages_copy[0] = {"role": "system",
+                                    "content": (messages_copy[0].get("content") or "") + "\n\n" + _pt}
+            else:
+                messages_copy.insert(0, {"role": "system", "content": _pt})
+    except Exception:
+        pass
+
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
@@ -1928,7 +2013,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             "temperature": temperature,
             "stream": True,
         }
-        if _omit_temperature(provider, model):
+        if _omit_temperature(provider, model) or (
+            _is_ollama_openai_compat_url(url) and _is_unset_temperature(temperature)
+        ):
             payload.pop("temperature", None)
         if provider not in {"openrouter", "groq"}:
             payload["stream_options"] = {"include_usage": True}

@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json, atomic_write_text
+from core.atomic_io import atomic_write_json
 from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
@@ -82,27 +82,6 @@ class SetOpenRegistrationRequest(BaseModel):
     enabled: bool
 
 SESSION_COOKIE = "odysseus_session"
-
-
-def _get_quick_panel_secret() -> str:
-    """Read (creating on first use) the shared secret that authorizes the
-    desktop quick-panel process to loopback-login. Lives under DATA_DIR so only
-    local processes can read it; never leaves the machine."""
-    import secrets as _secrets
-    from src.constants import DATA_DIR
-    path = os.path.join(DATA_DIR, "quick_panel.secret")
-    try:
-        if os.path.exists(path):
-            val = Path(path).read_text(encoding="utf-8").strip()
-            if val:
-                return val
-        val = _secrets.token_urlsafe(32)
-        os.makedirs(DATA_DIR, exist_ok=True)
-        atomic_write_text(path, val)
-        return val
-    except Exception:
-        logging.getLogger(__name__).warning("quick_panel secret read/create failed", exc_info=True)
-        return ""
 
 
 def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
@@ -186,51 +165,6 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         response.set_cookie(**cookie_kwargs)
         return {"ok": True, "username": username}
 
-    @router.get("/quick-login")
-    async def quick_login(request: Request, s: str = ""):
-        """Localhost-only login for the desktop quick-panel process.
-
-        The quick panel runs in its own WebView2 profile (separate from the
-        main window) so it can't share the session cookie directly. It reads a
-        random secret written to DATA_DIR/quick_panel.secret (readable only by
-        local processes) and hits this route; we validate the secret + that the
-        caller is loopback, mint a session for the primary user, set the cookie
-        and bounce to the compact chat. Not a general auth path — it never
-        works off-localhost and requires the on-disk secret."""
-        import hmac
-        from fastapi.responses import RedirectResponse, PlainTextResponse
-        host = (request.client.host if request.client else "") or ""
-        if host not in ("127.0.0.1", "::1", "localhost"):
-            raise HTTPException(403, "Quick-login is loopback-only")
-        secret = _get_quick_panel_secret()
-        if not s or not secret or not hmac.compare_digest(s, secret):
-            raise HTTPException(403, "Bad quick-login secret")
-        # Primary user: prefer an admin, else the first configured user.
-        try:
-            users = auth_manager.list_users() or []
-        except Exception:
-            users = []
-        username = None
-        for u in users:
-            name = (u.get("username") if isinstance(u, dict) else str(u)) or ""
-            if name and auth_manager.is_admin(name):
-                username = name
-                break
-        if not username and users:
-            u0 = users[0]
-            username = (u0.get("username") if isinstance(u0, dict) else str(u0)) or None
-        if not username:
-            return PlainTextResponse("No user configured", status_code=409)
-        token = await asyncio.to_thread(auth_manager.create_session_trusted, username)
-        if not token:
-            raise HTTPException(401, "Could not create session")
-        resp = RedirectResponse(url="/?quick=1", status_code=302)
-        resp.set_cookie(
-            key=SESSION_COOKIE, value=token, httponly=True, samesite="lax",
-            secure=os.getenv("SECURE_COOKIES", "false").lower() == "true",
-            path="/", max_age=TOKEN_TTL,
-        )
-        return resp
 
     @router.post("/logout")
     async def logout(request: Request, response: Response):

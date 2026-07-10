@@ -87,18 +87,6 @@ def start_background():
             proc = subprocess.Popen(
                 [VENV_PY, "-m", "uvicorn", "app:app", "--host", HOST, "--port", str(PORT)],
                 cwd=ROOT, creationflags=_NO_WINDOW)
-    # Global-hotkey quick panel (Ctrl+Alt+O). Persistent background process with
-    # a tray icon; single-instance (named mutex in quick_panel), so safe every
-    # launch. Opt out with ODYSSEUS_NO_QUICK_PANEL=1.
-    if os.environ.get("ODYSSEUS_NO_QUICK_PANEL", "").strip() not in ("1", "true", "yes"):
-        if _FROZEN:
-            try:
-                subprocess.Popen([sys.executable, "--quick-panel"],
-                                 cwd=ROOT, creationflags=_NO_WINDOW)
-            except Exception:
-                pass
-        else:
-            _run_helper(os.path.join("scripts", "launch-quickpanel.ps1"))
     return proc
 
 

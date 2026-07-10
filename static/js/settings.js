@@ -5818,6 +5818,42 @@ const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations,
   else document.addEventListener('DOMContentLoaded', bind);
 })();
 
+// Ponytail chat-bar toggle — lazy-senior-dev minimal-code rules injected into the
+// system prompt (github.com/DietrichGebert/ponytail, MIT; config/ponytail.md).
+// The setting is a level string (off|lite|full|ultra); the button toggles
+// off<->full, and /ponytail <level> can set the finer levels (it calls
+// window.__ponytailSync to keep this button's state honest).
+(function bindPonytail() {
+  function setState(b, level) {
+    var on = level && level !== 'off';
+    b.classList.toggle('active', !!on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.title = 'Ponytail — lazy senior dev mode: minimal code, YAGNI, stdlib first.'
+      + (on ? ' Level: ' + level + '.' : '') + ' /ponytail-help for levels & commands.';
+  }
+  function bind() {
+    var b = document.getElementById('ponytail-toggle-btn');
+    if (!b || b.dataset.bound === '1') return;
+    b.dataset.bound = '1';
+    fetch('/api/auth/settings', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (s) { setState(b, s && s.ponytail_mode); })
+      .catch(function () {});
+    b.addEventListener('click', function () {
+      var level = b.classList.contains('active') ? 'off' : 'full';
+      setState(b, level);
+      fetch('/api/auth/settings', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ponytail_mode: level }),
+      }).catch(function () {});
+    });
+    window.__ponytailSync = function (level) { setState(b, level); };
+  }
+  if (document.readyState !== 'loading') bind();
+  else document.addEventListener('DOMContentLoaded', bind);
+})();
+
 // Local model (Ollama) perf controls - num_ctx + keep_alive, saved to app settings.
 (function bindOllamaPerf() {
   function bind() {

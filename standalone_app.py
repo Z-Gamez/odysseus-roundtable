@@ -13,6 +13,11 @@ binary dispatches on argv:
                                       IS this exe — so we runpy the script with
                                       the frozen module tree available.
 
+On macOS (Odysseus.app, built by OdysseusMac.spec via the build-macos GitHub
+Actions workflow) the same dispatch applies, but the window role uses a plain
+Cocoa pywebview window (_mac_window) instead of the Win32 frameless host —
+native title bar and traffic lights, no subclassing.
+
 Source runs still work too (python standalone_app.py ...).
 """
 import os
@@ -53,6 +58,49 @@ def _run_server() -> None:
     )
 
 
+def _mac_window() -> None:
+    """macOS window role: spawn the server child, open a normal Cocoa window.
+
+    Deliberately simpler than the Windows host — native frame (traffic
+    lights), no frameless subclassing, no helper scripts. Falls back to the
+    default browser if pywebview/pyobjc can't create a window."""
+    import subprocess
+    import time
+    import urllib.error
+    import urllib.request
+
+    port = int(os.environ.get("ODYSSEUS_PORT", "7000"))
+    url = f"http://127.0.0.1:{port}"
+
+    def up() -> bool:
+        try:
+            urllib.request.urlopen(url, timeout=2)
+            return True
+        except urllib.error.HTTPError:
+            return True   # any HTTP status means it's listening
+        except Exception:
+            return False
+
+    if not up():
+        subprocess.Popen([sys.executable, "--server"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 120
+    while time.time() < deadline and not up():
+        time.sleep(0.5)
+
+    try:
+        import webview
+        # Persistent WebKit profile so the login cookie survives relaunches.
+        storage = os.path.expanduser("~/Library/Application Support/Odysseus/WebKit")
+        os.makedirs(storage, exist_ok=True)
+        webview.create_window("Odysseus", url, width=1440, height=920,
+                              min_size=(900, 600))
+        webview.start(private_mode=False, storage_path=storage)
+    except Exception:
+        import webbrowser
+        webbrowser.open(url)
+
+
 def main() -> None:
     args = sys.argv[1:]
     if args and args[0].endswith(".py") and os.path.exists(args[0]):
@@ -60,6 +108,9 @@ def main() -> None:
         return
     if args and args[0] == "--server":
         _run_server()
+        return
+    if sys.platform == "darwin":
+        _mac_window()
         return
     import odysseus_app
     odysseus_app.main()

@@ -37,6 +37,10 @@ logs/
 # Packaged desktop app (built by build-app.ps1 - rebuildable, don't commit the binary)
 /Odysseus.exe
 *.spec
+# ...except the build recipes themselves (PyInstaller specs are source)
+!Odysseus.spec
+!OdysseusFull.spec
+!OdysseusMac.spec
 
 # Node
 node_modules/

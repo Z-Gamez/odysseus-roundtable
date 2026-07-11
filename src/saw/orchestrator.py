@@ -242,13 +242,24 @@ def _build_check(workspace: str):
                 return True, "structure", f"{where}lib/main.dart present (flutter analyze timed out — skipped)."
             except Exception:
                 return True, "structure", f"{where}lib/main.dart present (flutter analyze unavailable)."
-        # Python: every file must compile
+        # Python: every file must compile. Compile IN-PROCESS — in the frozen
+        # app sys.executable is Odysseus itself, and spawning it with
+        # "-m py_compile" fell through the argv dispatch and opened a whole
+        # new GUI window per gate run (observed on the macOS build).
         pys = [p for p in glob.glob(os.path.join(workspace, "**", "*.py"), recursive=True)
                if "__pycache__" not in p][:60]
         if pys:
-            r = subprocess.run([_sys.executable, "-m", "py_compile", *pys], cwd=workspace,
-                               capture_output=True, text=True, timeout=120)
-            return (r.returncode == 0), "py_compile", ((r.stdout + r.stderr).strip() or "All Python files compile.")[:1500]
+            import py_compile
+            errors = []
+            for f in pys:
+                try:
+                    py_compile.compile(f, doraise=True)
+                except py_compile.PyCompileError as e:
+                    errors.append(str(e))
+                except Exception as e:
+                    errors.append(f"{f}: {e}")
+            msg = ("\n".join(errors).strip() or "All Python files compile.")[:1500]
+            return (not errors), "py_compile", msg
     except Exception as e:
         logger.warning("[saw] build check error: %s", e)
     return None

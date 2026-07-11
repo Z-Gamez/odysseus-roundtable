@@ -6,6 +6,10 @@ binary dispatches on argv:
   Odysseus.exe                     -> desktop app: ensure server, open the
                                       frameless window (odysseus_app/app_window)
   Odysseus.exe --server            -> run the FastAPI server (uvicorn) in-process
+  Odysseus.exe -c/-m ...           -> emulate a python interpreter call. The
+                                      agent's python tool and tooling gates
+                                      spawn `sys.executable -I -c ...` /
+                                      `-m mod`, which IS this exe when frozen.
   Odysseus.exe <bundled script.py> -> run a bundled Python script. This is how
                                       the built-in MCP servers keep working when
                                       frozen: src/builtin_mcp.py spawns
@@ -43,6 +47,31 @@ def _run_bundled_script(path: str, extra_args) -> None:
     # The bundled script imports (src.*, mcp, email, ...) resolve against the
     # frozen module tree, which is exactly what we want.
     runpy.run_path(path, run_name="__main__")
+
+
+def _run_python_emulation(args) -> None:
+    """Emulate the interpreter invocations the app makes on itself.
+
+    When frozen, sys.executable IS this exe — internal code that spawns
+    "python -c ..." or "python -m mod ..." (the agent python tool, tooling
+    gates) would otherwise fall through to the window role and open a new
+    GUI instance per call (observed with the Round Table Developer on the
+    macOS build). Handle those shapes like a real interpreter; anything
+    else dash-prefixed exits with an error instead of opening a window."""
+    # Interpreter config flags that don't apply to the frozen runtime.
+    while args and args[0] in ("-I", "-E", "-s", "-S", "-B", "-u"):
+        args = args[1:]
+    if len(args) >= 2 and args[0] == "-c":
+        sys.argv = ["-c"] + list(args[2:])
+        exec(compile(args[1], "<string>", "exec"), {"__name__": "__main__"})
+        return
+    if len(args) >= 2 and args[0] == "-m":
+        import runpy
+        sys.argv = [args[1]] + list(args[2:])
+        runpy.run_module(args[1], run_name="__main__", alter_sys=True)
+        return
+    print(f"Odysseus: unsupported interpreter arguments: {args!r}", file=sys.stderr)
+    raise SystemExit(2)
 
 
 def _run_server() -> None:
@@ -187,6 +216,9 @@ def main() -> None:
         return
     if args and args[0] == "--server":
         _run_server()
+        return
+    if args and args[0].startswith("-") and not args[0].startswith("--"):
+        _run_python_emulation(args)
         return
     if sys.platform == "darwin":
         _mac_window()

@@ -78,6 +78,17 @@ jobs:
           fi
           curl -s http://127.0.0.1:7100/static/sw.js | grep -q "odysseus-v" || { echo "static broken"; exit 1; }
 
+      - name: Verify frozen python emulation (no GUI on -c/-m)
+        run: |
+          ./dist/Odysseus.app/Contents/MacOS/Odysseus -c "print('emulation-ok')" | grep -q emulation-ok
+          echo "def ok(): pass" > /tmp/gate_ok.py
+          ./dist/Odysseus.app/Contents/MacOS/Odysseus -m py_compile /tmp/gate_ok.py
+          echo "def broken(:" > /tmp/gate_bad.py
+          if ./dist/Odysseus.app/Contents/MacOS/Odysseus -m py_compile /tmp/gate_bad.py 2>/dev/null; then
+            echo "bad file compiled — dispatch broken"; exit 1
+          fi
+          echo "frozen python emulation verified"
+
       - name: Probe the frameless window (controls visible + wired)
         timeout-minutes: 6
         env:

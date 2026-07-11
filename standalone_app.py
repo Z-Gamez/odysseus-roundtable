@@ -167,7 +167,14 @@ def _mac_window() -> None:
                 pass
 
         win.events.loaded += _mark_native
-        webview.start(private_mode=False, storage_path=storage)
+        # The OdysseusDesktop UA marker lets the server allow 'unsafe-eval'
+        # for THIS window only (loopback + this UA) — pywebview's WKWebView
+        # bridge needs eval in the page context, which the normal CSP blocks
+        # (see core/middleware.py).
+        webview.start(private_mode=False, storage_path=storage,
+                      user_agent=("Mozilla/5.0 (Macintosh; Apple Silicon) "
+                                  "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                                  "OdysseusDesktop/1.1"))
     except Exception:
         import webbrowser
         webbrowser.open(url)

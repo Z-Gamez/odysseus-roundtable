@@ -66,7 +66,12 @@ def main() -> int:
     win.events.loaded += _mark_native
     threading.Thread(target=probe, args=(win,), daemon=True).start()
     try:
-        webview.start(private_mode=True)
+        # Same UA the shipped app sends — unlocks the loopback-scoped
+        # 'unsafe-eval' CSP the WKWebView bridge requires.
+        webview.start(private_mode=True,
+                      user_agent=("Mozilla/5.0 (Macintosh; Apple Silicon) "
+                                  "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                                  "OdysseusDesktop/1.1"))
     except Exception as e:  # noqa: BLE001
         print(json.dumps({"environment_limited": str(e)}))
         return 0

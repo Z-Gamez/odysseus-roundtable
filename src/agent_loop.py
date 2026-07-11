@@ -15,7 +15,7 @@ import logging
 from typing import AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
-from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url
+from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url, ollama_native_tools_model
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
@@ -2487,6 +2487,17 @@ async def stream_agent_loop(
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
     if _endpoint_supports is True:
+        _is_api_model = True
+    elif (
+        _endpoint_supports is None
+        and (_is_ollama_native or _ollama_openai_compat)
+        and not _model_no_tools
+        and ollama_native_tools_model(model)
+    ):
+        # Curated exception (see llm_core.ollama_native_tools_model): models
+        # proven to do native tool calls on Ollama default to native when the
+        # endpoint toggle was never set — a fresh install's Developer would
+        # otherwise write its tool calls as plain text.
         _is_api_model = True
     elif (
         _endpoint_supports is False

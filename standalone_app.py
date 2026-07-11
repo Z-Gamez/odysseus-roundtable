@@ -123,6 +123,15 @@ class _MacWindowApi:
                 pass
 
     def win_close(self):
+        # Destroying the window from INSIDE a js_api callback deadlocks on
+        # cocoa: the bridge blocks waiting for this method to return while
+        # destroy() tears down the webview that's mid-call (observed as a
+        # freeze + force-quit on close). Return immediately; destroy a beat
+        # later from a separate thread.
+        import threading
+        threading.Timer(0.15, self._destroy).start()
+
+    def _destroy(self):
         try:
             self._window.destroy()
         except Exception:
@@ -238,6 +247,11 @@ def _mac_window() -> None:
                       user_agent=("Mozilla/5.0 (Macintosh; Apple Silicon) "
                                   "AppleWebKit/605.1.15 (KHTML, like Gecko) "
                                   "OdysseusDesktop/1.1"))
+        # webview.start() returns once the window is gone, but lingering
+        # WebKit/pyobjc helper threads can keep the interpreter from exiting —
+        # the app then hangs in the Dock until force-quit. The server is a
+        # separate child (deliberately left warm), so a hard exit is safe.
+        os._exit(0)
     except Exception:
         import webbrowser
         webbrowser.open(url)

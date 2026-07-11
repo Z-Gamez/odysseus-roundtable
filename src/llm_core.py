@@ -300,6 +300,21 @@ def _is_ollama_native_url(url: str) -> bool:
     return local_ollama_host and (path == "" or path == "/api" or path.startswith("/api/"))
 
 
+def ollama_native_tools_model(model: str) -> bool:
+    """Models PROVEN to speak Ollama's native tool-call channel cleanly.
+
+    Most local models mishandle native schemas on Ollama (they emit a single
+    tool_call token and stop — issue #1567), so native function calling stays
+    opt-in via the per-endpoint supports_tools toggle. Ornith is the curated
+    exception — it's the dev model this fork recommends, it emits clean
+    native write_file/python calls, and the fenced fallback actively confuses
+    it (observed on a fresh macOS install: the Developer wrote its tool calls
+    into the transcript as text because the new endpoint's toggle was unset).
+    For these models an UNSET endpoint flag defaults to native, so a fresh
+    install works out of the box; an explicit False still wins."""
+    return "ornith" in (model or "").lower()
+
+
 def _is_ollama_openai_compat_url(url: str) -> bool:
     """Return True for local Ollama's OpenAI-compatible /v1 surface.
 

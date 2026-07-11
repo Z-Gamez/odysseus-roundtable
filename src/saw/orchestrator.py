@@ -302,16 +302,22 @@ def _endpoint_supports_tools(url: str) -> bool:
     return False
 
 
-def _augment_for_local(messages: list, url: str, has_python: bool) -> list:
+def _augment_for_local(messages: list, url: str, has_python: bool, model: str = "") -> list:
     """In FENCED mode, local models malform Odysseus's write_file/edit_file format, so we
     tell roles that HAVE python to do file I/O through it. BUT when the endpoint has
     supports_tools=True (native function calling), local models emit clean native
     write_file/python calls and this hint HURTS — e.g. Orninth does write_file natively
     but stalls when forced to write a long file as a python triple-quoted string. So skip
-    the hint in native-tools mode. Also no-op for cloud endpoints / roles without python."""
+    the hint in native-tools mode — including for curated models that default to native
+    when the endpoint toggle was never set (llm_core.ollama_native_tools_model; must stay
+    consistent with agent_loop's decision or the hint contradicts the active mode).
+    Also no-op for cloud endpoints / roles without python."""
     if not has_python or not _is_local_endpoint(url):
         return messages
     if _endpoint_supports_tools(url):
+        return messages
+    from src.llm_core import ollama_native_tools_model
+    if ollama_native_tools_model(model):
         return messages
     out = [dict(m) for m in messages]
     for m in out:
@@ -742,7 +748,7 @@ async def _run_role(role: RoleSpec, url: str, model: str, headers: dict, message
     """Run one role via the agent loop; yield tagged events; store text in result."""
     from src.agent_loop import stream_agent_loop
 
-    messages = _augment_for_local(messages, url, "python" in role.allowed_tools)
+    messages = _augment_for_local(messages, url, "python" in role.allowed_tools, model)
     disabled = role.disabled_against(universe)
     sid = f"saw:{run_id}:{role.key}:{iteration}"
     acc: list = []

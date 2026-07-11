@@ -58,11 +58,51 @@ def _run_server() -> None:
     )
 
 
-def _mac_window() -> None:
-    """macOS window role: spawn the server child, open a normal Cocoa window.
+class _MacWindowApi:
+    """js_api for the frameless Cocoa window — the web UI's in-page window
+    controls call pywebview.api.win_minimize/win_toggle_max/win_close (the
+    same surface app_window.WindowApi provides on Windows). Keep the Window
+    ref underscore-private: pywebview serializes public attributes over the
+    JS bridge and a Window reference recurses forever."""
 
-    Deliberately simpler than the Windows host — native frame (traffic
-    lights), no frameless subclassing, no helper scripts. Falls back to the
+    def __init__(self):
+        self._window = None
+
+    def win_minimize(self):
+        try:
+            self._window.minimize()
+        except Exception:
+            pass
+
+    def win_toggle_max(self):
+        # NSWindow.zoom_ toggles the zoomed state itself, which is exactly
+        # the maximize/restore semantic the button wants. Fall back to
+        # pywebview's cross-platform calls if native access ever changes.
+        try:
+            self._window.native.window.zoom_(None)
+            return
+        except Exception:
+            pass
+        try:
+            self._window.maximize()
+        except Exception:
+            try:
+                self._window.toggle_fullscreen()
+            except Exception:
+                pass
+
+    def win_close(self):
+        try:
+            self._window.destroy()
+        except Exception:
+            os._exit(0)
+
+
+def _mac_window() -> None:
+    """macOS window role: spawn the server child, open the frameless Cocoa
+    window. Mirrors the Windows look — the web UI draws its own window
+    controls (shown when pywebview announces itself) and marks the top bar
+    as a drag region; no Win32-style subclassing needed. Falls back to the
     default browser if pywebview/pyobjc can't create a window."""
     import subprocess
     import time
@@ -90,11 +130,23 @@ def _mac_window() -> None:
 
     try:
         import webview
+        # Only the element carrying .pywebview-drag-region itself starts a
+        # drag — buttons inside the top bar keep working as buttons (same
+        # setting the Windows host uses).
+        try:
+            webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = True
+        except Exception:
+            pass
         # Persistent WebKit profile so the login cookie survives relaunches.
         storage = os.path.expanduser("~/Library/Application Support/Odysseus/WebKit")
         os.makedirs(storage, exist_ok=True)
-        webview.create_window("Odysseus", url, width=1440, height=920,
-                              min_size=(900, 600))
+        api = _MacWindowApi()
+        win = webview.create_window("Odysseus", url, js_api=api,
+                                    width=1440, height=920,
+                                    min_size=(900, 600),
+                                    frameless=True, easy_drag=False,
+                                    background_color="#282c34")  # app --bg, same as Windows host
+        api._window = win
         webview.start(private_mode=False, storage_path=storage)
     except Exception:
         import webbrowser

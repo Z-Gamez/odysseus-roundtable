@@ -869,8 +869,16 @@ async def get_version():
     return {"version": APP_VERSION}
 
 @app.get("/api/health")
-async def health_check() -> Dict[str, str]:
-    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+async def health_check() -> JSONResponse:
+    # The app marker + X-Odysseus header let the desktop launchers verify the
+    # responder is actually THIS server: macOS AirPlay Receiver squats port
+    # 7000 and answers 403 to everything, which a naive "any response = up"
+    # probe mistook for a running backend (white-screen on fresh boot).
+    return JSONResponse(
+        {"app": "odysseus", "status": "healthy",
+         "timestamp": datetime.now(timezone.utc).isoformat()},
+        headers={"X-Odysseus": "1"},
+    )
 
 @app.get("/api/ready")
 async def readiness_check() -> JSONResponse:

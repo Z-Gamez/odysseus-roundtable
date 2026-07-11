@@ -129,6 +129,48 @@ class _MacWindowApi:
             os._exit(0)
 
 
+def _probe_odysseus(base: str, timeout: float = 1.5) -> bool:
+    """True only when ODYSSEUS answers at `base` — verified via the
+    X-Odysseus marker on /api/health, so a port squatter (macOS AirPlay
+    Receiver answers 403 to everything on 7000) never reads as "up"."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(base + "/api/health", timeout=timeout) as r:
+            return r.headers.get("X-Odysseus") == "1"
+    except Exception:
+        return False
+
+
+def _port_is_free(port: int) -> bool:
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _choose_server_port(want: int, is_ours=None, is_free=None):
+    """Pick the port the app should use: (port, must_spawn).
+
+    Prefer a live Odysseus on `want` (warm server), else the first nearby
+    port that is either ours (warm from a previous fallback launch) or
+    actually bindable. macOS AirPlay Receiver squats 7000 and is neither
+    ours nor bindable, so a fresh boot walks past it instead of pointing
+    the window at AirPlay's 403 (white screen)."""
+    is_ours = is_ours or (lambda p: _probe_odysseus(f"http://127.0.0.1:{p}"))
+    is_free = is_free or _port_is_free
+    for p in [want] + list(range(want + 1, want + 11)):
+        if is_ours(p):
+            return p, False
+        if is_free(p):
+            return p, True
+    return want, True
+
+
 def _mac_window() -> None:
     """macOS window role: spawn the server child, open the frameless Cocoa
     window. Mirrors the Windows look — the web UI draws its own window
@@ -137,30 +179,22 @@ def _mac_window() -> None:
     default browser if pywebview/pyobjc can't create a window."""
     import subprocess
     import time
-    import urllib.error
-    import urllib.request
 
-    port = int(os.environ.get("ODYSSEUS_PORT", "7000"))
+    want = int(os.environ.get("ODYSSEUS_PORT", "7000"))
+    port, must_spawn = _choose_server_port(want)
     url = f"http://127.0.0.1:{port}"
 
-    def up() -> bool:
-        try:
-            urllib.request.urlopen(url, timeout=2)
-            return True
-        except urllib.error.HTTPError:
-            return True   # any HTTP status means it's listening
-        except Exception:
-            return False
-
-    if not up():
+    if must_spawn:
         # Keep the server child's output — it is the only way to see a
         # traceback behind an in-app HTTP 500 when launched from Finder.
         log_path = os.path.expanduser("~/.odysseus/server.log")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         log = open(log_path, "ab")
-        subprocess.Popen([sys.executable, "--server"], stdout=log, stderr=log)
+        env = dict(os.environ, ODYSSEUS_PORT=str(port))
+        subprocess.Popen([sys.executable, "--server"],
+                         stdout=log, stderr=log, env=env)
     deadline = time.time() + 120
-    while time.time() < deadline and not up():
+    while time.time() < deadline and not _probe_odysseus(url):
         time.sleep(0.5)
 
     try:

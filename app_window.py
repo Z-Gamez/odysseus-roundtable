@@ -101,16 +101,19 @@ _KEEPALIVE = []
 
 
 def wait_for_server(url: str, timeout: int = 90) -> bool:
-    """Block until the server answers (any HTTP response, incl. 401/redirect, means up)."""
+    """Block until ODYSSEUS answers — verified via the X-Odysseus marker on
+    /api/health. The old "any HTTP response means up" probe mistook macOS
+    AirPlay Receiver's 403 on port 7000 for a running backend."""
+    base = url.rstrip("/")
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            urllib.request.urlopen(url, timeout=3)
-            return True
-        except urllib.error.HTTPError:
-            return True  # server responded with a status code -> it's listening
+            with urllib.request.urlopen(base + "/api/health", timeout=3) as r:
+                if r.headers.get("X-Odysseus") == "1":
+                    return True
         except Exception:
-            time.sleep(0.7)
+            pass
+        time.sleep(0.7)
     return False
 
 

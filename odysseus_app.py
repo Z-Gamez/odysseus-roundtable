@@ -48,11 +48,12 @@ ICON = os.path.join(BUNDLE, "static", "odysseus.ico")
 
 
 def _server_up() -> bool:
+    """True only when ODYSSEUS answers (X-Odysseus marker on /api/health) —
+    "any HTTP status" probing mistook port squatters (macOS AirPlay answers
+    403 on 7000) for a running backend and skipped starting the server."""
     try:
-        urllib.request.urlopen(URL, timeout=2)
-        return True
-    except urllib.error.HTTPError:
-        return True          # any HTTP status means it's listening
+        with urllib.request.urlopen(URL + "/api/health", timeout=2) as r:
+            return r.headers.get("X-Odysseus") == "1"
     except Exception:
         return False
 

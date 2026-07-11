@@ -75,11 +75,13 @@ class _MacWindowApi:
             pass
 
     def win_toggle_max(self):
-        # NSWindow.zoom_ toggles the zoomed state itself, which is exactly
-        # the maximize/restore semantic the button wants. Fall back to
-        # pywebview's cross-platform calls if native access ever changes.
+        # window.native IS the NSWindow on cocoa (pywebview sets
+        # pywebview_window.native = self.window), and NSWindow.zoom_ toggles
+        # the zoomed state itself — exactly the maximize/restore semantic the
+        # button wants. Fall back to pywebview's cross-platform calls if
+        # native access ever changes.
         try:
-            self._window.native.window.zoom_(None)
+            self._window.native.zoom_(None)
             return
         except Exception:
             pass
@@ -122,8 +124,12 @@ def _mac_window() -> None:
             return False
 
     if not up():
-        subprocess.Popen([sys.executable, "--server"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Keep the server child's output — it is the only way to see a
+        # traceback behind an in-app HTTP 500 when launched from Finder.
+        log_path = os.path.expanduser("~/.odysseus/server.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        log = open(log_path, "ab")
+        subprocess.Popen([sys.executable, "--server"], stdout=log, stderr=log)
     deadline = time.time() + 120
     while time.time() < deadline and not up():
         time.sleep(0.5)
@@ -147,6 +153,20 @@ def _mac_window() -> None:
                                     frameless=True, easy_drag=False,
                                     background_color="#282c34")  # app --bg, same as Windows host
         api._window = win
+
+        # The in-page window controls are display:none until body gets the
+        # native-app class, which index.html only adds once window.pywebview
+        # announces itself — a race the frameless WKWebView lost in testing.
+        # Add the class from the HOST on every navigation (login -> app);
+        # native evaluateJavaScript is immune to bridge timing.
+        def _mark_native():
+            try:
+                win.evaluate_js(
+                    "document.body && document.body.classList.add('native-app')")
+            except Exception:
+                pass
+
+        win.events.loaded += _mark_native
         webview.start(private_mode=False, storage_path=storage)
     except Exception:
         import webbrowser

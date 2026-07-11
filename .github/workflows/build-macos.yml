@@ -64,8 +64,8 @@ jobs:
 
       - name: Smoke test the frozen server
         run: |
-          ODYSSEUS_PORT=7100 ./dist/Odysseus.app/Contents/MacOS/Odysseus --server &
-          SERVER_PID=$!
+          ODYSSEUS_PORT=7100 ./dist/Odysseus.app/Contents/MacOS/Odysseus --server > server.log 2>&1 &
+          echo $! > server.pid
           code=000
           for i in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7100/ || true)
@@ -74,10 +74,19 @@ jobs:
           done
           echo "server answered: $code"
           if [ "$code" != "302" ] && [ "$code" != "200" ]; then
-            echo "frozen server never came up"; kill $SERVER_PID || true; exit 1
+            echo "frozen server never came up"; tail -40 server.log; exit 1
           fi
-          curl -s http://127.0.0.1:7100/static/sw.js | grep -q "odysseus-v" || { echo "static broken"; kill $SERVER_PID || true; exit 1; }
-          kill $SERVER_PID || true
+          curl -s http://127.0.0.1:7100/static/sw.js | grep -q "odysseus-v" || { echo "static broken"; exit 1; }
+
+      - name: Probe the frameless window (controls visible + wired)
+        timeout-minutes: 6
+        env:
+          PROBE_URL: http://127.0.0.1:7100
+        run: python scripts/macos_window_probe.py
+
+      - name: Stop smoke server
+        if: always()
+        run: kill "$(cat server.pid 2>/dev/null)" 2>/dev/null || true
 
       - name: Package DMG
         run: |

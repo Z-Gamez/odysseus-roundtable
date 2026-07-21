@@ -271,6 +271,11 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "messaging": """\
+## Messaging rules
+- To send a text / iMessage / SMS, use `send_imessage` (macOS only). Do NOT use shell/AppleScript directly.
+- If you only have a name, call `resolve_contact` first to get the phone number; a bare phone number can be used as-is.
+- The send is staged for the user's Approve/Decline card — do not claim the text was sent until it is approved.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -285,6 +290,7 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
+    "messaging": {"send_imessage", "resolve_contact", "manage_contact"},
 }
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -971,19 +977,58 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
-def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
+def _named_registered_tools(text: str, tool_names) -> Set[str]:
+    """Registered tool names the user explicitly typed in `text`.
+
+    Word-boundary matched so short names ("ls") don't fire inside other words
+    ("false"), and underscores are word chars so "send_imessage" only matches
+    the whole token. Empty when no tool registry was passed."""
+    if not tool_names or not text:
+        return set()
+    low = text.lower()
+    hits = set()
+    for name in tool_names:
+        n = str(name or "").lower()
+        if not n:
+            continue
+        if re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])", low):
+            hits.add(str(name))
+    return hits
+
+
+def _classify_agent_request(messages: List[Dict], last_user: str,
+                            tool_names=None) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
     Normal chat should not inherit old Cookbook/email/document context. Recent
     context is used only for explicit continuations ("yes", "do it", "1").
     This function does not inject tools directly; selected tools later decide
     which domain rule packs get appended to the system prompt.
+
+    `tool_names` is the set of registered tool names (built-in + custom/MCP);
+    when the user names one explicitly, the turn is forced onto the tool path
+    regardless of the domain regexes — otherwise a request like "use the
+    send_imessage tool ..." matches no built-in domain, reads as low-signal,
+    and skips the tool loop entirely (#imsg-routing).
     """
     text = str(last_user or "").strip()
     retry_continuation = _is_contextual_retry_continuation(messages, text)
     continuation = _is_explicit_continuation(text) or _assistant_requested_followup(messages) or retry_continuation
     retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
     q = retrieval_query.lower()
+
+    # An explicitly named tool wins over every other signal — including the
+    # casual/low-signal early return below — so "using the tool called X"
+    # always reaches the tool loop.
+    named = _named_registered_tools(text, tool_names)
+    if named:
+        return {
+            "low_signal": False,
+            "continuation": continuation,
+            "domains": {"explicit-tool"},
+            "retrieval_query": retrieval_query,
+            "force_tools": named,
+        }
 
     if not text or bool(_LOW_SIGNAL_RE.match(text)) or _is_casual_low_signal(text):
         return {
@@ -1002,6 +1047,11 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("cookbook")
     if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
         domains.add("email")
+    # Texting via the Mac Messages app. Fires on the verbs/nouns the email
+    # regex misses (text/iMessage/SMS/the tool name) and on a bare 10+ digit
+    # phone number — a common "text 4801234567 ..." shape (#imsg-routing).
+    if has(r"\b(imessage|i-?messages?|texts?|txt|sms|send_imessage)\b", r"\btext\s+\w", r"\b\d{10,}\b"):
+        domains.add("messaging")
     if has(r"\b(note|todo|to-do|checklist|task list|remind me|reminder|buy|pickup|pick up)\b"):
         domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
@@ -2157,9 +2207,27 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
-    _intent = _classify_agent_request(messages, _last_user)
+    # The registered tool universe (built-in + custom/MCP) lets the classifier
+    # honor an explicitly named tool. Cheap + best-effort — never block routing.
+    _registered_tool_names: Set[str] = set()
+    try:
+        from src.tool_policy import known_tool_names as _ktn
+        _registered_tool_names |= set(_ktn())
+    except Exception:
+        pass
+    try:
+        if mcp_mgr:
+            for _sch in (mcp_mgr.get_all_openai_schemas(_load_mcp_disabled_map()) or []):
+                _n = (_sch.get("function") or {}).get("name")
+                if _n:
+                    _registered_tool_names.add(_n)
+    except Exception:
+        pass
+    _intent = _classify_agent_request(messages, _last_user, _registered_tool_names)
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
+    # Tools forced by the classifier because the user named one explicitly.
+    _intent_force: Set[str] = set(_intent.get("force_tools") or ())
     _direct_low_signal = (
         _low_signal_turn
         and not bool(_intent.get("continuation"))
@@ -2171,6 +2239,11 @@ async def stream_agent_loop(
         and (_casual_low_signal_turn or not workspace)
         and not forced_tools
         and not relevant_tools
+        and not _intent_force
+        # A long, actionable turn must never take the tool-skipping fast lane,
+        # even when it matched no domain — only genuinely terse chit-chat may
+        # (#imsg-routing). Casual openers are already low-signal above.
+        and (_casual_low_signal_turn or len(_last_user.split()) <= 6)
     )
     # Tool retrieval uses the latest message by default. It may inherit recent
     # user turns only for explicit continuations ("yes", "do it", "1").
@@ -2377,11 +2450,12 @@ async def stream_agent_loop(
     # Per-request UI toggles are stronger than retrieval. If the user turns on
     # Search, the model must see the search tools even when the latest text is a
     # typo or otherwise low-signal for tool RAG.
-    if not guide_only and forced_tools:
+    if not guide_only and (forced_tools or _intent_force):
         if _relevant_tools is None:
             from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
-        _relevant_tools.update(t for t in forced_tools if t not in disabled_tools)
+        _relevant_tools.update(t for t in (set(forced_tools or ()) | _intent_force)
+                               if t not in disabled_tools)
 
     # The skill index injected by _build_system_prompt tells the model to
     # call `manage_skills action=view`, and Jaccard-matched skills are pasted

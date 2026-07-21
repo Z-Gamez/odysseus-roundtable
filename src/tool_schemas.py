@@ -1098,7 +1098,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "send_imessage",
-            "description": "Send a text message via the Mac's Messages app (iMessage or SMS). macOS only. Use resolve_contact first if you only have a name. This STAGES the message and shows the user an Approve/Decline card — it is NOT sent until they approve, so do not claim it was sent. Default service is iMessage; pass service='sms' for a non-iMessage phone number (requires Text Message Forwarding set up on the user's iPhone).",
+            "description": "Text / iMessage / SMS someone — message a person by phone number or iMessage handle via the Mac's Messages app. macOS only. Use this whenever the user says text, txt, message, iMessage, or SMS a person/number. Use resolve_contact first if you only have a name; a bare phone number can be used directly. This STAGES the message and shows the user an Approve/Decline card — it is NOT sent until they approve, so do not claim it was sent. Default service is iMessage; pass service='sms' for a non-iMessage phone number (requires Text Message Forwarding set up on the user's iPhone).",
             "parameters": {
                 "type": "object",
                 "properties": {

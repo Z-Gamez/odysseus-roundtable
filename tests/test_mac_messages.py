@@ -84,6 +84,90 @@ def test_applescript_invocation_is_injection_safe(monkeypatch):
     assert captured["cmd"][0] == "osascript" and captured["cmd"][1] == "-"
 
 
+def _osascript_failing(monkeypatch, stderr, returncode=1):
+    """Mock osascript failing with `stderr`; neutralize the Messages pre-launch."""
+    monkeypatch.setattr(mac_messages, "_ensure_messages_running", lambda *a, **k: None)
+    monkeypatch.setattr(mac_messages.sys, "platform", "darwin")
+
+    class _Proc:
+        pass
+
+    def fake_run(cmd, **kw):
+        p = _Proc()
+        p.returncode = returncode
+        p.stderr = stderr
+        return p
+
+    monkeypatch.setattr(mac_messages.subprocess, "run", fake_run)
+
+
+def test_timeout_1712_maps_to_actionable_hint(monkeypatch):
+    """The reported macOS 26.5.2 failure: -1712 must not become a generic error."""
+    raw = "execution error: Messages got an error: AppleEvent timed out. (-1712)"
+    _osascript_failing(monkeypatch, raw)
+    err = mac_messages._send_via_applescript("+1555", "hi", "imessage")
+    assert "didn't respond" in err
+    assert "Automation" in err
+    assert raw in err          # full stderr preserved for diagnosis
+
+
+def test_not_authorized_1743_maps_to_automation_hint(monkeypatch):
+    raw = "execution error: Not authorized to send Apple events to Messages. (-1743)"
+    _osascript_failing(monkeypatch, raw)
+    err = mac_messages._send_via_applescript("+1555", "hi", "imessage")
+    assert "Privacy & Security" in err and "Automation" in err
+    assert raw in err
+
+
+def test_unknown_error_returns_full_stderr(monkeypatch):
+    raw = "execution error: something nobody mapped (-9999)"
+    _osascript_failing(monkeypatch, raw)
+    err = mac_messages._send_via_applescript("+1555", "hi", "imessage")
+    assert err == raw          # never swallowed into a generic message
+
+
+def test_success_returns_none(monkeypatch):
+    _osascript_failing(monkeypatch, "", returncode=0)
+    assert mac_messages._send_via_applescript("+1555", "hi", "imessage") is None
+
+
+def test_applescript_uses_participant_form_with_timeout():
+    # The deprecated buddy/service form must only be the fallback, and the
+    # send must be bounded by an explicit AppleScript timeout.
+    s = mac_messages._APPLESCRIPT
+    assert "with timeout of 30 seconds" in s
+    assert "1st account whose service type" in s
+    assert "participant theRecipient" in s
+    assert s.index("participant theRecipient") < s.index("buddy theRecipient")
+
+
+def test_owner_matches_tolerates_unset_owner():
+    # The empty-card bug: agent ctx owner "" vs request owner "admin".
+    assert mac_messages.owner_matches({"owner": ""}, "admin") is True
+    assert mac_messages.owner_matches({"owner": "admin"}, "") is True
+    assert mac_messages.owner_matches({"owner": "admin"}, "admin") is True
+    # Two DIFFERENT named users still don't match.
+    assert mac_messages.owner_matches({"owner": "alice"}, "bob") is False
+
+
+def test_pending_visible_when_staged_without_owner():
+    mac_messages.stage("+1555", "hi", "imessage", "")
+    assert len(mac_messages.list_pending("admin")) == 1
+
+
+def test_failed_error_persisted_for_the_card(monkeypatch):
+    raw = "execution error: Messages got an error: AppleEvent timed out. (-1712)"
+    _osascript_failing(monkeypatch, raw)
+    pid = mac_messages.stage("+1555", "hi", "imessage", "")
+    res = mac_messages.approve(pid)
+    assert res["success"] is False
+    # Written back to pending_messages.json so the card/status can show it.
+    saved = mac_messages.get(pid)
+    assert saved["status"] == "failed"
+    assert raw in saved["error"]
+    assert raw in res["error"]
+
+
 def test_tool_stages_not_sends(monkeypatch):
     monkeypatch.setattr(mac_messages.sys, "platform", "darwin")
     tool = mac_messages.MacMessagesTool()
@@ -91,6 +175,26 @@ def test_tool_stages_not_sends(monkeypatch):
     assert out["exit_code"] == 0
     assert "NOTHING HAS BEEN SENT" in out["output"]
     assert "pending_id='" in out["output"]
+
+
+def test_pending_row_field_contract():
+    """The approval card reads p.id / row.to / row.body / row.service from
+    GET /api/messages/pending. Renaming any of these blanks the card."""
+    mac_messages.stage("+15551234567", "hello there", "sms", "o")
+    row = mac_messages.list_pending("o")[0]
+    for key in ("id", "to", "body", "service"):
+        assert key in row, f"card reads '{key}' — missing from pending row"
+    assert row["to"] == "+15551234567"
+    assert row["body"] == "hello there"
+    assert row["service"] == "sms"
+
+
+def test_status_exposes_error_for_failed(monkeypatch):
+    _osascript_failing(monkeypatch, "execution error: boom (-1712)")
+    pid = mac_messages.stage("+1555", "hi", "imessage", "o")
+    mac_messages.approve(pid)
+    st = mac_messages.status(pid)
+    assert st["status"] == "failed" and st["error"]
 
 
 def test_tool_rejects_off_mac(monkeypatch):

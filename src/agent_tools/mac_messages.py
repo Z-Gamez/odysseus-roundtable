@@ -29,22 +29,60 @@ _LOCK = threading.Lock()
 # makes AppleScript injection impossible. `osascript - a b` reads the script
 # from stdin and exposes a, b as `argv`. Service is chosen by type so the same
 # script covers iMessage (blue) and SMS (green, needs Text Message Forwarding).
+#
+# `account`/`participant` is the form that still works on current macOS; the
+# older `service`/`buddy` form is kept as a fallback for older systems. The
+# whole tell block is wrapped in an explicit timeout so a wedged Messages
+# surfaces as AppleScript error -1712 (which we map to a real hint) instead of
+# hanging until the subprocess is killed.
 _APPLESCRIPT = """
 on run argv
     set theRecipient to item 1 of argv
     set theBody to item 2 of argv
     set theService to item 3 of argv
-    tell application "Messages"
-        if theService is "sms" then
-            set svc to 1st service whose service type = SMS
-        else
-            set svc to 1st service whose service type = iMessage
-        end if
-        set theBuddy to buddy theRecipient of svc
-        send theBody to theBuddy
-    end tell
+    with timeout of 30 seconds
+        tell application "Messages"
+            if theService is "sms" then
+                set svcType to SMS
+            else
+                set svcType to iMessage
+            end if
+            try
+                set targetService to 1st account whose service type = svcType
+                set targetBuddy to participant theRecipient of targetService
+                send theBody to targetBuddy
+            on error
+                set targetService to 1st service whose service type = svcType
+                set targetBuddy to buddy theRecipient of targetService
+                send theBody to targetBuddy
+            end try
+        end tell
+    end timeout
 end run
 """
+
+
+def _ensure_messages_running(timeout_s: float = 12.0) -> None:
+    """Launch Messages.app and wait until it's actually up.
+
+    Sending to a cold Messages is the main source of AppleEvent timeouts
+    (-1712): the send AppleEvent arrives while the app is still starting and
+    never gets answered. Best-effort — failures here are not fatal, the send
+    itself reports the real error."""
+    try:
+        subprocess.run(["open", "-a", "Messages"], capture_output=True, timeout=15)
+    except Exception:
+        return
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            r = subprocess.run(["pgrep", "-x", "Messages"], capture_output=True, timeout=5)
+            if r.returncode == 0:
+                time.sleep(1.0)   # let it finish wiring up its services
+                return
+        except Exception:
+            return
+        time.sleep(0.4)
 
 
 def _load() -> Dict[str, dict]:
@@ -77,43 +115,83 @@ def stage(to: str, body: str, service: str, owner: str) -> str:
     return pid
 
 
+def owner_matches(row: dict, owner: str) -> bool:
+    """Whether `owner` may see/act on this staged message.
+
+    The agent's tool ctx owner can be None/"" (single-user mode, or a caller
+    that didn't thread it through) while the HTTP request authenticates as a
+    real username — a strict equality check then hid the row from its own
+    approval card, which rendered blank. Treat an unset owner on either side
+    as "same user"; two DIFFERENT named owners still don't match.
+    """
+    row_owner = (row or {}).get("owner") or ""
+    req_owner = owner or ""
+    if not row_owner or not req_owner:
+        return True
+    return row_owner == req_owner
+
+
 def list_pending(owner: str) -> List[dict]:
     d = _load()
     return [r for r in d.values()
-            if r.get("status") == "staged" and (not owner or r.get("owner") == owner)]
+            if r.get("status") == "staged" and owner_matches(r, owner)]
 
 
 def get(pid: str) -> Optional[dict]:
     return _load().get(pid)
 
 
+_AUTOMATION_HINT = (
+    "macOS blocked automation of Messages. Allow Odysseus to control Messages "
+    "under System Settings → Privacy & Security → Automation (if Odysseus "
+    "isn't listed, quit and relaunch it, then retry so macOS re-prompts)."
+)
+_TIMEOUT_HINT = (
+    "Messages didn't respond (AppleEvent timed out). Open Messages.app and "
+    "confirm it's signed in to iMessage, and that Odysseus is allowed to "
+    "control Messages under System Settings → Privacy & Security → Automation."
+)
+
+
 def _send_via_applescript(recipient: str, body: str, service: str) -> Optional[str]:
-    """Deliver now. Returns None on success, or an error string."""
+    """Deliver now. Returns None on success, or a human-readable error string.
+
+    The full osascript stderr is always preserved in the returned message so an
+    unmapped AppleScript error can still be diagnosed from the approval card.
+    """
     if sys.platform != "darwin":
         return "Sending via Messages is only available on macOS."
+    _ensure_messages_running()
     try:
         proc = subprocess.run(
             ["osascript", "-", recipient, body, service],
-            input=_APPLESCRIPT, text=True, capture_output=True, timeout=30,
+            input=_APPLESCRIPT, text=True, capture_output=True,
+            # Longer than the script's own 30s timeout so AppleScript reports
+            # -1712 itself rather than us killing it with no diagnosis.
+            timeout=45,
         )
     except FileNotFoundError:
         return "osascript not found — is this macOS?"
     except subprocess.TimeoutExpired:
-        return "Messages did not respond within 30s (is Messages.app signed in?)."
-    if proc.returncode != 0:
-        err = (proc.stderr or "").strip() or "AppleScript failed"
-        # Most common real-world failures, made actionable.
-        if "Can't get buddy" in err or "invalid" in err.lower():
-            return (f"Couldn't reach '{recipient}' on "
-                    f"{'SMS' if service == 'sms' else 'iMessage'}. "
-                    "For a non-iMessage number, enable Text Message Forwarding "
-                    "on your iPhone and send with service='sms'.")
-        if "Not authorized" in err or "assistive" in err.lower():
-            return ("macOS blocked automation of Messages. Grant Odysseus "
-                    "control of Messages under System Settings → Privacy & "
-                    "Security → Automation.")
-        return err
-    return None
+        return _TIMEOUT_HINT
+    if proc.returncode == 0:
+        return None
+
+    err = (proc.stderr or "").strip() or "AppleScript failed with no output"
+    low = err.lower()
+    # Map the known AppleScript error numbers to actionable hints, but always
+    # append the raw stderr — an unmapped failure must not become a generic
+    # "send failed" with the cause thrown away.
+    if "-1743" in err or "not authorized" in low or "assistive" in low:
+        return f"{_AUTOMATION_HINT}\n\nDetail: {err}"
+    if "-1712" in err or "timed out" in low:
+        return f"{_TIMEOUT_HINT}\n\nDetail: {err}"
+    if "-1728" in err or "can't get buddy" in low or "can't get participant" in low:
+        svc_label = "SMS" if str(service).lower() == "sms" else "iMessage"
+        return (f"Couldn't reach '{recipient}' on {svc_label}. For a "
+                "non-iMessage number, enable Text Message Forwarding on your "
+                f"iPhone and send with service='sms'.\n\nDetail: {err}")
+    return err
 
 
 def approve(pid: str) -> dict:

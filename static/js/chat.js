@@ -2368,21 +2368,42 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                       '</div>';
                     chatBox.appendChild(card);
                     uiModule.scrollHistory();
+                    // Fill in recipient/body from the staged record. If the row
+                    // can't be loaded the card must say so — silently leaving
+                    // "Loading…" made it look blank/broken.
                     fetch('/api/messages/pending', { credentials: 'same-origin' })
                       .then(r => r.json())
                       .then(d => {
                         const row = (d.pending || []).find(p => p.id === pid);
-                        if (!row) return;
+                        if (!row) {
+                          card.querySelector('.email-approval-meta').textContent =
+                            'Could not load the staged message (it may have already been handled).';
+                          return;
+                        }
                         card.querySelector('.email-approval-meta').innerHTML =
-                          '<div><span class="email-approval-k">To</span>' + esc(row.to || '') + '</div>' +
+                          '<div><span class="email-approval-k">To</span>' + esc(row.to || '(unknown)') + '</div>' +
                           '<div><span class="email-approval-k">Via</span>' + esc(row.service === 'sms' ? 'SMS' : 'iMessage') + '</div>';
                         const b = row.body || '';
                         card.querySelector('.email-approval-body').textContent =
                           b.length > 700 ? b.slice(0, 700) + '…' : b;
-                      }).catch(() => {});
+                      })
+                      .catch(() => {
+                        card.querySelector('.email-approval-meta').textContent =
+                          'Could not load the staged message (network error).';
+                      });
                     const settle = (txt, ok) => {
                       card.querySelector('.email-approval-actions').innerHTML =
                         '<span class="email-approval-result ' + (ok ? 'ok' : 'no') + '">' + txt + '</span>';
+                    };
+                    // macOS errors are multi-line (hint + raw AppleScript
+                    // detail), so render them wrapped rather than in the
+                    // single-line result span.
+                    const failWith = (msg) => {
+                      const actions = card.querySelector('.email-approval-actions');
+                      actions.innerHTML = '<span class="email-approval-result no"></span>';
+                      const span = actions.querySelector('.email-approval-result');
+                      span.style.whiteSpace = 'pre-wrap';
+                      span.textContent = '⚠ ' + msg;
                     };
                     card.querySelector('.email-approve-btn').addEventListener('click', (ev) => {
                       ev.target.disabled = true;
@@ -2390,14 +2411,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                       fetch('/api/messages/pending/' + pid + '/approve', { method: 'POST', credentials: 'same-origin' })
                         .then(r => r.json())
                         .then(d => {
-                          const span = card.querySelector('.email-approval-result');
-                          if (d.success) { span.textContent = '✓ Approved — Sent'; }
-                          else {
-                            span.textContent = '⚠ ' + (d.error || 'Send failed');
-                            span.classList.remove('ok'); span.classList.add('no');
+                          if (d.success) {
+                            card.querySelector('.email-approval-result').textContent = '✓ Approved — Sent';
+                          } else {
+                            failWith(d.error || 'Send failed');
                           }
                         })
-                        .catch(() => settle('⚠ Send failed (network)', false));
+                        .catch(() => failWith('Send failed (network error)'));
                     });
                     card.querySelector('.email-decline-btn').addEventListener('click', () => {
                       fetch('/api/messages/pending/' + pid, { method: 'DELETE', credentials: 'same-origin' })

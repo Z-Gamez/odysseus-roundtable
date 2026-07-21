@@ -9,7 +9,14 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from routes.email_helpers import require_owner
+# require_user, NOT require_owner: these routes take `pid` as a PATH param and
+# no account_id. require_owner declares `account_id: str | None = Query(None)`,
+# so calling it directly leaves account_id bound to the Query OBJECT (which is
+# truthy) — that reached the account-ownership SQL check as a non-scalar and
+# raised sqlite3.ProgrammingError, surfacing as a 503 on every /api/messages
+# call. That 503 is what left the approval card blank and made Approve report
+# a generic send failure.
+from routes.email_helpers import require_user
 from src.agent_tools import mac_messages
 
 logger = logging.getLogger(__name__)
@@ -20,12 +27,12 @@ def setup_messages_routes() -> APIRouter:
 
     @router.get("/pending")
     async def list_pending(request: Request):
-        owner = require_owner(request)
+        owner = require_user(request)
         return {"pending": mac_messages.list_pending(owner)}
 
     @router.post("/pending/{pid}/approve")
     async def approve(pid: str, request: Request):
-        owner = require_owner(request)
+        owner = require_user(request)
         row = mac_messages.get(pid)
         if not row or not mac_messages.owner_matches(row, owner):
             return {"success": False, "error": "Message not found or already handled"}
@@ -43,7 +50,7 @@ def setup_messages_routes() -> APIRouter:
 
     @router.get("/pending/{pid}/status")
     async def status(pid: str, request: Request):
-        owner = require_owner(request)
+        owner = require_user(request)
         row = mac_messages.get(pid)
         if not row or not mac_messages.owner_matches(row, owner):
             return {"status": "unknown"}
@@ -51,7 +58,7 @@ def setup_messages_routes() -> APIRouter:
 
     @router.delete("/pending/{pid}")
     async def decline(pid: str, request: Request):
-        owner = require_owner(request)
+        owner = require_user(request)
         row = mac_messages.get(pid)
         if not row or not mac_messages.owner_matches(row, owner):
             return {"success": False, "error": "Message not found"}

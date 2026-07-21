@@ -19,6 +19,7 @@ Contract matches the rest of agent_tools: async execute(content, ctx) -> dict.
 """
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -38,7 +39,131 @@ _LOCK = threading.Lock()
 # unreliable on macOS 26 (AppleEvent timeouts, -1712).
 SHORTCUT_NAME = "OdysseusSendMessage"
 
-# Passing recipient + body as argv (never string-interpolated into the script)
+# --- Contact-name resolution -------------------------------------------------
+# The model may address a text by NAME ("text Michaela"). The Shortcut expects a
+# number, so a name is resolved against the macOS Contacts app here, before
+# staging. The name is passed as argv (never interpolated into the script), so
+# a hostile name can't inject AppleScript. Output is one "Name|Number" line per
+# match, or the NOMATCH / NOPHONE sentinels.
+#
+# Needs one-time macOS Contacts permission (System Settings → Privacy &
+# Security → Contacts), a separate TCC prompt from the Messages/Automation one.
+_CONTACTS_SCRIPT = """
+on run argv
+    set theName to item 1 of argv
+    set outLines to {}
+    tell application "Contacts"
+        set matches to (every person whose name contains theName)
+        if (count of matches) is 0 then return "NOMATCH"
+        repeat with p in matches
+            set ph to phones of p
+            if (count of ph) > 0 then
+                set end of outLines to ((name of p) & "|" & (value of item 1 of ph))
+            end if
+        end repeat
+    end tell
+    if (count of outLines) is 0 then return "NOPHONE"
+    set AppleScript's text item delimiters to linefeed
+    set outStr to outLines as text
+    set AppleScript's text item delimiters to ""
+    return outStr
+end run
+"""
+
+
+def _looks_like_handle(to: str) -> bool:
+    """True when `to` is already addressable: an email/iMessage handle, or a
+    phone number. Anything containing letters is treated as a contact name."""
+    t = (to or "").strip()
+    if not t:
+        return False
+    if "@" in t:
+        return True
+    if re.search(r"[A-Za-z]", t):
+        return False
+    # A leading "+" means the caller wrote a number, whatever its length
+    # (country codes, short codes). Otherwise require enough digits that a
+    # bare string can't be mistaken for one.
+    if re.fullmatch(r"\+[\d\s().\-]+", t):
+        return True
+    return len(re.sub(r"\D", "", t)) >= 7
+
+
+def _to_e164(raw: str) -> str:
+    """Best-effort E.164. Only normalizes shapes we can be confident about —
+    an already-+-prefixed number, or a 10/11-digit North American one. Anything
+    else is passed through as Contacts stored it rather than risk mangling a
+    number and texting the wrong person."""
+    s = (raw or "").strip()
+    if s.startswith("+"):
+        return "+" + re.sub(r"\D", "", s[1:])
+    digits = re.sub(r"\D", "", s)
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    return s
+
+
+def resolve_contact_name(name: str):
+    """Look `name` up in macOS Contacts.
+
+    Returns (number, display, error): on success a normalized number and a
+    "Name (+1...)" label; on failure an error string suitable for the user.
+    Multiple distinct people match -> error listing them, because sending is
+    hard to undo and guessing the wrong person is worse than asking.
+    """
+    if sys.platform != "darwin":
+        return None, None, "Contact lookup is only available on macOS."
+    try:
+        proc = subprocess.run(
+            ["osascript", "-", name],
+            input=_CONTACTS_SCRIPT, text=True, capture_output=True, timeout=20,
+        )
+    except FileNotFoundError:
+        return None, None, "osascript not found — is this macOS?"
+    except subprocess.TimeoutExpired:
+        return None, None, "Contacts didn't respond within 20s."
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        low = err.lower()
+        if "-1743" in err or "not authorized" in low or "access" in low:
+            return None, None, (
+                "macOS blocked access to Contacts. Allow Odysseus under System "
+                "Settings → Privacy & Security → Contacts, then try again."
+                + (f"\n\nDetail: {err}" if err else "")
+            )
+        return None, None, err or "Contacts lookup failed."
+
+    out = (proc.stdout or "").strip()
+    if out == "NOMATCH" or not out:
+        return None, None, f"No contact named '{name}' in macOS Contacts."
+    if out == "NOPHONE":
+        return None, None, f"Found '{name}' in Contacts, but they have no phone number."
+
+    people = []
+    for line in out.splitlines():
+        if "|" in line:
+            person, number = line.split("|", 1)
+            people.append((person.strip(), number.strip()))
+    if not people:
+        return None, None, f"Could not read a phone number for '{name}'."
+
+    # Same person listed twice (multiple phones) is not ambiguity; two
+    # different people is.
+    distinct = {p for p, _ in people}
+    if len(distinct) > 1:
+        listing = "; ".join(f"{p} ({_to_e164(n)})" for p, n in people[:5])
+        return None, None, (
+            f"'{name}' matches {len(distinct)} contacts: {listing}. "
+            "Ask which one, then retry with the full name or the number."
+        )
+
+    person, number = people[0]
+    e164 = _to_e164(number)
+    return e164, f"{person} ({e164})", None
+
+
 def _load() -> Dict[str, dict]:
     try:
         with open(_STORE, encoding="utf-8") as f:
@@ -55,12 +180,16 @@ def _save(d: Dict[str, dict]) -> None:
     os.replace(tmp, _STORE)
 
 
-def stage(to: str, body: str, service: str, owner: str) -> str:
+def stage(to: str, body: str, service: str, owner: str, to_display: str = "") -> str:
     pid = secrets.token_hex(4)
     with _LOCK:
         d = _load()
         d[pid] = {
             "id": pid, "to": to, "body": body,
+            # What the approval card shows — "Michaela (+1...)" when a name was
+            # resolved, so the user can see WHO before approving, while `to`
+            # stays the bare number the Shortcut needs.
+            "to_display": to_display or to,
             "service": "sms" if str(service).lower() == "sms" else "imessage",
             "owner": owner or "", "status": "staged", "error": "",
             "created": time.time(),
@@ -194,12 +323,21 @@ class MacMessagesTool:
         if sys.platform != "darwin":
             return {"error": "send_imessage is only available on macOS (uses Messages.app).",
                     "exit_code": 1}
+        # A NAME is resolved against macOS Contacts before staging, so the card
+        # shows who it's really going to and the Shortcut still receives a
+        # number. Anything already addressable (number / @handle) passes through.
+        display = to
+        if not _looks_like_handle(to):
+            number, display, err = resolve_contact_name(to)
+            if err:
+                return {"error": f"send_imessage: {err}", "exit_code": 1}
+            to = number
         owner = (ctx or {}).get("owner") or ""
-        pid = stage(to, str(body), str(args.get("service") or "imessage"), owner)
-        svc = "SMS" if str(args.get("service") or "").lower() == "sms" else "iMessage"
+        pid = stage(to, str(body), str(args.get("service") or "imessage"), owner,
+                    to_display=display)
         return {
             "output": (
-                f"✋ Message staged for {to} via {svc} — NOTHING HAS BEEN SENT. "
+                f"✋ Message staged for {display} — NOTHING HAS BEEN SENT. "
                 "The user now sees an Approve/Decline card in the chat; tell them "
                 "to review it and press one (the buttons handle delivery — you do "
                 "not need to do anything else). Do NOT claim the text was sent "

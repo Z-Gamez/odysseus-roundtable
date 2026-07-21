@@ -2380,8 +2380,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                             'Could not load the staged message (it may have already been handled).';
                           return;
                         }
+                        // to_display carries "Name (+1...)" when a contact name
+                        // was resolved, so the user sees WHO before approving.
                         card.querySelector('.email-approval-meta').innerHTML =
-                          '<div><span class="email-approval-k">To</span>' + esc(row.to || '(unknown)') + '</div>' +
+                          '<div><span class="email-approval-k">To</span>' + esc(row.to_display || row.to || '(unknown)') + '</div>' +
                           '<div><span class="email-approval-k">Via</span>' + esc(row.service === 'sms' ? 'SMS' : 'iMessage') + '</div>';
                         const b = row.body || '';
                         card.querySelector('.email-approval-body').textContent =

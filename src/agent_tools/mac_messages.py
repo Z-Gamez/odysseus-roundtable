@@ -1,13 +1,19 @@
-"""Send a text via macOS Messages.app (iMessage / SMS), gated behind approval.
+"""Send a text on macOS (iMessage / SMS), gated behind approval.
 
 The agent NEVER sends directly. `send_imessage` STAGES the message and returns
 a pending_id; the chat renders an Approve/Decline card (static/js/chat.js,
 mirroring the email approval flow), and the buttons hit the REST endpoints in
-routes/messages_routes.py. Only an explicit Approve runs the AppleScript that
-actually delivers it — so nothing leaves the machine without the user's click.
+routes/messages_routes.py. Only an explicit Approve triggers delivery — so
+nothing leaves the machine without the user's click.
 
-macOS only: sending shells out to `osascript`. On other platforms the tool and
-the approve endpoint return a clear "macOS only" message.
+Delivery goes through the macOS **Shortcuts CLI** (`shortcuts run`) rather than
+Messages AppleScript: direct AppleScript automation is unreliable on macOS 26
+(AppleEvent timeouts, -1712). Requires a user-created shortcut named
+SHORTCUT_NAME that accepts JSON text input {"to": ..., "body": ...} and runs
+the Send Message action, which picks iMessage vs SMS on its own.
+
+macOS only: on other platforms the tool and the approve endpoint return a clear
+"macOS only" message.
 
 Contract matches the rest of agent_tools: async execute(content, ctx) -> dict.
 """
@@ -16,6 +22,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Dict, List, Optional
@@ -25,66 +32,13 @@ from src.constants import DATA_DIR
 _STORE = os.path.join(DATA_DIR, "pending_messages.json")
 _LOCK = threading.Lock()
 
+# A user-created Shortcut (Shortcuts.app) that takes JSON text input
+# {"to": ..., "body": ...} and runs the Send Message action. Delivery goes
+# through the Shortcuts CLI because direct Messages AppleScript automation is
+# unreliable on macOS 26 (AppleEvent timeouts, -1712).
+SHORTCUT_NAME = "OdysseusSendMessage"
+
 # Passing recipient + body as argv (never string-interpolated into the script)
-# makes AppleScript injection impossible. `osascript - a b` reads the script
-# from stdin and exposes a, b as `argv`. Service is chosen by type so the same
-# script covers iMessage (blue) and SMS (green, needs Text Message Forwarding).
-#
-# `account`/`participant` is the form that still works on current macOS; the
-# older `service`/`buddy` form is kept as a fallback for older systems. The
-# whole tell block is wrapped in an explicit timeout so a wedged Messages
-# surfaces as AppleScript error -1712 (which we map to a real hint) instead of
-# hanging until the subprocess is killed.
-_APPLESCRIPT = """
-on run argv
-    set theRecipient to item 1 of argv
-    set theBody to item 2 of argv
-    set theService to item 3 of argv
-    with timeout of 30 seconds
-        tell application "Messages"
-            if theService is "sms" then
-                set svcType to SMS
-            else
-                set svcType to iMessage
-            end if
-            try
-                set targetService to 1st account whose service type = svcType
-                set targetBuddy to participant theRecipient of targetService
-                send theBody to targetBuddy
-            on error
-                set targetService to 1st service whose service type = svcType
-                set targetBuddy to buddy theRecipient of targetService
-                send theBody to targetBuddy
-            end try
-        end tell
-    end timeout
-end run
-"""
-
-
-def _ensure_messages_running(timeout_s: float = 12.0) -> None:
-    """Launch Messages.app and wait until it's actually up.
-
-    Sending to a cold Messages is the main source of AppleEvent timeouts
-    (-1712): the send AppleEvent arrives while the app is still starting and
-    never gets answered. Best-effort — failures here are not fatal, the send
-    itself reports the real error."""
-    try:
-        subprocess.run(["open", "-a", "Messages"], capture_output=True, timeout=15)
-    except Exception:
-        return
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            r = subprocess.run(["pgrep", "-x", "Messages"], capture_output=True, timeout=5)
-            if r.returncode == 0:
-                time.sleep(1.0)   # let it finish wiring up its services
-                return
-        except Exception:
-            return
-        time.sleep(0.4)
-
-
 def _load() -> Dict[str, dict]:
     try:
         with open(_STORE, encoding="utf-8") as f:
@@ -141,57 +95,53 @@ def get(pid: str) -> Optional[dict]:
     return _load().get(pid)
 
 
-_AUTOMATION_HINT = (
-    "macOS blocked automation of Messages. Allow Odysseus to control Messages "
-    "under System Settings → Privacy & Security → Automation (if Odysseus "
-    "isn't listed, quit and relaunch it, then retry so macOS re-prompts)."
-)
-_TIMEOUT_HINT = (
-    "Messages didn't respond (AppleEvent timed out). Open Messages.app and "
-    "confirm it's signed in to iMessage, and that Odysseus is allowed to "
-    "control Messages under System Settings → Privacy & Security → Automation."
+_MISSING_SHORTCUT_HINT = (
+    f"Shortcut '{SHORTCUT_NAME}' not found. Create it in the Shortcuts app: "
+    f"name it exactly '{SHORTCUT_NAME}', have it accept text input, pull the "
+    "'to' and 'body' values out of the input JSON, and run the Send Message "
+    "action."
 )
 
 
-def _send_via_applescript(recipient: str, body: str, service: str) -> Optional[str]:
-    """Deliver now. Returns None on success, or a human-readable error string.
+def _send_via_shortcut(recipient: str, body: str, service: str = "") -> Optional[str]:
+    """Deliver a text via the macOS Shortcuts CLI.
 
-    The full osascript stderr is always preserved in the returned message so an
-    unmapped AppleScript error can still be diagnosed from the approval card.
+    Returns None on success, or a human-readable error string. The raw
+    shortcuts stdout/stderr is preserved so an unmapped failure can still be
+    diagnosed from the approval card.
+
+    `service` is accepted for call-site compatibility but unused: the Send
+    Message action picks iMessage vs SMS itself.
     """
     if sys.platform != "darwin":
-        return "Sending via Messages is only available on macOS."
-    _ensure_messages_running()
+        return "Sending messages is only available on macOS."
+    payload = json.dumps({"to": recipient, "body": body})
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                      encoding="utf-8")
     try:
+        tmp.write(payload)
+        tmp.close()
         proc = subprocess.run(
-            ["osascript", "-", recipient, body, service],
-            input=_APPLESCRIPT, text=True, capture_output=True,
-            # Longer than the script's own 30s timeout so AppleScript reports
-            # -1712 itself rather than us killing it with no diagnosis.
-            timeout=45,
+            ["shortcuts", "run", SHORTCUT_NAME, "--input-path", tmp.name],
+            capture_output=True, text=True, timeout=30,
         )
     except FileNotFoundError:
-        return "osascript not found — is this macOS?"
+        return "shortcuts CLI not found (macOS 12+ required)."
     except subprocess.TimeoutExpired:
-        return _TIMEOUT_HINT
-    if proc.returncode == 0:
-        return None
-
-    err = (proc.stderr or "").strip() or "AppleScript failed with no output"
-    low = err.lower()
-    # Map the known AppleScript error numbers to actionable hints, but always
-    # append the raw stderr — an unmapped failure must not become a generic
-    # "send failed" with the cause thrown away.
-    if "-1743" in err or "not authorized" in low or "assistive" in low:
-        return f"{_AUTOMATION_HINT}\n\nDetail: {err}"
-    if "-1712" in err or "timed out" in low:
-        return f"{_TIMEOUT_HINT}\n\nDetail: {err}"
-    if "-1728" in err or "can't get buddy" in low or "can't get participant" in low:
-        svc_label = "SMS" if str(service).lower() == "sms" else "iMessage"
-        return (f"Couldn't reach '{recipient}' on {svc_label}. For a "
-                "non-iMessage number, enable Text Message Forwarding on your "
-                f"iPhone and send with service='sms'.\n\nDetail: {err}")
-    return err
+        return (f"Shortcut timed out after 30s (is the {SHORTCUT_NAME} "
+                "shortcut set up, and does it run without prompting?).")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        low = err.lower()
+        if "not find" in low or "no shortcut" in low or "doesn" in low and "exist" in low:
+            return f"{_MISSING_SHORTCUT_HINT}\n\nDetail: {err}" if err else _MISSING_SHORTCUT_HINT
+        return err or "Shortcut failed with no error output."
+    return None
 
 
 def approve(pid: str) -> dict:
@@ -204,7 +154,7 @@ def approve(pid: str) -> dict:
             return {"success": True, "already": True}
         row["status"] = "sending"
         _save(d)
-    err = _send_via_applescript(row["to"], row["body"], row["service"])
+    err = _send_via_shortcut(row["to"], row["body"], row.get("service", ""))
     with _LOCK:
         d = _load()
         row = d.get(pid) or row

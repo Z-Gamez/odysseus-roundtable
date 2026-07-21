@@ -1,11 +1,15 @@
-"""macOS Messages send tool — staging + approval state machine.
+"""macOS text-send tool — staging + approval state machine.
 
 The agent stages a text (never sends); the chat's Approve/Decline card hits
-the REST endpoints, and only Approve runs the AppleScript. These tests cover
-the storage/approval logic and the injection-safe AppleScript invocation
-without touching osascript (mocked); the live send is exercised on the Mac.
+the REST endpoints, and only Approve delivers. Delivery runs the macOS
+Shortcuts CLI (`shortcuts run OdysseusSendMessage`) rather than Messages
+AppleScript, which is unreliable on macOS 26. These tests cover the storage/
+approval logic and the Shortcuts invocation with the subprocess mocked; the
+live send is exercised on the Mac.
 """
 import asyncio
+import json
+import os
 
 import pytest
 
@@ -42,7 +46,7 @@ def test_approve_sends_and_records_status(monkeypatch):
         sent["args"] = (recipient, body, service)
         return None  # success
 
-    monkeypatch.setattr(mac_messages, "_send_via_applescript", fake_send)
+    monkeypatch.setattr(mac_messages, "_send_via_shortcut", fake_send)
     pid = mac_messages.stage("+1555", "hello", "imessage", "o")
     res = mac_messages.approve(pid)
     assert res["success"] is True
@@ -51,7 +55,7 @@ def test_approve_sends_and_records_status(monkeypatch):
 
 
 def test_approve_records_failure(monkeypatch):
-    monkeypatch.setattr(mac_messages, "_send_via_applescript",
+    monkeypatch.setattr(mac_messages, "_send_via_shortcut",
                         lambda r, b, s: "Couldn't reach that number")
     pid = mac_messages.stage("+1555", "hello", "sms", "o")
     res = mac_messages.approve(pid)
@@ -60,85 +64,111 @@ def test_approve_records_failure(monkeypatch):
     assert st["status"] == "failed" and "reach" in st["error"]
 
 
-def test_applescript_invocation_is_injection_safe(monkeypatch):
-    """Recipient + body must be passed as argv, never interpolated into the
-    script — otherwise a body containing AppleScript could run."""
-    captured = {}
-
-    class _Proc:
-        returncode = 0
-        stderr = ""
-
-    def fake_run(cmd, input=None, text=None, capture_output=None, timeout=None):
-        captured["cmd"] = cmd
-        captured["script"] = input
-        return _Proc()
-
-    monkeypatch.setattr(mac_messages.subprocess, "run", fake_run)
-    monkeypatch.setattr(mac_messages.sys, "platform", "darwin")
-    err = mac_messages._send_via_applescript('"; do shell script "evil"', "body", "imessage")
-    assert err is None
-    # The malicious recipient is an argv element, not spliced into the script.
-    assert '"; do shell script "evil"' in captured["cmd"]
-    assert "do shell script" not in captured["script"]
-    assert captured["cmd"][0] == "osascript" and captured["cmd"][1] == "-"
-
-
-def _osascript_failing(monkeypatch, stderr, returncode=1):
-    """Mock osascript failing with `stderr`; neutralize the Messages pre-launch."""
-    monkeypatch.setattr(mac_messages, "_ensure_messages_running", lambda *a, **k: None)
+def _shortcuts_result(monkeypatch, returncode=0, stderr="", stdout="", capture=None):
+    """Mock the `shortcuts run` subprocess call."""
     monkeypatch.setattr(mac_messages.sys, "platform", "darwin")
 
     class _Proc:
         pass
 
     def fake_run(cmd, **kw):
+        if capture is not None:
+            capture["cmd"] = cmd
+            # Read the JSON payload back before the finally-block unlinks it.
+            try:
+                idx = cmd.index("--input-path") + 1
+                with open(cmd[idx], encoding="utf-8") as f:
+                    capture["payload"] = f.read()
+            except (ValueError, IndexError, OSError):
+                capture["payload"] = None
         p = _Proc()
         p.returncode = returncode
         p.stderr = stderr
+        p.stdout = stdout
         return p
 
     monkeypatch.setattr(mac_messages.subprocess, "run", fake_run)
 
 
-def test_timeout_1712_maps_to_actionable_hint(monkeypatch):
-    """The reported macOS 26.5.2 failure: -1712 must not become a generic error."""
-    raw = "execution error: Messages got an error: AppleEvent timed out. (-1712)"
-    _osascript_failing(monkeypatch, raw)
-    err = mac_messages._send_via_applescript("+1555", "hi", "imessage")
-    assert "didn't respond" in err
-    assert "Automation" in err
-    assert raw in err          # full stderr preserved for diagnosis
+def test_sends_json_payload_through_shortcuts_cli(monkeypatch):
+    """Recipient + body travel as a JSON input FILE — never interpolated into a
+    shell string or script, so a hostile body can't inject anything."""
+    cap = {}
+    _shortcuts_result(monkeypatch, capture=cap)
+    err = mac_messages._send_via_shortcut('"; rm -rf /', "hi there", "imessage")
+    assert err is None
+    assert cap["cmd"][:3] == ["shortcuts", "run", mac_messages.SHORTCUT_NAME]
+    assert "--input-path" in cap["cmd"]
+    assert json.loads(cap["payload"]) == {"to": '"; rm -rf /', "body": "hi there"}
 
 
-def test_not_authorized_1743_maps_to_automation_hint(monkeypatch):
-    raw = "execution error: Not authorized to send Apple events to Messages. (-1743)"
-    _osascript_failing(monkeypatch, raw)
-    err = mac_messages._send_via_applescript("+1555", "hi", "imessage")
-    assert "Privacy & Security" in err and "Automation" in err
-    assert raw in err
+def test_temp_input_file_is_cleaned_up(monkeypatch):
+    cap = {}
+    _shortcuts_result(monkeypatch, capture=cap)
+    mac_messages._send_via_shortcut("+1555", "hi", "imessage")
+    path = cap["cmd"][cap["cmd"].index("--input-path") + 1]
+    assert not os.path.exists(path), "temp JSON input left behind"
 
 
-def test_unknown_error_returns_full_stderr(monkeypatch):
-    raw = "execution error: something nobody mapped (-9999)"
-    _osascript_failing(monkeypatch, raw)
-    err = mac_messages._send_via_applescript("+1555", "hi", "imessage")
-    assert err == raw          # never swallowed into a generic message
+def test_missing_shortcut_gives_setup_hint(monkeypatch):
+    raw = "Could not find shortcut with name OdysseusSendMessage"
+    _shortcuts_result(monkeypatch, returncode=1, stderr=raw)
+    err = mac_messages._send_via_shortcut("+1555", "hi")
+    assert mac_messages.SHORTCUT_NAME in err
+    assert "Shortcuts app" in err
+    assert raw in err          # raw output preserved for diagnosis
+
+
+def test_unknown_shortcut_error_returns_raw_output(monkeypatch):
+    raw = "some unmapped shortcuts failure"
+    _shortcuts_result(monkeypatch, returncode=1, stderr=raw)
+    assert mac_messages._send_via_shortcut("+1555", "hi") == raw
+
+
+def test_falls_back_to_stdout_when_stderr_empty(monkeypatch):
+    _shortcuts_result(monkeypatch, returncode=1, stderr="", stdout="failed on stdout")
+    assert mac_messages._send_via_shortcut("+1555", "hi") == "failed on stdout"
+
+
+def test_nonzero_with_no_output_still_errors(monkeypatch):
+    _shortcuts_result(monkeypatch, returncode=1, stderr="", stdout="")
+    err = mac_messages._send_via_shortcut("+1555", "hi")
+    assert err and "no error output" in err
 
 
 def test_success_returns_none(monkeypatch):
-    _osascript_failing(monkeypatch, "", returncode=0)
-    assert mac_messages._send_via_applescript("+1555", "hi", "imessage") is None
+    _shortcuts_result(monkeypatch, returncode=0)
+    assert mac_messages._send_via_shortcut("+1555", "hi", "imessage") is None
 
 
-def test_applescript_uses_participant_form_with_timeout():
-    # The deprecated buddy/service form must only be the fallback, and the
-    # send must be bounded by an explicit AppleScript timeout.
-    s = mac_messages._APPLESCRIPT
-    assert "with timeout of 30 seconds" in s
-    assert "1st account whose service type" in s
-    assert "participant theRecipient" in s
-    assert s.index("participant theRecipient") < s.index("buddy theRecipient")
+def test_missing_cli_reports_clearly(monkeypatch):
+    monkeypatch.setattr(mac_messages.sys, "platform", "darwin")
+
+    def boom(*a, **k):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(mac_messages.subprocess, "run", boom)
+    err = mac_messages._send_via_shortcut("+1555", "hi")
+    assert "shortcuts CLI not found" in err
+
+
+def test_timeout_reports_shortcut_hint(monkeypatch):
+    monkeypatch.setattr(mac_messages.sys, "platform", "darwin")
+
+    def boom(*a, **k):
+        raise mac_messages.subprocess.TimeoutExpired(cmd="shortcuts", timeout=30)
+
+    monkeypatch.setattr(mac_messages.subprocess, "run", boom)
+    err = mac_messages._send_via_shortcut("+1555", "hi")
+    assert "timed out" in err and mac_messages.SHORTCUT_NAME in err
+
+
+def test_service_arg_still_accepted_but_optional(monkeypatch):
+    """Delivery no longer needs service (Send Message picks the transport),
+    but the arg must remain accepted so existing call sites keep working."""
+    _shortcuts_result(monkeypatch, returncode=0)
+    assert mac_messages._send_via_shortcut("+1555", "hi") is None
+    assert mac_messages._send_via_shortcut("+1555", "hi", "sms") is None
 
 
 def test_owner_matches_tolerates_unset_owner():
@@ -156,8 +186,8 @@ def test_pending_visible_when_staged_without_owner():
 
 
 def test_failed_error_persisted_for_the_card(monkeypatch):
-    raw = "execution error: Messages got an error: AppleEvent timed out. (-1712)"
-    _osascript_failing(monkeypatch, raw)
+    raw = "shortcuts: the OdysseusSendMessage shortcut reported a failure"
+    _shortcuts_result(monkeypatch, returncode=1, stderr=raw)
     pid = mac_messages.stage("+1555", "hi", "imessage", "")
     res = mac_messages.approve(pid)
     assert res["success"] is False
@@ -190,7 +220,7 @@ def test_pending_row_field_contract():
 
 
 def test_status_exposes_error_for_failed(monkeypatch):
-    _osascript_failing(monkeypatch, "execution error: boom (-1712)")
+    _shortcuts_result(monkeypatch, returncode=1, stderr="shortcut failed")
     pid = mac_messages.stage("+1555", "hi", "imessage", "o")
     mac_messages.approve(pid)
     st = mac_messages.status(pid)

@@ -15,7 +15,8 @@ import logging
 from typing import AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
-from src.llm_core import stream_llm, stream_llm_with_fallback, _is_ollama_native_url, ollama_native_tools_model
+from src.llm_core import (stream_llm, stream_llm_with_fallback, _is_ollama_native_url,
+                          ollama_native_tools_model, ollama_native_mode)
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
@@ -274,7 +275,7 @@ _DOMAIN_RULES = {
     "messaging": """\
 ## Messaging rules
 - To send a text / iMessage / SMS, use `send_imessage` (macOS only). Do NOT use shell/AppleScript directly.
-- If you only have a name, call `resolve_contact` first to get the phone number; a bare phone number can be used as-is.
+- Pass the person's NAME straight through as `to` — the Mac resolves it against macOS Contacts at send time. Never ask the user for a phone number they didn't give, and don't call `resolve_contact` first (it searches the CardDAV book / email history, not the Mac's Contacts).
 - The send is staged for the user's Approve/Decline card — do not claim the text was sent until it is approved.""",
 }
 
@@ -2550,36 +2551,26 @@ async def stream_agent_loop(
         # OpenAI's native tool-call channel unless the endpoint opts in.
         "gpt-oss",
     ))
-    # Native Ollama endpoints (/api/chat) handle tool schemas differently from
-    # the OpenAI-compat path. Models like gemma4, qwen3.5, ministral respond to
-    # tool schemas by emitting a single native tool_call token then stopping,
-    # rather than writing a fenced block — the agent loop sees 1 token and no
-    # recognised tool, so the round terminates immediately (issue #1567).
-    # Unless the endpoint is explicitly marked supports_tools=True by the user
-    # (via the endpoint settings toggle), treat Ollama-native as text-only so
-    # the fenced-block path is used instead of native function calling.
+    # Tool-call format for Ollama endpoints (native /api/chat and the /v1
+    # compat path). Native function calling used to be opt-in via the
+    # per-endpoint supports_tools toggle, because SOME local models answer a
+    # tool schema with a single native tool_call token and then stop (#1567).
+    # But the fenced fallback confuses general models (qwen3.x, llama3.2) —
+    # they never emit a valid tool block at all. Ollama itself knows which is
+    # which: /api/show reports a "tools" capability. Ask it, and only fall back
+    # to the curated/configured list when the server can't answer.
+    #
+    # Precedence: explicit endpoint flag > per-model blocklist (_model_no_tools,
+    # the force-fenced override) > server capability > curated list.
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
+    _is_ollama_endpoint = _is_ollama_native or _ollama_openai_compat
     if _endpoint_supports is True:
         _is_api_model = True
-    elif (
-        _endpoint_supports is None
-        and (_is_ollama_native or _ollama_openai_compat)
-        and not _model_no_tools
-        and ollama_native_tools_model(model)
-    ):
-        # Curated exception (see llm_core.ollama_native_tools_model): models
-        # proven to do native tool calls on Ollama default to native when the
-        # endpoint toggle was never set — a fresh install's Developer would
-        # otherwise write its tool calls as plain text.
-        _is_api_model = True
-    elif (
-        _endpoint_supports is False
-        or _model_no_tools
-        or _is_ollama_native
-        or _ollama_openai_compat
-    ):
+    elif _endpoint_supports is False or _model_no_tools:
         _is_api_model = False
+    elif _is_ollama_endpoint:
+        _is_api_model = await ollama_native_mode(endpoint_url, model)
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat

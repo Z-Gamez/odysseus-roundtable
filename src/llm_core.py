@@ -301,18 +301,99 @@ def _is_ollama_native_url(url: str) -> bool:
 
 
 def ollama_native_tools_model(model: str) -> bool:
-    """Models PROVEN to speak Ollama's native tool-call channel cleanly.
+    """Curated/configured fallback for "does this model do native tool calls?"
 
-    Most local models mishandle native schemas on Ollama (they emit a single
-    tool_call token and stop — issue #1567), so native function calling stays
-    opt-in via the per-endpoint supports_tools toggle. Ornith is the curated
-    exception — it's the dev model this fork recommends, it emits clean
-    native write_file/python calls, and the fenced fallback actively confuses
-    it (observed on a fresh macOS install: the Developer wrote its tool calls
-    into the transcript as text because the new endpoint's toggle was unset).
-    For these models an UNSET endpoint flag defaults to native, so a fresh
-    install works out of the box; an explicit False still wins."""
-    return "ornith" in (model or "").lower()
+    Only consulted when the server can't tell us (see ollama_supports_tools —
+    old Ollama, unreachable host). Users can extend it with the
+    `ollama_native_tools_model` setting (a list of model-name substrings);
+    "ornith" is built in as the model this fork recommends for agent work.
+    """
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    try:
+        from src.settings import get_setting
+        configured = get_setting("ollama_native_tools_model", []) or []
+        if isinstance(configured, str):
+            configured = [configured]
+        for name in configured:
+            n = str(name).strip().lower()
+            if n and (n == m or n in m):
+                return True
+    except Exception:
+        pass
+    return "ornith" in m
+
+
+async def ollama_native_mode(endpoint_url: str, model: str) -> bool:
+    """Should this Ollama model use NATIVE function calling (vs fenced blocks)?
+
+    Ask the server (/api/show "tools" capability) and only fall back to the
+    curated/configured list when it can't answer. Callers apply the higher
+    precedence rules first: an explicit endpoint supports_tools flag, then the
+    per-model force-fenced blocklist.
+    """
+    caps = await ollama_supports_tools(endpoint_url, model)
+    if caps is None:
+        caps = ollama_native_tools_model(model)
+        logger.info("ollama capability probe unavailable for %r — curated "
+                    "fallback says native=%s", model, caps)
+    else:
+        logger.info("ollama reports tools capability for %r: %s", model, caps)
+    return bool(caps)
+
+
+def _ollama_native_root(url: str) -> str:
+    """scheme://host:port/api for ANY Ollama URL shape.
+
+    _ollama_api_root doesn't recognise the OpenAI-compat base
+    (http://host:11434/v1) and would hand it back unchanged, which is not a
+    native API root — /api/show must be derived from the host instead.
+    """
+    p = urlparse((url or "").strip())
+    if p.scheme and p.netloc:
+        return f"{p.scheme}://{p.netloc}/api"
+    return _ollama_api_root(url)
+
+
+# (api_root, model) -> (fetched_at, result). Answers are stable per model, so a
+# long TTL keeps this off the per-turn path; unknowns retry sooner.
+_OLLAMA_CAPS_CACHE: Dict[Tuple[str, str], Tuple[float, Optional[bool]]] = {}
+_OLLAMA_CAPS_TTL = 600.0
+_OLLAMA_CAPS_TTL_UNKNOWN = 60.0
+
+
+async def ollama_supports_tools(endpoint_url: str, model: str) -> Optional[bool]:
+    """Whether Ollama reports the "tools" capability for `model` (/api/show).
+
+    True/False when the server answers, None when it can't be determined (old
+    Ollama with no `capabilities` field, host down, non-Ollama endpoint) — the
+    caller then falls back to ollama_native_tools_model(). Cached so this costs
+    one small HTTP call per model, not one per turn.
+    """
+    root = _ollama_native_root(endpoint_url)
+    name = (model or "").strip()
+    if not name or not root:
+        return None
+    key = (root, name)
+    now = time.time()
+    hit = _OLLAMA_CAPS_CACHE.get(key)
+    if hit:
+        age_limit = _OLLAMA_CAPS_TTL if hit[1] is not None else _OLLAMA_CAPS_TTL_UNKNOWN
+        if now - hit[0] < age_limit:
+            return hit[1]
+    result: Optional[bool] = None
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.post(f"{root}/show", json={"model": name})
+        if r.status_code == 200:
+            caps = r.json().get("capabilities")
+            if isinstance(caps, list):
+                result = any(str(c).strip().lower() == "tools" for c in caps)
+    except Exception as e:
+        logger.debug("ollama /api/show capability probe failed for %s: %s", name, e)
+    _OLLAMA_CAPS_CACHE[key] = (now, result)
+    return result
 
 
 def _is_ollama_openai_compat_url(url: str) -> bool:

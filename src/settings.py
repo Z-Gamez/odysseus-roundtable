@@ -206,6 +206,10 @@ DEFAULT_SETTINGS = {
         "Newsletters, marketing, automated digests, and FYI-only updates are "
         "NOT urgent."
     ),
+    # Fallback list of Ollama model-name substrings that speak NATIVE function
+    # calling, used only when Ollama's /api/show can't tell us (old Ollama, host
+    # unreachable). Normally the server's own "tools" capability decides.
+    "ollama_native_tools_model": [],
     # Browser tool backend: "chrome" drives the user's real Chrome over CDP
     # (all platforms); "safari" drives real Safari via safaridriver (macOS only,
     # needs `safaridriver --enable` + Develop → Allow Remote Automation).

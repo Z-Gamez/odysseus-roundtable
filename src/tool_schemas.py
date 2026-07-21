@@ -1098,13 +1098,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "send_imessage",
-            "description": "Text / iMessage / SMS someone — message a person by phone number or iMessage handle via the Mac's Messages app. macOS only. Use this whenever the user says text, txt, message, iMessage, or SMS a person/number. Use resolve_contact first if you only have a name; a bare phone number can be used directly. This STAGES the message and shows the user an Approve/Decline card — it is NOT sent until they approve, so do not claim it was sent. Default service is iMessage; pass service='sms' for a non-iMessage phone number (requires Text Message Forwarding set up on the user's iPhone).",
+            "description": "Text / iMessage / SMS someone — message a person via the Mac's Messages app. macOS only. Use this whenever the user says text, txt, message, iMessage, or SMS a person. You can address the message by the person's NAME (resolved via macOS Contacts); you do NOT need their phone number, so never stop to ask for one when the user gave you a name. This STAGES the message and shows the user an Approve/Decline card — it is NOT sent until they approve, so do not claim it was sent.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "to": {"type": "string", "description": "Recipient phone number (e.g. +15551234567) or iMessage email/handle"},
+                    "to": {"type": "string", "description": "Who to text. Accepts a CONTACT NAME (e.g. 'Michaela') — the Mac's Messages app resolves it against macOS Contacts automatically — OR a phone number (e.g. +15551234567) or an iMessage email/handle. Prefer the name the user said; do NOT ask for a phone number if a name was given."},
                     "body": {"type": "string", "description": "The message text to send"},
-                    "service": {"type": "string", "enum": ["imessage", "sms"], "description": "imessage (default) or sms for a non-iMessage number"},
+                    "service": {"type": "string", "enum": ["imessage", "sms"], "description": "Optional transport hint; normally omit — the Send Message action picks iMessage vs SMS automatically."},
                 },
                 "required": ["to", "body"]
             }

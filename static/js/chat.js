@@ -2346,6 +2346,67 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     });
                   }
                 }
+                // --- Messages (iMessage/SMS) approval card ---
+                // send_imessage stages a text; render Approve/Decline buttons
+                // that hit the server directly (the AppleScript send runs on
+                // Approve, never on a model follow-up). Mirrors the email card.
+                if (/pending_id='([a-f0-9]{6,})'/.test(json.output || '') &&
+                    /imessage|message/.test(json.tool || '')) {
+                  const pid = (json.output.match(/pending_id='([a-f0-9]{6,})'/) || [])[1];
+                  const chatBox = document.getElementById('chat-history');
+                  if (pid && chatBox && !document.getElementById('imsg-approve-' + pid)) {
+                    const card = document.createElement('div');
+                    card.className = 'email-approval-card';
+                    card.id = 'imsg-approve-' + pid;
+                    card.innerHTML =
+                      '<div class="email-approval-head">💬 Text awaiting your approval</div>' +
+                      '<div class="email-approval-meta">Loading…</div>' +
+                      '<pre class="email-approval-body"></pre>' +
+                      '<div class="email-approval-actions">' +
+                        '<button type="button" class="email-approve-btn">Approve &amp; send</button>' +
+                        '<button type="button" class="email-decline-btn">Decline</button>' +
+                      '</div>';
+                    chatBox.appendChild(card);
+                    uiModule.scrollHistory();
+                    fetch('/api/messages/pending', { credentials: 'same-origin' })
+                      .then(r => r.json())
+                      .then(d => {
+                        const row = (d.pending || []).find(p => p.id === pid);
+                        if (!row) return;
+                        card.querySelector('.email-approval-meta').innerHTML =
+                          '<div><span class="email-approval-k">To</span>' + esc(row.to || '') + '</div>' +
+                          '<div><span class="email-approval-k">Via</span>' + esc(row.service === 'sms' ? 'SMS' : 'iMessage') + '</div>';
+                        const b = row.body || '';
+                        card.querySelector('.email-approval-body').textContent =
+                          b.length > 700 ? b.slice(0, 700) + '…' : b;
+                      }).catch(() => {});
+                    const settle = (txt, ok) => {
+                      card.querySelector('.email-approval-actions').innerHTML =
+                        '<span class="email-approval-result ' + (ok ? 'ok' : 'no') + '">' + txt + '</span>';
+                    };
+                    card.querySelector('.email-approve-btn').addEventListener('click', (ev) => {
+                      ev.target.disabled = true;
+                      settle('✓ Approved — sending…', true);
+                      fetch('/api/messages/pending/' + pid + '/approve', { method: 'POST', credentials: 'same-origin' })
+                        .then(r => r.json())
+                        .then(d => {
+                          const span = card.querySelector('.email-approval-result');
+                          if (d.success) { span.textContent = '✓ Approved — Sent'; }
+                          else {
+                            span.textContent = '⚠ ' + (d.error || 'Send failed');
+                            span.classList.remove('ok'); span.classList.add('no');
+                          }
+                        })
+                        .catch(() => settle('⚠ Send failed (network)', false));
+                    });
+                    card.querySelector('.email-decline-btn').addEventListener('click', () => {
+                      fetch('/api/messages/pending/' + pid, { method: 'DELETE', credentials: 'same-origin' })
+                        .then(r => r.json())
+                        .then(d => settle(d.success ? '✕ Declined — not sent' : '⚠ ' + (d.error || 'Decline failed'), false))
+                        .catch(() => settle('⚠ Decline failed (network)', false));
+                    });
+                  }
+                }
                 // --- Apply UI control actions embedded in tool_output ---
                 if (json.ui_event) {
                   chatStream.handleUIControl(json);

@@ -71,6 +71,7 @@ _COMMON_TOOL_NAMES = {
     "search_chats",
     "search_hf_models",
     "send_email",
+    "send_imessage",
     "send_to_session",
     "serve_model",
     "serve_preset",

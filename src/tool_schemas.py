@@ -1097,6 +1097,22 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "send_imessage",
+            "description": "Send a text message via the Mac's Messages app (iMessage or SMS). macOS only. Use resolve_contact first if you only have a name. This STAGES the message and shows the user an Approve/Decline card — it is NOT sent until they approve, so do not claim it was sent. Default service is iMessage; pass service='sms' for a non-iMessage phone number (requires Text Message Forwarding set up on the user's iPhone).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient phone number (e.g. +15551234567) or iMessage email/handle"},
+                    "body": {"type": "string", "description": "The message text to send"},
+                    "service": {"type": "string", "enum": ["imessage", "sms"], "description": "imessage (default) or sms for a non-iMessage number"},
+                },
+                "required": ["to", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_emails",
             "description": "List emails from an account/folder, newest first. Returns subject, sender, date, UID, and account for each email. Use list_email_accounts first when the user mentions Gmail/work/a custom mailbox. For last/latest/newest email requests, use max_results=1 and unread_only=false.",
             "parameters": {

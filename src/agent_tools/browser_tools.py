@@ -13,12 +13,15 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from typing import Any, Dict, Optional
 
 from src.constants import MAX_OUTPUT_CHARS
 
 logger = logging.getLogger(__name__)
+
+_IS_MAC = sys.platform == "darwin"
 
 # Words that signal a high-stakes, hard-to-undo action. A click whose target text
 # matches these (or a real form submit) requires confirm=true.
@@ -68,8 +71,23 @@ def _port_from_url(url: str) -> int:
 # real profile is mirrored into a clone (bookmarks, cookies, logins, extensions
 # — caches excluded) and refreshed on every launch. Same machine + same
 # chrome.exe means the encrypted cookie/password stores decrypt in the copy.
-_REAL_USER_DATA = os.path.expandvars(r"%LocalAppData%\Google\Chrome\User Data")
-_CLONE_USER_DATA = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusChrome")
+if _IS_MAC:
+    _REAL_USER_DATA = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+    _CLONE_USER_DATA = os.path.expanduser("~/Library/Application Support/Google/OdysseusChrome")
+    _AUTOMATION_USER_DATA = os.path.expanduser("~/Library/Application Support/Google/OdysseusAutomation")
+    _CHROME_CANDIDATES = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    ]
+else:
+    _REAL_USER_DATA = os.path.expandvars(r"%LocalAppData%\Google\Chrome\User Data")
+    _CLONE_USER_DATA = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusChrome")
+    _AUTOMATION_USER_DATA = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusAutomation")
+    _CHROME_CANDIDATES = [
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+    ]
 _CLONE_EXCLUDE_DIRS = (
     "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache",
     "DawnGraphiteCache", "DawnWebGPUCache", "Media Cache", "Service Worker",
@@ -94,17 +112,28 @@ def _sync_profile_clone(timeout_s: int = 300) -> bool:
         return False
     seeded = os.path.exists(os.path.join(_CLONE_USER_DATA, "Local State"))
     if not seeded:
-        cmd = ["robocopy", _REAL_USER_DATA, _CLONE_USER_DATA,
-               "/E", "/R:0", "/W:0", "/MT:8", "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
-               "/XF", "lockfile", "*.tmp"]
-        cmd += ["/XD"] + list(_CLONE_EXCLUDE_DIRS)
-        try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            logger.warning("[browser] profile clone seed timed out — will resume on next launch")
-        except Exception as e:
-            logger.warning("[browser] profile clone seed failed: %s", e)
+        if _IS_MAC:
+            # No robocopy on macOS — shutil.copytree with an ignore filter for
+            # the cache dirs. dirs_exist_ok lets a timed-out seed resume.
+            def _ignore(_dir, names):
+                return [n for n in names if n in _CLONE_EXCLUDE_DIRS or n == "lockfile"]
+            try:
+                shutil.copytree(_REAL_USER_DATA, _CLONE_USER_DATA,
+                                ignore=_ignore, dirs_exist_ok=True, symlinks=True)
+            except Exception as e:
+                logger.warning("[browser] profile clone seed failed: %s", e)
+        else:
+            cmd = ["robocopy", _REAL_USER_DATA, _CLONE_USER_DATA,
+                   "/E", "/R:0", "/W:0", "/MT:8", "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
+                   "/XF", "lockfile", "*.tmp"]
+            cmd += ["/XD"] + list(_CLONE_EXCLUDE_DIRS)
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                logger.warning("[browser] profile clone seed timed out — will resume on next launch")
+            except Exception as e:
+                logger.warning("[browser] profile clone seed failed: %s", e)
     else:
         # Keep bookmarks current from the real Chrome; touch nothing else.
         for prof in ("Default",):
@@ -144,12 +173,7 @@ def _try_launch_chrome(port: int) -> bool:
 
     if _open():
         return True
-    candidates = [
-        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-    ]
-    chrome = next((c for c in candidates if os.path.exists(c)), None) or shutil.which("chrome")
+    chrome = next((c for c in _CHROME_CANDIDATES if os.path.exists(c)), None) or shutil.which("chrome")
     if not chrome:
         return False
 
@@ -163,14 +187,15 @@ def _try_launch_chrome(port: int) -> bool:
     else:
         if mode == "my-chrome":
             logger.warning("[browser] real-profile clone unavailable — falling back to automation profile")
-        profile = os.path.expandvars(r"%LocalAppData%\Google\Chrome\OdysseusAutomation")
+        profile = _AUTOMATION_USER_DATA
 
     try:
         subprocess.Popen(
             [chrome, f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
              "--start-maximized", "--new-window", "about:blank"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            creationflags=(getattr(subprocess, "DETACHED_PROCESS", 0)
+                           | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if not _IS_MAC else 0,
         )
     except Exception as e:
         logger.warning("[browser] could not launch Chrome: %s", e)
@@ -256,6 +281,7 @@ class BrowserTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.settings import get_setting
         cdp_url = get_setting("browser_cdp_url", "http://localhost:9222")
+        backend = str(get_setting("browser_backend", "chrome") or "chrome").lower()
 
         raw = (content or "").strip()
         try:
@@ -266,6 +292,24 @@ class BrowserTool:
         action = str(args.get("action") or "").strip().lower()
         if not action:
             return {"error": "browser: missing 'action'", "exit_code": 1}
+
+        if backend == "safari":
+            from src.agent_tools.safari_backend import _SAFARI, SafariUnavailable
+            async with _SAFARI.lock:
+                try:
+                    page = await asyncio.wait_for(_SAFARI.page(), timeout=45)
+                except SafariUnavailable as e:
+                    return {"error": f"browser (Safari): {e}", "exit_code": 1}
+                except Exception as e:
+                    return {"error": f"browser (Safari) could not start: {type(e).__name__}: {e}",
+                            "exit_code": 1}
+                try:
+                    return await asyncio.wait_for(self._dispatch(action, args, page, is_safari=True), timeout=60)
+                except asyncio.TimeoutError:
+                    return {"error": f"browser: action '{action}' timed out after 60s", "exit_code": 1}
+                except Exception as e:
+                    await _SAFARI.reset()  # a wedged WebDriver session poisons every later call
+                    return {"error": f"browser: {action} failed: {type(e).__name__}: {e}", "exit_code": 1}
 
         async with _SESSION.lock:
             try:
@@ -280,7 +324,7 @@ class BrowserTool:
             except Exception as e:
                 return {"error": f"browser: {action} failed: {type(e).__name__}: {e}", "exit_code": 1}
 
-    async def _dispatch(self, action: str, args: dict, page) -> dict:
+    async def _dispatch(self, action: str, args: dict, page, is_safari: bool = False) -> dict:
         if action in ("navigate", "goto", "open"):
             url = str(args.get("url") or "").strip()
             if not url:
@@ -378,6 +422,9 @@ class BrowserTool:
             return {"output": f"Screenshot saved: {path}", "exit_code": 0, "image_path": path}
 
         if action == "tabs":
+            if is_safari:
+                return {"output": "Safari backend drives a single window — multi-tab management "
+                                  "isn't available. Use 'navigate' to change pages.", "exit_code": 0}
             sub = str(args.get("op") or args.get("tab_action") or "list").lower()
             pages = [p for p in _SESSION._context.pages if not p.is_closed()]
             if sub == "list":

@@ -206,6 +206,12 @@ DEFAULT_SETTINGS = {
         "Newsletters, marketing, automated digests, and FYI-only updates are "
         "NOT urgent."
     ),
+    # Browser tool backend: "chrome" drives the user's real Chrome over CDP
+    # (all platforms); "safari" drives real Safari via safaridriver (macOS only,
+    # needs `safaridriver --enable` + Develop → Allow Remote Automation).
+    "browser_backend": "chrome",
+    "browser_profile_mode": "my-chrome",   # "my-chrome" (real profile clone) | "automation"
+    "browser_cdp_url": "http://localhost:9222",
     # Keyboard shortcuts (action: key combination)
     "keybinds": {
         "search": "ctrl+k",

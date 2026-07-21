@@ -48,6 +48,7 @@ from routes.email_helpers import (
     make_oauth_state, verify_oauth_state,
     EmailNotConfiguredError,
     _imap_connect, _imap, _decode_header, _detect_sent_folder, _detect_drafts_folder,
+    search_mail_contacts,
     _extract_attachment_text, _list_attachments_from_msg, _has_visible_attachments, _is_likely_signature_image_attachment,
     _extract_attachment_to_disk, _extract_html, _extract_text,
     _fetch_sender_thread_context, _pre_retrieve_context,
@@ -2446,50 +2447,14 @@ def setup_email_routes():
 
     @router.get("/resolve-contact")
     async def resolve_contact(name: str = Query(..., description="Name to search for"), owner: str = Depends(require_owner)):
-        """Search Sent folder for a contact by name. Returns matching email addresses."""
+        """Search Sent folder for a contact by name. Returns matching email addresses.
+
+        The search itself lives in email_helpers.search_mail_contacts so the
+        agent's resolve_contact tool can run it IN-PROCESS — a server-side HTTP
+        call here carries no session cookie and is correctly rejected."""
         try:
-            with _imap(owner=owner) as conn:
-                matches = {}
-                for folder in ["Sent", "INBOX", "Drafts"]:
-                    try:
-                        st, _ = conn.select(_q(folder), readonly=True)
-                        if st != "OK":
-                            continue
-                        st, data = conn.search(None, "ALL")
-                        if st != "OK" or not data[0]:
-                            continue
-                        uids = data[0].split()[-200:]
-                        for uid in reversed(uids):
-                            try:
-                                st2, msg_data = conn.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM TO CC)])")
-                                if st2 != "OK":
-                                    continue
-                                raw = msg_data[0][1] if msg_data[0] and len(msg_data[0]) > 1 else b""
-                                hdr = email_mod.message_from_bytes(raw)
-                                for field in ["From", "To", "Cc"]:
-                                    val = _decode_header(hdr.get(field, ""))
-                                    if not val:
-                                        continue
-                                    for part in val.split(","):
-                                        part = part.strip()
-                                        if name.lower() in part.lower():
-                                            addr_match = re.search(r'<([^>]+)>', part)
-                                            addr = addr_match.group(1) if addr_match else part
-                                            addr = addr.strip().lower()
-                                            if addr and "@" in addr:
-                                                display = part.split("<")[0].strip().strip('"') or addr
-                                                if addr not in matches:
-                                                    matches[addr] = display
-                            except Exception:
-                                continue
-                    except Exception:
-                        continue
-                    if len(matches) >= 10:
-                        break
-                results = [{"email": addr, "name": display} for addr, display in matches.items()]
-                return {"contacts": results[:10], "query": name}
-        except Exception as e:
-            logger.error(f"resolve_contact {name!r} failed: {e}")
+            return {"contacts": search_mail_contacts(name, owner=owner), "query": name}
+        except Exception:
             return {"contacts": [], "error": "Mail operation failed"}
 
     @router.post("/send")

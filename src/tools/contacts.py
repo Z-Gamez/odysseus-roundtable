@@ -12,9 +12,12 @@ from src.tools._common import _parse_tool_args
 
 
 async def do_resolve_contact(content: str, owner: Optional[str] = None) -> Dict:
-    """Look up a contact by name. Searches: CardDAV -> email history -> memory."""
-    import httpx
-    from src.tool_implementations import _INTERNAL_BASE  # shared constant, still lives in the facade
+    """Look up a contact by name. Searches CardDAV, then email history.
+
+    Both lookups run IN-PROCESS. Neither goes over HTTP: a server-side request
+    to Odysseus's own API carries no session cookie and is correctly rejected
+    by the auth dependency, which silently produced zero results.
+    """
     try:
         args = _parse_tool_args(content)
     except ValueError:
@@ -53,17 +56,21 @@ async def do_resolve_contact(content: str, owner: Optional[str] = None) -> Dict:
     except Exception:
         pass
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        # 2. Email history (sent/received)
-        try:
-            resp = await client.get(f"{_INTERNAL_BASE}/api/email/resolve-contact", params={"name": name})
-            if resp.status_code == 200:
-                for c in (resp.json().get("contacts") or []):
-                    email = (c.get("email") or "").strip().lower()
-                    if email and email not in contacts:
-                        contacts[email] = {"name": c.get("name") or email, "source": "email history"}
-        except Exception:
-            pass
+    # 2. Email history (sent/received) — call in-process for the same reason as
+    # the CardDAV step above: a server-side httpx GET to
+    # /api/email/resolve-contact carries no session cookie, so it was rejected
+    # (403) and the agent silently saw zero email-history contacts. The IMAP
+    # helpers are sync, so run them off the event loop.
+    try:
+        import asyncio
+        from routes.email_helpers import search_mail_contacts
+        found = await asyncio.to_thread(search_mail_contacts, name, owner or "")
+        for c in (found or []):
+            email = (c.get("email") or "").strip().lower()
+            if email and email not in contacts:
+                contacts[email] = {"name": c.get("name") or email, "source": "email history"}
+    except Exception:
+        pass
 
     if not contacts:
         return {"output": f"No contacts found matching '{name}'.", "exit_code": 0}

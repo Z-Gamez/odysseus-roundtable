@@ -327,6 +327,60 @@ def require_owner(request: Request, account_id: str | None = Query(None)) -> str
     return owner
 
 
+def search_mail_contacts(name: str, owner: str = "", limit: int = 10) -> list:
+    """Find contacts matching `name` in the mailbox's Sent/INBOX/Drafts headers.
+
+    Shared by the /api/email/resolve-contact route and the agent's
+    resolve_contact tool. The tool calls this IN-PROCESS: a server-side httpx
+    request to the route carries no session cookie, so it was rejected (403)
+    and the agent silently saw zero email-history contacts. Same in-process
+    pattern already used for the CardDAV lookup and manage_contact — the fix
+    is to skip HTTP, never to weaken the route's auth.
+    """
+    matches: dict = {}
+    try:
+        with _imap(owner=owner) as conn:
+            for folder in ("Sent", "INBOX", "Drafts"):
+                try:
+                    st, _ = conn.select(_q(folder), readonly=True)
+                    if st != "OK":
+                        continue
+                    st, data = conn.search(None, "ALL")
+                    if st != "OK" or not data[0]:
+                        continue
+                    uids = data[0].split()[-200:]
+                    for uid in reversed(uids):
+                        try:
+                            st2, msg_data = conn.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM TO CC)])")
+                            if st2 != "OK":
+                                continue
+                            raw = msg_data[0][1] if msg_data[0] and len(msg_data[0]) > 1 else b""
+                            hdr = email_mod.message_from_bytes(raw)
+                            for field in ("From", "To", "Cc"):
+                                val = _decode_header(hdr.get(field, ""))
+                                if not val:
+                                    continue
+                                for part in val.split(","):
+                                    part = part.strip()
+                                    if name.lower() in part.lower():
+                                        addr_match = re.search(r"<([^>]+)>", part)
+                                        addr = addr_match.group(1) if addr_match else part
+                                        addr = addr.strip().lower()
+                                        if addr and "@" in addr:
+                                            display = part.split("<")[0].strip().strip('"') or addr
+                                            matches.setdefault(addr, display)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+                if len(matches) >= limit:
+                    break
+    except Exception as e:
+        logger.error(f"search_mail_contacts {name!r} failed: {e}")
+        raise
+    return [{"email": a, "name": d} for a, d in list(matches.items())[:limit]]
+
+
 def require_user(request: Request) -> str:
     """Auth-only dependency for routes where `account_id` is a path param
     or absent. Avoids `require_owner`'s Query collision with path params."""

@@ -78,6 +78,13 @@ def start_background():
     we launched it, else None (already running from a previous session)."""
     _run_helper(os.path.join("scripts", "launch-ollama.ps1"))
     _run_helper(os.path.join("scripts", "launch-chromadb.ps1"))
+    # Optional llama.cpp server (off unless llamacpp_enabled + a model path).
+    # Plain Python rather than a .ps1 helper so macOS can call the same code.
+    try:
+        from src.llamacpp_launcher import start_if_configured
+        start_if_configured()
+    except Exception:
+        pass
     proc = None
     if not _server_up():
         if _FROZEN:

@@ -513,9 +513,16 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
 
         # Secrets/credentials the agent must NOT write: kept read-only (masked)
         # so API keys never flow through chat. User sets these in the panel.
+        #
+        # llamacpp_binary / llamacpp_extra_args are here for a different reason:
+        # the launcher EXECUTES them at next app start, so letting the agent
+        # write them would turn a settings write into arbitrary code execution
+        # — a way around a deliberately disabled bash/python. The human sets the
+        # executable; the agent may still toggle llamacpp_enabled/model/port.
         _SECRET_KEYS = {
             "brave_api_key", "google_pse_key", "google_pse_cx",
             "tavily_api_key", "serper_api_key", "app_public_url",
+            "llamacpp_binary", "llamacpp_extra_args",
         }
         def _is_secret(k):
             # `token` must be a suffix, not a substring: otherwise the int

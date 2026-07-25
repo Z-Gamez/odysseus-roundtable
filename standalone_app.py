@@ -193,6 +193,13 @@ def _mac_window() -> None:
     port, must_spawn = _choose_server_port(want)
     url = f"http://127.0.0.1:{port}"
 
+    # Optional llama.cpp server (off unless llamacpp_enabled + a model path).
+    try:
+        from src.llamacpp_launcher import start_if_configured
+        start_if_configured()
+    except Exception:
+        pass
+
     if must_spawn:
         # Keep the server child's output — it is the only way to see a
         # traceback behind an in-app HTTP 500 when launched from Finder.

@@ -201,6 +201,17 @@ DEFAULT_SETTINGS = {
     # calling, used only when Ollama's /api/show can't tell us (old Ollama, host
     # unreachable). Normally the server's own "tools" capability decides.
     "ollama_native_tools_model": [],
+    # Optional llama.cpp (llama-server) started alongside Odysseus. OFF by
+    # default and inert until llamacpp_model points at a GGUF — nobody should
+    # get an inference server they didn't ask for. Binary is auto-located
+    # (PATH, then the usual install dirs) unless llamacpp_binary is set.
+    "llamacpp_enabled": False,
+    "llamacpp_binary": "",
+    "llamacpp_model": "",
+    "llamacpp_port": 8080,
+    "llamacpp_ctx": 8192,
+    "llamacpp_ngl": 99,
+    "llamacpp_extra_args": "",
     # Browser tool backend: "chrome" drives the user's real Chrome over CDP
     # (all platforms); "safari" drives real Safari via safaridriver (macOS only,
     # needs `safaridriver --enable` + Develop → Allow Remote Automation).

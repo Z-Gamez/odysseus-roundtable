@@ -363,6 +363,25 @@ async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
     return result
 
 
+async def probe_supports_tools(endpoint_url: str, model: str = "") -> Optional[bool]:
+    """Ask the server whether it does native tool calls. None = it didn't say.
+
+    Same two probes as local_native_mode but WITHOUT the curated-list fallback,
+    so callers can tell "the server said no" apart from "nobody answered". That
+    distinction is the whole point at endpoint-creation time: persisting a
+    guess as though it were a measurement is worse than leaving it null.
+
+    Deliberately not gated on the localhost heuristic. A llama-server or Ollama
+    on a LAN box, a Tailscale host, or a remapped container port is exactly the
+    case the heuristic misses, and it is the case that silently degraded to
+    fenced blocks.
+    """
+    caps = await ollama_supports_tools(endpoint_url, model) if model else None
+    if caps is not None:
+        return caps
+    return await llamacpp_supports_tools(endpoint_url)
+
+
 async def local_native_mode(endpoint_url: str, model: str) -> bool:
     """Should this LOCAL model use NATIVE function calling (vs fenced blocks)?
 

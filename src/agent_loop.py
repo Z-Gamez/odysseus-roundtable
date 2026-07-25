@@ -16,7 +16,8 @@ from typing import AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
 from src.llm_core import (stream_llm, stream_llm_with_fallback, _is_ollama_native_url,
-                          ollama_native_tools_model, local_native_mode)
+                          ollama_native_tools_model, local_native_mode,
+                          probe_supports_tools)
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
@@ -658,6 +659,11 @@ _cached_base_prompt_key = None
 # to copy fenced-block examples from prompt text. Smaller models — DeepSeek
 # especially — often fail to follow the fenced-block convention and emit raw
 # JSON, which the agent then can't parse as a tool call.
+# (endpoint_url, model) pairs already warned about a fenced-block downgrade.
+# Process-lifetime only — a restart re-warns, which is what you want after
+# changing an endpoint's supports_tools flag.
+_FENCED_DOWNGRADE_WARNED: set = set()
+
 _API_HOSTS = frozenset([
     "api.openai.com", "api.anthropic.com",
     "openrouter.ai", "api.groq.com",
@@ -2631,6 +2637,19 @@ async def stream_agent_loop(
         _is_api_model = await local_native_mode(endpoint_url, model)
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
+        if not _is_api_model:
+            # Neither a known cloud host nor a name on the curated list. The
+            # branch above only fires for endpoints the LOCALHOST heuristic
+            # recognises, so a self-hosted llama.cpp/Ollama on a LAN box,
+            # Tailscale host, or remapped container port lands here and would
+            # be downgraded to fenced blocks on a name mismatch alone. Ask the
+            # server directly before believing that. Cheap: 3s timeout, cached
+            # per host, and only on the path that was about to degrade anyway.
+            _probed = await probe_supports_tools(endpoint_url, model)
+            if _probed is not None:
+                logger.info("remote endpoint %s reports tools capability: %s",
+                            endpoint_url, _probed)
+                _is_api_model = _probed
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
     messages, mcp_schemas = _build_system_prompt(
         messages, model, active_document, mcp_mgr, disabled_tools,
@@ -2953,6 +2972,30 @@ async def stream_agent_loop(
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
+        # The turn needs tools but none were sent as schemas — the agent is in
+        # fenced-block mode and will DESCRIBE tool calls in prose rather than
+        # emit them. That is a legitimate mode, so this is not an error; it is
+        # loud because when it is NOT intended the only symptom is an agent
+        # that narrates work it never did (a Round Table Developer once spent
+        # 767s emitting 128 fenced blocks and executing nothing).
+        #
+        # Deduped per (endpoint, model): the condition holds for every round of
+        # an affected conversation, and a warning repeated 128 times is just
+        # more of the noise it is trying to cut through.
+        if _relevant_tools and not _tool_names_sent and not _is_api_model:
+            _warn_key = (endpoint_url, model)
+            if _warn_key not in _FENCED_DOWNGRADE_WARNED:
+                _FENCED_DOWNGRADE_WARNED.add(_warn_key)
+                logger.warning(
+                    "[agent] %s on %s is in FENCED-BLOCK mode: %d relevant tools "
+                    "(%s) but 0 tool schemas sent. If this model does support "
+                    "native tool calls, the endpoint's supports_tools flag is "
+                    "wrong or unprobed — set it to true, or check that the "
+                    "server answers /api/show (Ollama) or /props (llama.cpp). "
+                    "Left as-is the model will narrate tool use instead of "
+                    "performing it.",
+                    model, endpoint_url, len(_relevant_tools),
+                    ", ".join(sorted(_relevant_tools)[:8]))
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
         # only switches on a pre-content failure, so streamed output is never

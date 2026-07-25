@@ -38,6 +38,19 @@ DEFAULT_SETTINGS = {
     # recipients without confirmation.
     "agent_email_confirm": True,
     "image_gen_enabled": False,
+    # Fast mode (toggled from the chat bar): when True, append the /no_think soft-switch
+    # to the latest user turn for ALL models, so reasoning models (Qwen3, etc.) skip
+    # their thinking step and act directly — less overthinking/looping on tool-use and
+    # browsing. Harmless no-op for models that don't recognise the switch.
+    "fast_mode": False,
+    # Local (Ollama) performance: cap the context window Odysseus asks Ollama to
+    # allocate. A model's full window (often 128K) makes Ollama allocate a giant KV
+    # cache that spills out of VRAM and forces a model reload - far slower than the
+    # Ollama app's 2048 default. 0 = no cap (use the model's full advertised window).
+    "ollama_num_ctx": 16384,
+    # Keep the model resident between requests so it doesn't unload + reload (Ollama
+    # default is "5m"). "-1" keeps it loaded until Ollama restarts; "" uses the default.
+    "ollama_keep_alive": "30m",
     "image_model": "",
     "image_quality": "medium",
     "vision_model": "",
@@ -186,6 +199,27 @@ DEFAULT_SETTINGS = {
         "Newsletters, marketing, automated digests, and FYI-only updates are "
         "NOT urgent."
     ),
+    # Fallback list of Ollama model-name substrings that speak NATIVE function
+    # calling, used only when Ollama's /api/show can't tell us (old Ollama, host
+    # unreachable). Normally the server's own "tools" capability decides.
+    "ollama_native_tools_model": [],
+    # Optional llama.cpp (llama-server) started alongside Odysseus. OFF by
+    # default and inert until llamacpp_model points at a GGUF — nobody should
+    # get an inference server they didn't ask for. Binary is auto-located
+    # (PATH, then the usual install dirs) unless llamacpp_binary is set.
+    "llamacpp_enabled": False,
+    "llamacpp_binary": "",
+    "llamacpp_model": "",
+    "llamacpp_port": 8080,
+    "llamacpp_ctx": 8192,
+    "llamacpp_ngl": 99,
+    "llamacpp_extra_args": "",
+    # Browser tool backend: "chrome" drives the user's real Chrome over CDP
+    # (all platforms); "safari" drives real Safari via safaridriver (macOS only,
+    # needs `safaridriver --enable` + Develop → Allow Remote Automation).
+    "browser_backend": "chrome",
+    "browser_profile_mode": "my-chrome",   # "my-chrome" (real profile clone) | "automation"
+    "browser_cdp_url": "http://localhost:9222",
     # Keyboard shortcuts (action: key combination)
     "keybinds": {
         "search": "ctrl+k",

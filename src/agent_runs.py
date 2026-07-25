@@ -205,9 +205,37 @@ async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
 
 
 def stop(session_id: str) -> bool:
-    """Cancel an in-flight run (the wrapped generator saves its partial)."""
+    """Cancel an in-flight run (the wrapped generator saves its partial).
+
+    cancel() only takes effect if the drain task actually unwinds — a task
+    wedged in an await that never resumes (e.g. an LLM request a crashed
+    Ollama accepted but will never answer, under system-wide memory thrash)
+    leaves status "running" and every subscriber spinning on "stopping..."
+    forever. A watchdog forces the bookkeeping terminal after 15s so the UI
+    and status polls always recover, even if the task itself stays stuck."""
     run = _RUNS.get(session_id)
     if run and run.task and not run.task.done():
         run.task.cancel()
+
+        async def _force_terminal(run_ref: _Run, task: asyncio.Task) -> None:
+            try:
+                await asyncio.wait({task}, timeout=15)
+            except Exception:
+                pass
+            if not task.done():
+                logger.warning(
+                    "[agent-run] %s did not unwind 15s after cancel — forcing "
+                    "terminal state (task remains wedged until restart)",
+                    session_id,
+                )
+                run_ref.status = "stopped"
+                for q in list(run_ref.subscribers):
+                    try:
+                        q.put_nowait((None, None))
+                    except Exception:
+                        pass
+                _schedule_evict(session_id)
+
+        asyncio.get_running_loop().create_task(_force_terminal(run, run.task))
         return True
     return False

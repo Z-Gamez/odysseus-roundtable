@@ -34,3 +34,15 @@ PyMuPDF
 # [all]/Azure/audio extras (cloud + heavy). Pinned to a release >30 days old per
 # the dependency-age discussion in issue #485.
 markitdown[docx,pptx,xlsx,xls]==0.1.6
+
+# Browser harness — lets the `browser` tool drive the user's real Chrome over the
+# DevTools protocol (CDP) from chat. Lazy-imported in src/agent_tools/browser_tools.py,
+# so the app runs fine without it (the tool returns an install hint on first use).
+# CDP-attach does NOT need `playwright install` browser binaries — it connects to a
+# Chrome started with --remote-debugging-port (see scripts/launch-chrome-debug.ps1).
+playwright
+
+# Standalone desktop app window — pywebview renders Odysseus in a native window
+# (Windows: built-in WebView2) instead of a browser tab. Used by launch-app.ps1 /
+# app_window.py, which fall back to Edge/Chrome app-mode if this isn't installed.
+pywebview

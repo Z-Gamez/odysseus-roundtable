@@ -112,9 +112,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             # Migrating to nonce-only requires templating the HTML files +
             # auditing every JS-set style attribute. Since inline styles
             # don't execute script, the residual risk is visual-only.
+            #
+            # macOS desktop app: pywebview's WKWebView bridge (window.pywebview,
+            # js_api, evaluate_js) runs its injected code IN the page context,
+            # where it calls eval() — the strict policy kills the whole bridge
+            # (no window controls, no host API; observed via the CI window
+            # probe). WebView2 on Windows injects outside the page CSP, so only
+            # the Mac window needs this. Scope the relaxation to requests that
+            # are BOTH loopback AND self-identify as the desktop shell via its
+            # custom user agent — real browsers never send that UA, and remote
+            # clients can't be loopback, so the browser-facing policy is
+            # unchanged.
+            _ua = request.headers.get("user-agent", "")
+            _host = request.client.host if request.client else ""
+            _desktop_eval = (
+                " 'unsafe-eval'"
+                if "OdysseusDesktop" in _ua and _host in ("127.0.0.1", "::1")
+                else ""
+            )
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
-                f"script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; "
+                f"script-src 'self' 'nonce-{nonce}'{_desktop_eval} https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
                 "font-src 'self' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: blob: https:; "

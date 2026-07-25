@@ -12,13 +12,19 @@ import json
 import re
 import time
 import logging
-from typing import AsyncGenerator, List, Dict, Optional, Set
+# `Any` is used in module-level annotations below (dict[str, Any]). Upstream
+# uses it without importing it, which is a latent NameError on Python < 3.14 —
+# annotations are still evaluated eagerly there. Import it so this file loads.
+from typing import Any, AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
 from src.llm_core import (
     stream_llm,
     stream_llm_with_fallback,
     _is_ollama_native_url,
+    ollama_native_tools_model,
+    local_native_mode,
+    probe_supports_tools,
 )
 from src.model_context import estimate_tokens
 from src.settings import get_setting
@@ -495,12 +501,22 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "messaging": """\
+## Messaging rules
+- To send a text / iMessage / SMS, use `send_imessage` (macOS only). Do NOT use shell/AppleScript directly.
+- Pass the person's NAME straight through as `to` — the Mac resolves it against macOS Contacts at send time. Never ask the user for a phone number they didn't give, and don't call `resolve_contact` first (it searches the CardDAV book / email history, not the Mac's Contacts).
+- The send is staged for the user's Approve/Decline card — do not claim the text was sent until it is approved.""",
+    "open_url": """\
+## Open-a-page rules
+- "Open Safari and go to X", "navigate to X", "open X", "pull up X" = just open the page in the user's OWN browser: use `open_in_safari` with the URL. On macOS it opens their real Safari (their logins, cookies, bookmarks).
+- Do NOT use the `browser` tool for that — its Safari session is logged-out and isolated, so the page would appear signed out. Only use `browser` when YOU need to click/read/fill the page yourself (and note Safari automation is logged out; logged-in automation needs Chrome).
+- Don't `open_panel`/`ui_control` for a website — that's for Odysseus's own UI panels, not web pages.""",
 }
 
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
-    "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
+    "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "approve_pending_email", "cancel_pending_email", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
@@ -509,6 +525,8 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
+    "messaging": {"send_imessage", "read_imessages", "resolve_contact", "manage_contact"},
+    "open_url": {"open_in_safari", "browser"},
 }
 
 _WORKSPACE_TERMINUS_TOOLS = (
@@ -569,6 +587,16 @@ Use this instead of `bash`, `curl`, `python`, `requests`, or scraping code for w
 <url or domain>
 ```
 Fetch and read the text content of a SPECIFIC URL the user names (e.g. "check example.com", "what does this page say <url>"). A bare domain like `example.com` works (defaults to https). Use this when you already have a concrete URL. For open-ended lookups use `web_search`, and for "research X" jobs use `trigger_research`.""",
+
+    "browser": """\
+```browser
+{"action": "navigate", "url": "youtube.com"}
+```
+Control the user's REAL web browser (their Chrome, with their logins and tabs) to DO things on websites — not just read them. One tool, many actions via the `action` field. Typical flow: `navigate` to a page, then `snapshot` (lists clickable elements with refs like e5), then `click`/`type` by ref, then `read` the page text.
+Actions: navigate {"action":"navigate","url":"..."}, snapshot, read, click {"action":"click","ref":"e5"}, type {"action":"type","ref":"e3","text":"hello"}, key {"action":"key","key":"Enter"}, scroll {"action":"scroll","direction":"down"}, back, forward, screenshot, tabs {"action":"tabs","op":"new","url":"..."} (or op:list/select), wait.
+Use this for INTERACTIVE web tasks (open a tab, log in, fill a form, click through a flow, add to cart) — for read-only lookups prefer `web_search`/`web_fetch`.
+HIGH-STAKES actions (submitting a form, buying/paying/checkout, sending, deleting, or pressing Enter in a form) require "confirm": true — FIRST ask the user to confirm, THEN re-call the same action with "confirm": true. If the tool can't connect it returns instructions for starting Chrome with remote debugging.
+ACT DECISIVELY: when asked to do something in the browser, CALL this tool immediately — do not deliberate at length about whether to. As soon as the requested action has SUCCEEDED you are DONE: reply with a one-line confirmation of what you did and STOP. Do NOT keep calling tools, re-snapshotting, or re-planning after the task is complete.""",
 
     "read_file": """\
 ```read_file
@@ -876,6 +904,19 @@ _cached_base_prompt_key = None
 # to copy fenced-block examples from prompt text. Smaller models — DeepSeek
 # especially — often fail to follow the fenced-block convention and emit raw
 # JSON, which the agent then can't parse as a tool call.
+# How many times a turn may nudge a model that announced a tool action without
+# emitting the call. Long tool-heavy dev turns stall several times spread across
+# the turn (observed: a 28-round turn that burned 3 nudges and then stalled
+# again), and each nudge costs one cheap round out of up to 160 — so this sits
+# above upstream's 2. Module-level so tests assert against the real cap instead
+# of a hard-coded number that silently stops exercising the guard when retuned.
+_MAX_INTENT_NUDGES = 5
+
+# (endpoint_url, model) pairs already warned about a fenced-block downgrade.
+# Process-lifetime only — a restart re-warns, which is what you want after
+# changing an endpoint's supports_tools flag.
+_FENCED_DOWNGRADE_WARNED: set = set()
+
 _API_HOSTS = frozenset([
     "api.openai.com", "api.anthropic.com",
     "openrouter.ai", "api.groq.com",
@@ -910,6 +951,38 @@ def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
         return False
     path = (parsed.path or "").rstrip("/")
     return parsed.port == 11434 and (path == "/v1" or path.startswith("/v1/"))
+
+
+_OLLAMA_NUMCTX_CACHE: Dict[str, int] = {}
+
+
+def _ollama_served_num_ctx(endpoint_url: str, model: str) -> int:
+    """The num_ctx Ollama will actually serve this model with (its Modelfile
+    ``PARAMETER num_ctx``), or 0 when unset/unknown.
+
+    The /v1 endpoint ignores per-request options, so the Modelfile value IS the
+    enforced window. Budgeting off anything larger lets Ollama silently
+    truncate the prompt server-side — dropping the OLDEST turns (the task!)
+    while keeping the tail. Observed: a Dev mid-run greeting "ready for your
+    request" because only the datetime/workspace context survived truncation."""
+    key = (endpoint_url or "") + "|" + (model or "")
+    if key in _OLLAMA_NUMCTX_CACHE:
+        return _OLLAMA_NUMCTX_CACHE[key]
+    val = 0
+    try:
+        import httpx
+        parts = urlparse(endpoint_url or "")
+        base = (parts.scheme or "http") + "://" + (parts.netloc or "localhost:11434")
+        r = httpx.post(base + "/api/show", json={"model": model}, timeout=4)
+        if r.status_code == 200:
+            params = (r.json() or {}).get("parameters") or ""
+            m = re.search(r"(?m)^num_ctx\s+(\d+)", params)
+            if m:
+                val = int(m.group(1))
+    except Exception:
+        val = 0
+    _OLLAMA_NUMCTX_CACHE[key] = val
+    return val
 
 
 def _is_local_openai_compat_url(endpoint_url: str) -> bool:
@@ -1272,19 +1345,58 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
-def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
+def _named_registered_tools(text: str, tool_names) -> Set[str]:
+    """Registered tool names the user explicitly typed in `text`.
+
+    Word-boundary matched so short names ("ls") don't fire inside other words
+    ("false"), and underscores are word chars so "send_imessage" only matches
+    the whole token. Empty when no tool registry was passed."""
+    if not tool_names or not text:
+        return set()
+    low = text.lower()
+    hits = set()
+    for name in tool_names:
+        n = str(name or "").lower()
+        if not n:
+            continue
+        if re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])", low):
+            hits.add(str(name))
+    return hits
+
+
+def _classify_agent_request(messages: List[Dict], last_user: str,
+                            tool_names=None) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
     Normal chat should not inherit old Cookbook/email/document context. Recent
     context is used only for explicit continuations ("yes", "do it", "1").
     This function does not inject tools directly; selected tools later decide
     which domain rule packs get appended to the system prompt.
+
+    `tool_names` is the set of registered tool names (built-in + custom/MCP);
+    when the user names one explicitly, the turn is forced onto the tool path
+    regardless of the domain regexes — otherwise a request like "use the
+    send_imessage tool ..." matches no built-in domain, reads as low-signal,
+    and skips the tool loop entirely (#imsg-routing).
     """
     text = str(last_user or "").strip()
     retry_continuation = _is_contextual_retry_continuation(messages, text)
     continuation = _is_explicit_continuation(text) or _assistant_requested_followup(messages) or retry_continuation
     retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
     q = retrieval_query.lower()
+
+    # An explicitly named tool wins over every other signal — including the
+    # casual/low-signal early return below — so "using the tool called X"
+    # always reaches the tool loop.
+    named = _named_registered_tools(text, tool_names)
+    if named:
+        return {
+            "low_signal": False,
+            "continuation": continuation,
+            "domains": {"explicit-tool"},
+            "retrieval_query": retrieval_query,
+            "force_tools": named,
+        }
 
     if not text or bool(_LOW_SIGNAL_RE.match(text)) or _is_casual_low_signal(text):
         return {
@@ -1303,6 +1415,11 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("cookbook")
     if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
         domains.add("email")
+    # Texting via the Mac Messages app. Fires on the verbs/nouns the email
+    # regex misses (text/iMessage/SMS/the tool name) and on a bare 10+ digit
+    # phone number — a common "text 5551234567 ..." shape (#imsg-routing).
+    if has(r"\b(imessage|i-?messages?|texts?|txt|sms|send_imessage)\b", r"\btext\s+\w", r"\b\d{10,}\b"):
+        domains.add("messaging")
     if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
         domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
@@ -1330,6 +1447,13 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("web")
     if has(r"\b(open|show|toggle|turn on|turn off|disable|enable|switch model|change model|settings|theme|panel)\b"):
         domains.add("ui")
+    # Open a web page in the user's own browser (open_in_safari), distinct from
+    # the UI-panel "open" above and from read-only web lookups. Fires on Safari
+    # mentions, "navigate to X", and open/go-to/pull-up + a URL-ish target.
+    if has(r"\bsafari\b",
+           r"\bnavigate to\b",
+           r"\b(?:open|go ?to|goto|pull up|visit|launch)\b[^.\n]*(?:https?://|www\.|\b[\w-]+\.(?:com|org|net|io|dev|gov|edu|co|app|ai)\b)"):
+        domains.add("open_url")
     if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash)\b"):
@@ -2922,6 +3046,10 @@ _VERIFIER_EFFECTFUL_TOOLS = {
     "create_document", "update_document", "edit_document",
     "bash", "python", "write_file",
 }
+
+# Read-only tools whose EXACT repeat within one turn returns the same result —
+# eligible for the duplicate-call short-circuit in the execution loop.
+_READONLY_DEDUPE_TOOLS = {"read_file", "grep", "glob", "ls", "get_workspace"}
 _VERIFIER_MAX_ROUNDS = 2  # cap re-verify cycles per turn — never loop forever
 
 
@@ -3076,6 +3204,43 @@ def _detect_runaway_call(call_freq, threshold=15):
     return sig.split(":", 1)[0] if sig else None
 
 
+async def _guard_first_event(agen, first_timeout: float):
+    """Bound the wait for the FIRST event of an LLM stream.
+
+    A crashed/reloading local endpoint (Ollama after std::bad_alloc) can accept
+    the request and then never send a byte. The per-read inactivity timeout may
+    be an hour for SAW runs, so without this a dead runner pins the round — and
+    the whole pipeline — for that entire window (observed 2026-07-03: round 95
+    hung on a bad_alloc'd runner until the server had to be killed). Once the
+    first event arrives, the normal inactivity timeout governs. On timeout the
+    silence is converted into a crash-shaped error event ("first-token
+    watchdog") so the runner-crash backoff/retry handles it like any other
+    runner death instead of losing the run."""
+    first = True
+    while True:
+        try:
+            if first:
+                item = await asyncio.wait_for(agen.__anext__(), timeout=first_timeout)
+            else:
+                item = await agen.__anext__()
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            try:
+                await agen.aclose()
+            except Exception:
+                pass
+            yield ("event: error\ndata: " + json.dumps({
+                "status": 503,
+                "text": (f"no first token from model endpoint within "
+                         f"{int(first_timeout)}s (first-token watchdog) — "
+                         f"endpoint likely crashed or is reloading"),
+            }) + "\n\n")
+            return
+        first = False
+        yield item
+
+
 async def stream_agent_loop(
     endpoint_url: str,
     model: str,
@@ -3102,6 +3267,8 @@ async def stream_agent_loop(
     uploaded_files: Optional[List[Dict]] = None,
     workload: str = "foreground",
     _is_teacher_run: bool = False,
+    stream_timeout: Optional[int] = None,
+    autonomous: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -3151,9 +3318,27 @@ async def stream_agent_loop(
         except (TypeError, ValueError):
             temperature = 0.2
     _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
-    _intent = _classify_agent_request(messages, _last_user)
+    # The registered tool universe (built-in + custom/MCP) lets the classifier
+    # honor an explicitly named tool. Cheap + best-effort — never block routing.
+    _registered_tool_names: Set[str] = set()
+    try:
+        from src.tool_policy import known_tool_names as _ktn
+        _registered_tool_names |= set(_ktn())
+    except Exception:
+        pass
+    try:
+        if mcp_mgr:
+            for _sch in (mcp_mgr.get_all_openai_schemas(_load_mcp_disabled_map()) or []):
+                _n = (_sch.get("function") or {}).get("name")
+                if _n:
+                    _registered_tool_names.add(_n)
+    except Exception:
+        pass
+    _intent = _classify_agent_request(messages, _last_user, _registered_tool_names)
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
+    # Tools forced by the classifier because the user named one explicitly.
+    _intent_force: Set[str] = set(_intent.get("force_tools") or ())
     _existing_conversation = _user_turn_count(messages) > 1
     _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document)
     _active_email_draft_relevant = _active_document_relevant and _is_email_document_obj(active_document)
@@ -3175,6 +3360,11 @@ async def stream_agent_loop(
         and (_casual_low_signal_turn or not workspace)
         and not forced_tools
         and not relevant_tools
+        and not _intent_force
+        # A long, actionable turn must never take the tool-skipping fast lane,
+        # even when it matched no domain — only genuinely terse chit-chat may
+        # (#imsg-routing). Casual openers are already low-signal above.
+        and (_casual_low_signal_turn or len(_last_user.split()) <= 6)
     )
     # Tool retrieval uses the latest message by default. It may inherit recent
     # user turns only for explicit continuations ("yes", "do it", "1").
@@ -3229,17 +3419,25 @@ async def stream_agent_loop(
         direct_actual_model = model
         real_input_tokens = 0
         real_output_tokens = 0
+        # A thinking model spends its whole budget on the reasoning block and
+        # returns EMPTY content with finish_reason="length" — the user then got
+        # the canned "Hey." below. Suppress thinking (pure waste for a greeting),
+        # give a real budget instead of 128, and retry if it still comes back
+        # empty after reasoning.
+        _direct_budget = min(max_tokens or 512, 512)
+        _saw_thinking = False
         try:
             async for chunk in stream_llm_with_fallback(
                 [(endpoint_url, model, headers)] + list(fallbacks or []),
                 direct_messages,
                 temperature=temperature,
-                max_tokens=min(max_tokens or 128, 128),
+                max_tokens=_direct_budget,
                 prompt_type=None,
                 tools=None,
                 timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
                 session_id=session_id,
                 workload=workload,
+                suppress_thinking=True,
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                     try:
@@ -3263,7 +3461,9 @@ async def stream_agent_loop(
                         yield chunk
                         continue
                     if "delta" in data:
-                        if not data.get("thinking"):
+                        if data.get("thinking"):
+                            _saw_thinking = True
+                        else:
                             direct_response += data.get("delta", "")
                         yield chunk
                         continue
@@ -3275,6 +3475,39 @@ async def stream_agent_loop(
             fallback = "Hey."
             direct_response += fallback
             yield f"data: {json.dumps({'delta': fallback})}\n\n"
+
+        if not direct_response.strip() and _saw_thinking:
+            # Reasoning ate the whole budget. Retry once, much larger, rather
+            # than rendering a canned reply the user didn't ask for.
+            logger.info("[agent] low-signal reply was all reasoning — retrying with a larger budget")
+            try:
+                async for chunk in stream_llm_with_fallback(
+                    [(endpoint_url, model, headers)] + list(fallbacks or []),
+                    direct_messages,
+                    temperature=temperature,
+                    max_tokens=2048,
+                    prompt_type=None,
+                    tools=None,
+                    timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
+                    session_id=session_id,
+                    suppress_thinking=True,
+                ):
+                    if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                        try:
+                            data = json.loads(chunk[6:])
+                        except json.JSONDecodeError:
+                            yield chunk
+                            continue
+                        if data.get("type") == "usage":
+                            usage = data.get("data", {}) or {}
+                            real_input_tokens += usage.get("input_tokens", 0) or 0
+                            real_output_tokens += usage.get("output_tokens", 0) or 0
+                            continue
+                        if "delta" in data and not data.get("thinking"):
+                            direct_response += data.get("delta", "")
+                        yield chunk
+            except Exception as _retry_err:
+                logger.warning("[agent] low-signal retry failed: %s", _retry_err)
 
         if not direct_response.strip():
             fallback = "Hey."
@@ -3462,15 +3695,24 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update({"read_file", "grep", "ls", "manage_documents"})
 
-    # Per-request forced tools are stronger than retrieval. Explicit search
-    # settings make web tools visible even when tool RAG misses them;
-    # route-level disabled_tools decides what remains allowed.
-    if not guide_only and forced_tools:
-        forced_set = {t for t in forced_tools if t not in disabled_tools}
+    # Current-turn chat uploads are real files under the upload/data root. Make
+    # the read-side file/document tools visible immediately so the agent can
+    # inspect files whose inline text was truncated or omitted.
+    if not guide_only and uploaded_files:
         if _relevant_tools is None:
             from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
-        _relevant_tools.update(forced_set)
+        _relevant_tools.update({"read_file", "grep", "ls", "manage_documents"})
+
+    # Per-request UI toggles are stronger than retrieval. If the user turns on
+    # Search, the model must see the search tools even when the latest text is a
+    # typo or otherwise low-signal for tool RAG.
+    if not guide_only and (forced_tools or _intent_force):
+        if _relevant_tools is None:
+            from src.tool_index import ALWAYS_AVAILABLE
+            _relevant_tools = set(ALWAYS_AVAILABLE)
+        _relevant_tools.update(t for t in (set(forced_tools or ()) | _intent_force)
+                               if t not in disabled_tools)
 
     if not guide_only and _relevant_tools is not None:
         _relevant_tools = _expand_browser_mcp_tools(_relevant_tools, mcp_mgr)
@@ -3649,27 +3891,43 @@ async def stream_agent_loop(
         # OpenAI's native tool-call channel unless the endpoint opts in.
         "gpt-oss",
     ))
-    # Native Ollama endpoints (/api/chat) handle tool schemas differently from
-    # the OpenAI-compat path. Models like gemma4, qwen3.5, ministral respond to
-    # tool schemas by emitting a single native tool_call token then stopping,
-    # rather than writing a fenced block — the agent loop sees 1 token and no
-    # recognised tool, so the round terminates immediately (issue #1567).
-    # Unless the endpoint is explicitly marked supports_tools=True by the user
-    # (via the endpoint settings toggle), treat Ollama-native as text-only so
-    # the fenced-block path is used instead of native function calling.
+    # Tool-call format for LOCAL endpoints (Ollama native /api/chat + /v1, and
+    # llama.cpp's OpenAI-compatible /v1 — the localhost heuristic below lumps
+    # them together, and local_native_mode asks whichever server is really there.
+    # compat path). Native function calling used to be opt-in via the
+    # per-endpoint supports_tools toggle, because SOME local models answer a
+    # tool schema with a single native tool_call token and then stop (#1567).
+    # But the fenced fallback confuses general models (qwen3.x, llama3.2) —
+    # they never emit a valid tool block at all. Ollama itself knows which is
+    # which: /api/show reports a "tools" capability. Ask it, and only fall back
+    # to the curated/configured list when the server can't answer.
+    #
+    # Precedence: explicit endpoint flag > per-model blocklist (_model_no_tools,
+    # the force-fenced override) > server capability > curated list.
     _is_ollama_native = _is_ollama_native_url(endpoint_url or "")
     _ollama_openai_compat = _is_ollama_openai_compat_url(endpoint_url or "")
+    _is_ollama_endpoint = _is_ollama_native or _ollama_openai_compat
     if _endpoint_supports is True:
         _is_api_model = True
-    elif (
-        _endpoint_supports is False
-        or _model_no_tools
-        or _is_ollama_native
-        or _ollama_openai_compat
-    ):
+    elif _endpoint_supports is False or _model_no_tools:
         _is_api_model = False
+    elif _is_ollama_endpoint:
+        _is_api_model = await local_native_mode(endpoint_url, model)
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
+        if not _is_api_model:
+            # Neither a known cloud host nor a name on the curated list. The
+            # branch above only fires for endpoints the LOCALHOST heuristic
+            # recognises, so a self-hosted llama.cpp/Ollama on a LAN box,
+            # Tailscale host, or remapped container port lands here and would
+            # be downgraded to fenced blocks on a name mismatch alone. Ask the
+            # server directly before believing that. Cheap: 3s timeout, cached
+            # per host, and only on the path that was about to degrade anyway.
+            _probed = await probe_supports_tools(endpoint_url, model)
+            if _probed is not None:
+                logger.info("remote endpoint %s reports tools capability: %s",
+                            endpoint_url, _probed)
+                _is_api_model = _probed
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
     messages, mcp_schemas = _build_system_prompt(
         messages, model, _prompt_active_document, mcp_mgr, disabled_tools,
@@ -3742,6 +4000,8 @@ async def stream_agent_loop(
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
+    _round_trim_budget = 0        # set below when soft-trim is active
+    _round_trim_reserve = 1024
     try:
         from src.context_compactor import trim_for_context
         from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX, DEFAULT_BUDGET, budget_is_explicit as _budget_is_explicit
@@ -3750,7 +4010,15 @@ async def stream_agent_loop(
         soft_budget = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
         if soft_budget > 0:
             before_trim_tokens = estimate_tokens(messages)
-            reserve_tokens = min(max(max_tokens or 1024, 512), 2048)
+            # Reserve GENERATION room inside the real window: prompt trimming
+            # keeps input under (budget - reserve), so this is how much space
+            # the model gets to think + emit its answer/tool call. The old flat
+            # 2048 cap suffocated big single-file writes on small-window local
+            # models (12K window - 8.4K prompt = ~3.9K for thinking + a 3K-token
+            # file -> Ollama cut generation mid-think, an empty round, every
+            # attempt). Scale with max_tokens: SAW dev turns (8192) reserve
+            # 4096; default chat (4096) keeps the old 2048.
+            reserve_tokens = min(max((max_tokens or 1024) // 2, 512), 4096)
             # Ceiling for the auto-derived budget (no effect on an explicit budget;
             # see #1230). Falls back to DEFAULT_HARD_MAX on missing/malformed values
             # so misconfig can't zero the budget.
@@ -3768,6 +4036,30 @@ async def stream_agent_loop(
             # proves (else 0) — not the passed-in context_length, which can be stale
             # or unset for some callers (#4122 review).
             ctx_for_budget = budget_context_for_model(endpoint_url, model, fallback=context_length)
+            # Ollama enforces a much smaller window at serve time (request
+            # options.num_ctx on the native API; Modelfile/server default on
+            # /v1) than the model card advertises. Budget against the enforced
+            # window (the ollama_num_ctx setting), otherwise the trimmer thinks
+            # a 131K model has endless room while the real 16K window silently
+            # fills — the model then returns EMPTY rounds mid-task (observed:
+            # SAW Developer suffocating at prompt_tokens ~15.8K, num_ctx 16384).
+            try:
+                # NOTE: import with an alias, and use this module's OWN
+                # _is_ollama_openai_compat_url (defined above) — rebinding
+                # either name here makes it function-local and breaks the
+                # earlier use at the top of this function (UnboundLocalError).
+                from src.llm_core import _detect_provider as _llm_detect_provider
+                if _llm_detect_provider(endpoint_url) == "ollama" or _is_ollama_openai_compat_url(endpoint_url):
+                    _ollama_cap = int(get_setting("ollama_num_ctx", 0) or 0)
+                    # The Modelfile's num_ctx (e.g. a user-built 12K variant) can be
+                    # SMALLER than the setting — budget against the tightest window
+                    # or Ollama truncates the prompt server-side, task first.
+                    _served_ctx = _ollama_served_num_ctx(endpoint_url, model)
+                    for _cap_v in (_ollama_cap, _served_ctx):
+                        if _cap_v and _cap_v > 0:
+                            ctx_for_budget = min(ctx_for_budget, _cap_v) if ctx_for_budget else _cap_v
+            except Exception:
+                pass
             effective_budget = compute_input_token_budget(
                 soft_budget,
                 ctx_for_budget,
@@ -3789,6 +4081,11 @@ async def stream_agent_loop(
                     reserve_tokens,
                 )
                 messages = trimmed_messages
+            # Keep the budget for per-round re-trims inside the agent loop —
+            # tool results grow the conversation every round, and a prep-only
+            # trim lets long tool-heavy runs outgrow the window mid-task.
+            _round_trim_budget = effective_budget
+            _round_trim_reserve = reserve_tokens
     except Exception as e:
         logger.warning("[agent] Soft context trim skipped: %s", e)
     prep_timings["context_trim"] = time.time() - _t3
@@ -3834,6 +4131,9 @@ async def stream_agent_loop(
     # all 20 rounds, looks like the chat "died". Track recent call
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
+    # Exact read-only calls already executed this turn (see the duplicate
+    # short-circuit in the tool-execution loop). Cleared by effectful calls.
+    _ro_calls_seen: set = set()
     _stuck_rounds = 0
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
@@ -3844,7 +4144,6 @@ async def stream_agent_loop(
     # an action without emitting the tool call. Capped to prevent a model
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
-    _MAX_INTENT_NUDGES = 2
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -3853,13 +4152,19 @@ async def stream_agent_loop(
     # Match the common phrasings + an action verb that maps to an available
     # tool, so we don't nudge on harmless transitional text like "let me
     # know what you think".
+    # Anchored at line starts OR sentence boundaries ("...the big one. I'll
+    # implement..."), and the verb list includes IMPLEMENTATION verbs — local
+    # devs stall precisely on "I'll implement/write the big file" (observed:
+    # Ornith narrating the largest file then emitting end-of-turn, twice).
     _INTENT_RE = re.compile(
-        r"(?:^|\n)\s*(?:let me|i'?ll|i will|i need to|we need to|need to|"
+        r"(?:^|[\n.:;!?—–]\s*)\s*(?:now\s+)?(?:let me|i'?ll|i will|i need to|we need to|need to|"
         r"i should|we should|i must|we must|going to|let's)\s+"
-        r"(?:tail|check|investigate|look at|see|tail|read|fetch|inspect|"
+        r"(?:tail|check|investigate|look at|see|read|fetch|inspect|"
         r"verify|diagnose|examine|debug|capture|grab|pull|view|run|call|"
         r"trigger|launch|start|kick off|stop|kill|restart|adopt|serve|"
-        r"register|adopt|list|search|find|query|hit|ping|test|use|perform|do)"
+        r"register|list|search|find|query|hit|ping|test|use|perform|do|"
+        r"implement|write|create|build|code|add|fix|rewrite|update|scaffold|generate|make|"
+        r"wait|pause|continue|proceed)"
         r"\b[^.\n]{0,140}",
         re.IGNORECASE,
     )
@@ -3876,11 +4181,44 @@ async def stream_agent_loop(
     # using tools — i.e. it was cut off, not finished. Drives a "Continue" event
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
+    # Ollama's runner can die mid-stream under memory pressure ("model runner
+    # has unexpectedly stopped", std::bad_alloc). Ending the turn there throws
+    # away the whole working conversation — instead wait for the runner to
+    # reload and retry the round with the conversation intact.
+    _crash_retries_left = 3
 
     for round_num in range(1, max_rounds + 1):
+        # Re-trim EVERY round, not just at prep: each round appends tool results
+        # (a written file echoes its full content back), so a long tool-heavy
+        # run outgrows the window mid-task — the model then returns an empty
+        # round and the loop mistakes suffocation for completion.
+        if _round_trim_budget > 0 and round_num > 1:
+            try:
+                from src.context_compactor import trim_for_context as _rt_trim
+                _before_rt = estimate_tokens(messages)
+                # Pin the task (first user message) through the trim: it's the
+                # OLDEST conversation turn, i.e. the first thing a deep trim
+                # drops — but chat templates like Ornith's hard-REQUIRE a user
+                # message and 400 the entire request without one ("No user
+                # query found in messages"). Marker stripped again below so it
+                # never reaches the provider payload.
+                _first_user = next((m for m in messages if m.get("role") == "user"), None)
+                if _first_user is not None:
+                    _first_user["_protected"] = True
+                messages = _rt_trim(messages, _round_trim_budget,
+                                    reserve_tokens=_round_trim_reserve)
+                for _m in messages:
+                    _m.pop("_protected", None)
+                _after_rt = estimate_tokens(messages)
+                if _after_rt < _before_rt:
+                    logger.info("[agent] round %s re-trim: %s -> %s tokens (budget=%s)",
+                                round_num, _before_rt, _after_rt, _round_trim_budget)
+            except Exception as _rt_e:
+                logger.warning("[agent] round re-trim skipped: %s", _rt_e)
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
+        _runner_crashed = False  # local runner died mid-stream this round
         # Reset doc streaming state per round
         _doc_acc = ""
         _doc_opened = False
@@ -3942,10 +4280,37 @@ async def stream_agent_loop(
             _last_content = _last_user.lower()
             _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
             all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
-        agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
+        # Caller override first (SAW passes a much larger budget for slow local
+        # models: a CPU-offloaded 35B can spend minutes in prompt eval with no
+        # tokens streaming, then generate for well over the default deadline).
+        agent_stream_timeout = int(stream_timeout or get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
+        # The turn needs tools but none were sent as schemas — the agent is in
+        # fenced-block mode and will DESCRIBE tool calls in prose rather than
+        # emit them. That is a legitimate mode, so this is not an error; it is
+        # loud because when it is NOT intended the only symptom is an agent
+        # that narrates work it never did (a Round Table Developer once spent
+        # 767s emitting 128 fenced blocks and executing nothing).
+        #
+        # Deduped per (endpoint, model): the condition holds for every round of
+        # an affected conversation, and a warning repeated 128 times is just
+        # more of the noise it is trying to cut through.
+        if _relevant_tools and not _tool_names_sent and not _is_api_model:
+            _warn_key = (endpoint_url, model)
+            if _warn_key not in _FENCED_DOWNGRADE_WARNED:
+                _FENCED_DOWNGRADE_WARNED.add(_warn_key)
+                logger.warning(
+                    "[agent] %s on %s is in FENCED-BLOCK mode: %d relevant tools "
+                    "(%s) but 0 tool schemas sent. If this model does support "
+                    "native tool calls, the endpoint's supports_tools flag is "
+                    "wrong or unprobed — set it to true, or check that the "
+                    "server answers /api/show (Ollama) or /props (llama.cpp). "
+                    "Left as-is the model will narrate tool use instead of "
+                    "performing it.",
+                    model, endpoint_url, len(_relevant_tools),
+                    ", ".join(sorted(_relevant_tools)[:8]))
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
         # only switches on a pre-content failure, so streamed output is never
@@ -3969,7 +4334,11 @@ async def stream_agent_loop(
             bool(all_tool_schemas),
             agent_stream_timeout,
         )
-        async for chunk in stream_llm_with_fallback(
+        # First-token watchdog: independent of (and much shorter than) the
+        # inactivity timeout, which SAW sets to an hour. Generous enough for a
+        # cold model load + prompt eval on a 20GB+ local model.
+        _first_event_timeout = max(60, int(get_setting("agent_first_event_timeout_seconds", 300) or 300))
+        async for chunk in _guard_first_event(stream_llm_with_fallback(
             _candidates,
             messages,
             temperature=temperature,
@@ -3980,7 +4349,7 @@ async def stream_agent_loop(
             timeout=agent_stream_timeout,
             session_id=session_id,
             workload=workload,
-        ):
+        ), _first_event_timeout):
             if not _round_first_event_logged:
                 _round_first_event_logged = True
                 logger.info(
@@ -4005,6 +4374,18 @@ async def stream_agent_loop(
                     time.time() - _round_start,
                     chunk[:500],
                 )
+                if ("model runner has unexpectedly stopped" in chunk
+                        or "bad_alloc" in chunk
+                        or "first-token watchdog" in chunk):
+                    # Ollama runner crash (memory pressure) — flag for the
+                    # post-round recovery retry instead of surfacing the raw
+                    # error and losing the turn. bad_alloc surfaces as a plain
+                    # HTTP 500 ("llama-server chat error: ... std::bad_alloc"),
+                    # not as "runner has unexpectedly stopped" — both are the
+                    # same OOM death. The watchdog marker is a request the
+                    # crashed runner accepted but never answered.
+                    _runner_crashed = True
+                    continue
                 yield chunk
                 continue
             if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -4192,6 +4573,23 @@ async def stream_agent_loop(
             _round_first_event_logged,
             _round_first_token_logged,
         )
+
+        # Runner-crash recovery: the local runner died mid-round with (near)
+        # nothing produced. Wait for Ollama to reload the model, then retry the
+        # round with the conversation INTACT — ending the turn here would throw
+        # away all prior working state and hand the gate a half-done workspace.
+        if (_runner_crashed and not native_tool_calls
+                and len(round_response.strip()) < 200):
+            if _crash_retries_left > 0:
+                _crash_retries_left -= 1
+                _wait = 20 * (3 - _crash_retries_left)  # 20s, 40s, 60s
+                logger.warning(
+                    "[agent] local runner crashed in round %s — waiting %ss for it to recover (%s retries left)",
+                    round_num, _wait, _crash_retries_left)
+                yield f'data: {json.dumps({"delta": f"\\n[local model runner crashed - waiting {_wait}s for it to recover, then retrying...]\\n"})}\n\n'
+                await asyncio.sleep(_wait)
+                continue  # burns a round number; the conversation is preserved
+            yield f'data: {json.dumps({"delta": "\\n[local model runner keeps crashing - giving up this turn; see ollama server logs]\\n"})}\n\n'
         _normalized_doc_round = (
             _normalize_stream_document_fences(
                 round_response,
@@ -4426,28 +4824,124 @@ async def stream_agent_loop(
             # tool doesn't pin us in a forever loop.
             _intent_text = _strip_think_blocks(cleaned_round).strip()
             _intent_match = _INTENT_RE.search(_intent_text) if _intent_text else None
+            # A short narration that ends with a colon ("Now the main game
+            # logic — this is the largest piece:") is an announced-but-absent
+            # action even when no intent verb matched.
+            _ends_with_colon = bool(_intent_text) and _intent_text.endswith(":")
+            # A round with NO visible output and NO tool call mid-task is
+            # always a stall (observed: 33-41s of pure reasoning then EOS after
+            # a string of read_file rounds) — there's no legit "answer" that's
+            # completely empty. Gate on ANY prior tool activity this turn
+            # (tool_events), NOT _effectful_used: that flag ignores reads, so a
+            # turn that only read files and then went silent slipped through.
+            _empty_round = not _intent_text and bool(tool_events)
+            # Autonomous turns (SAW roles) have no user to ask — a turn ending
+            # on an offer/permission question ("Want me to apply all the fixes
+            # now?") is a stall there, while in normal chat it's correct
+            # behaviour, hence the `autonomous` gate.
+            _asks_permission = (
+                autonomous
+                and _intent_text.rstrip().endswith("?")
+                and re.search(r"\b(want me to|should i|shall i|would you like|do you want|"
+                              r"let me know|is that ok|proceed\?)\b",
+                              _intent_text[-220:], re.IGNORECASE) is not None
+            )
             # Only nudge when the round REALLY looks like an unfinished
-            # promise: short response (<400 chars), no fenced code/answer,
-            # and an action-intent phrase was matched. Long answers that
-            # happen to contain "let me know" are not stalls.
+            # promise. Guards differ by signal strength:
+            #  - intent phrase: short responses only (<400 chars) — long answers
+            #    that happen to contain "let me know" are not stalls;
+            #  - trailing colon: allowed up to 2000 chars — a plan that ENDS
+            #    with "Let me implement all of these:" is a stall no matter how
+            #    detailed the plan was (observed: 494-char stall missed by the
+            #    short guard);
+            #  - empty round: always.
             _looks_like_promise = (
                 not guide_only
-                and _intent_match is not None
-                and len(_intent_text) < 400
                 and "```" not in _intent_text
+                # NB: the nudge-cap check belongs on the branches below, not
+                # here. Folding it into this flag makes it go False exactly
+                # when the cap is reached, which is precisely when the
+                # exhausted-guard branch needs it True — the guard then never
+                # fires and the turn ends silently.
+                and (
+                    _empty_round
+                    or _asks_permission
+                    or (_ends_with_colon and len(_intent_text) < 2000)
+                    or (_intent_match is not None and len(_intent_text) < 400)
+                    # A LONG response whose TAIL is a promise ("...I need to
+                    # read the remaining files and implement these features")
+                    # is a stall too — the length guard only protects answers
+                    # that merely mention an action somewhere in the middle.
+                    or (_INTENT_RE.search(_intent_text[-250:]) is not None)
+                )
             )
             if _looks_like_promise and _intent_nudge_count < _MAX_INTENT_NUDGES:
                 _intent_nudge_count += 1
-                _matched_phrase = _intent_match.group(0).strip()
+                if _intent_match:
+                    _matched_phrase = _intent_match.group(0).strip()
+                elif _intent_text:
+                    _matched_phrase = _intent_text.splitlines()[-1].strip()[-140:]
+                else:
+                    _matched_phrase = "(no output and no tool call this round)"
                 logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
                 _lower_phrase = _matched_phrase.lower()
-                _cookbook_log_hint = ""
-                if any(_word in _lower_phrase for _word in ("log", "logs", "output", "tail", "status")):
-                    _cookbook_log_hint = (
+                # Word-boundary matching — plain substring checks misclassify
+                # ("log" is inside "logic", so a giant-write stall got the
+                # Cookbook-logs hint).
+                def _has_word(*_words):
+                    return any(re.search(r"\b" + re.escape(_w) + r"\b", _lower_phrase)
+                               for _w in _words)
+                # Action-specific escape hatch: the stall is usually the model
+                # planning ONE oversized operation (giant write, whole-file
+                # read, full-dump command). Point it at the small version of
+                # the same action so the retry is actually completable.
+                _action_hint = ""
+                if _asks_permission:
+                    _action_hint = (
+                        " There is NO user in this loop to answer you. Decide yourself: "
+                        "apply your own recommendations NOW with tool calls, starting "
+                        "with the highest-priority fix."
+                    )
+                elif _empty_round and not _intent_text:
+                    # No phrase to classify — cover all three escape hatches.
+                    _action_hint = (
+                        " Continue with ONE SMALL tool call right now: use grep or "
+                        "read_file with offset+limit if you are inspecting a big file, "
+                        "a filtered command (grep/head/tail) if you are running "
+                        "something with large output, or a small (<150 line) "
+                        "write_file if you are implementing."
+                    )
+                elif _has_word("log", "logs", "output", "tail", "status"):
+                    _action_hint = (
                         " If this is about a Cookbook/model serve, the concrete calls are: "
                         "`list_served_models` first, then `tail_serve_output` with the "
                         "session_id from the serve/list result. Never answer with "
                         "\"check logs\" when those tools are available."
+                    )
+                elif _has_word("read", "inspect", "review", "look at", "examine", "analyze", "scan", "open"):
+                    # Whole-file reads of big files stall local models the same
+                    # way giant writes do. Chunk it.
+                    _action_hint = (
+                        " Do NOT (re)read a huge file in one call — that is what stalled "
+                        "you. Use grep to jump straight to the relevant function/section, "
+                        "or read_file with offset+limit to pull ONLY the chunk you need "
+                        "(e.g. ~120 lines around the target). Make that smaller call now."
+                    )
+                elif _has_word("run", "execute", "command", "bash", "python", "test", "check"):
+                    _action_hint = (
+                        " If the command would print a whole large file or huge output, "
+                        "FILTER it instead of dumping everything (grep for the pattern, "
+                        "or head/tail for the first/last ~80 lines). Emit the filtered "
+                        "command now."
+                    )
+                elif _has_word("write", "implement", "create", "build", "code", "file", "logic"):
+                    # Local models stall on ONE giant write (observed: 3x ~105s
+                    # thinking rounds, zero calls). Steer them to smaller units.
+                    _action_hint = (
+                        " If the file is too large to emit in one call, do NOT retry the "
+                        "same giant write: SPLIT it into several small files/modules "
+                        "(each under ~150 lines) and emit the write_file call for the "
+                        "FIRST small piece right now."
                     )
                 messages.append({
                     "role": "system",
@@ -4457,7 +4951,7 @@ async def stream_agent_loop(
                         "see you announced the action but didn't run it, which "
                         "is the most frustrating thing you can do. "
                         "DO IT NOW: emit the actual function call this turn. "
-                        f"{_cookbook_log_hint}"
+                        f"{_action_hint}"
                         "If you decided not to do it after all, say so plainly in "
                         "one sentence instead of restating the plan."
                     ),
@@ -4466,7 +4960,15 @@ async def stream_agent_loop(
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                 continue
             if _looks_like_promise:
-                _matched_phrase = _intent_match.group(0).strip()
+                # _intent_match can be None here: unlike upstream, this flag
+                # also trips on empty rounds and permission-asking, where
+                # there is no regex match to report.
+                if _intent_match:
+                    _matched_phrase = _intent_match.group(0).strip()
+                elif _intent_text:
+                    _matched_phrase = _intent_text.splitlines()[-1].strip()[-140:]
+                else:
+                    _matched_phrase = "(no output and no tool call this round)"
                 _guard_message = (
                     "The agent stopped because it repeatedly announced a tool "
                     "action without making the tool call."
@@ -4621,11 +5123,31 @@ async def stream_agent_loop(
             else:
                 cmd_display = full_command
 
+
+            # Duplicate read-only call short-circuit: looping models re-issue the
+            # exact same read/grep over and over (observed: SPEC.md read 6x in
+            # 80s, one grep fired 12x). The world hasn't changed, so skip the
+            # execution and hand back a corrective note — models react to tool
+            # results far better than to system nudges. Any EFFECTFUL call
+            # (write/edit/bash/python/...) clears the cache, since it may
+            # genuinely change what a re-read would return.
             _ody_clamped_tool_allowed = (
                 _ody_notes_finetune_mode
                 and block.tool_type in {"manage_notes", "manage_calendar", "manage_tasks"}
             )
-            if tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
+            _dedupe_key = f"{block.tool_type}:{(block.content or '').strip()}"
+            _is_ro_dup = (block.tool_type in _READONLY_DEDUPE_TOOLS
+                          and _dedupe_key in _ro_calls_seen)
+            if _is_ro_dup:
+                desc = f"{block.tool_type}: duplicate"
+                result = {
+                    "output": ("[duplicate call skipped — you already made this exact call this "
+                               "turn and NOTHING has changed since. Use the result you already "
+                               "have and PROCEED with the task. Do not repeat calls."),
+                    "exit_code": 0,
+                }
+                logger.info("[agent] duplicate read-only call skipped: %s", _dedupe_key[:100])
+            elif tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
                     "error": tool_policy.reason_for(block.tool_type),
@@ -4663,6 +5185,7 @@ async def stream_agent_loop(
                         await _progress_q.put(None)
 
                 _tool_task = asyncio.create_task(_run_tool())
+
                 try:
                     # Drain progress events as they arrive — block until the
                     # next event OR the tool finishes (sentinel = None).
@@ -4688,6 +5211,11 @@ async def stream_agent_loop(
                             await _tool_task
                         except (asyncio.CancelledError, Exception):
                             pass
+                if block.tool_type in _READONLY_DEDUPE_TOOLS:
+                    _ro_calls_seen.add(_dedupe_key)
+                else:
+                    # Effectful call — the world may have changed; allow re-reads.
+                    _ro_calls_seen.clear()
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its

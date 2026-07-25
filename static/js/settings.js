@@ -5815,5 +5815,61 @@ export function close() {
 
 const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
 
+// Fast Mode chat-bar toggle — appends /no_think for ALL models so they act directly.
+// Self-contained load + save (via the shared app-settings endpoint), independent of
+// the settings module so it can't break anything else.
+(function bindFastMode() {
+  function setState(b, on) {
+    b.classList.toggle('active', !!on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  function bind() {
+    var b = document.getElementById('fastmode-toggle-btn');
+    if (!b || b.dataset.bound === '1') return;
+    b.dataset.bound = '1';
+    fetch('/api/auth/settings', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (s) { setState(b, s && s.fast_mode); })
+      .catch(function () {});
+    b.addEventListener('click', function () {
+      var on = !b.classList.contains('active');
+      setState(b, on);
+      fetch('/api/auth/settings', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fast_mode: on }),
+      }).catch(function () {});
+    });
+  }
+  if (document.readyState !== 'loading') bind();
+  else document.addEventListener('DOMContentLoaded', bind);
+})();
+
+// Local model (Ollama) perf controls - num_ctx + keep_alive, saved to app settings.
+(function bindOllamaPerf() {
+  function bind() {
+    var ctx = document.getElementById('set-ollamaNumCtx');
+    var ka = document.getElementById('set-ollamaKeepAlive');
+    if (!ctx || ctx.dataset.bound === '1') return;
+    ctx.dataset.bound = '1';
+    function save(patch) {
+      fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }).catch(function () {});
+    }
+    fetch('/api/auth/settings', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (s && typeof s.ollama_num_ctx !== 'undefined') ctx.value = s.ollama_num_ctx;
+        if (ka && s && typeof s.ollama_keep_alive !== 'undefined') ka.value = s.ollama_keep_alive;
+      }).catch(function () {});
+    ctx.addEventListener('change', function () {
+      var v = parseInt(ctx.value, 10); if (isNaN(v) || v < 0) v = 0; ctx.value = v; save({ ollama_num_ctx: v });
+    });
+    if (ka) ka.addEventListener('change', function () { save({ ollama_keep_alive: ka.value.trim() }); });
+  }
+  if (document.readyState !== 'loading') bind();
+  else document.addEventListener('DOMContentLoaded', bind);
+})();
+
 
 export default settingsModule;

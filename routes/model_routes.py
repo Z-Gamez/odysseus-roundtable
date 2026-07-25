@@ -1215,6 +1215,61 @@ def _model_endpoint_error_message(base_url: str, ping: Dict[str, Any] = None) ->
     return f"No models found for that provider/key. Probed {probed}."
 
 
+_PROBE_MODEL_SAMPLE = 6
+
+
+def _probe_endpoint_tool_support(base_url: str, model_ids) -> Optional[bool]:
+    """Default supports_tools by ASKING the server, instead of leaving it null.
+
+    Null is not a harmless "unknown": at request time an endpoint the localhost
+    heuristic doesn't recognise (LAN box, Tailscale host, remapped container
+    port) skips the capability probe entirely and falls through to a curated
+    model-name keyword list. A tool-capable model whose name isn't on that list
+    is then silently downgraded to fenced-block mode — which is how a Round
+    Table Developer turn emitted 128 fenced blocks in 767s and executed none.
+
+    Only a definitive answer is persisted. If the server doesn't respond, or a
+    multi-model endpoint disagrees with itself, this returns None and leaves
+    the per-request per-model probe in charge — a guess written to the DB looks
+    exactly like a measurement later, and this flag is high-blast-radius:
+    supports_tools=True outranks the _model_no_tools blocklist in agent_loop,
+    so baking one model's "yes" onto an endpoint that also serves deepseek-r1
+    or gpt-oss would force native mode for those too. Hence unanimity, not
+    first-answer-wins.
+    """
+    import asyncio as _asyncio
+    from src.llm_core import probe_supports_tools
+
+    models = [m for m in (model_ids or []) if isinstance(m, str) and m.strip()]
+
+    async def _run():
+        # No model list (llama-server serves exactly one, and /props is
+        # per-server): a single model-less probe is the whole answer.
+        if not models:
+            return await probe_supports_tools(base_url)
+        answers = []
+        for m in models[:_PROBE_MODEL_SAMPLE]:
+            answers.append(await probe_supports_tools(base_url, m))
+        definite = [a for a in answers if a is not None]
+        if not definite:
+            return None
+        return definite[0] if len(set(definite)) == 1 else None
+
+    try:
+        # This route is a sync `def`, so FastAPI runs it in a threadpool and
+        # there is no loop in this thread to clash with.
+        result = _asyncio.run(_run())
+    except Exception as e:
+        logger.debug("supports_tools probe failed for %s: %s", base_url, e)
+        return None
+    if result is None:
+        logger.info("supports_tools probe for %s was inconclusive — leaving "
+                    "null so the per-model probe decides per request", base_url)
+    else:
+        logger.info("supports_tools probe for %s answered %s", base_url, result)
+    return result
+
+
 def _normalize_model_ids(value):
     """Coerce a model-ID input into a clean, ordered list of strings.
 
@@ -2141,6 +2196,8 @@ def setup_model_routes(model_discovery):
         try:
             _st_raw = (supports_tools or "").strip().lower()
             _st = True if _st_raw in ("true", "1", "yes") else (False if _st_raw in ("false", "0", "no") else None)
+            if _st is None:
+                _st = _probe_endpoint_tool_support(base_url, model_ids)
             _pinned = _normalize_model_ids(pinned_models)
             # Stamp owner so the picker only shows this endpoint to the admin
             # who added it. Pass `shared=true` to mark it null-owner (visible

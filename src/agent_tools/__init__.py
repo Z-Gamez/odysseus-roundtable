@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
+from .browser_tools import BrowserTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
 from .coding_tools import TodoWriteTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
@@ -33,12 +34,16 @@ from .admin_tools import (
     do_manage_endpoints, do_manage_mcp, do_manage_webhooks,
     do_manage_tokens, do_manage_settings,
 )
+from .mac_messages import MacMessagesTool
+from .open_url import OpenUrlTool
+from .mac_messages_read import ReadMessagesTool
 
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
     "python": PythonTool().execute,
     "web_search": WebSearchTool().execute,
     "web_fetch": WebFetchTool().execute,
+    "browser": BrowserTool().execute,
     "read_file": ReadFileTool().execute,
     "write_file": WriteFileTool().execute,
     "edit_file": EditFileTool().execute,
@@ -63,6 +68,9 @@ TOOL_HANDLERS = {
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,
     "manage_session": ManageSessionTool().execute,
+    "send_imessage": MacMessagesTool().execute,
+    "open_in_safari": OpenUrlTool().execute,
+    "read_imessages": ReadMessagesTool().execute,
 }
 # Config/integration admin tools (manage_endpoints/mcp/webhooks/tokens/settings).
 TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
@@ -76,7 +84,7 @@ SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 
 # Tool types that trigger execution
-TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
+TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "browser", "read_file", "write_file", "edit_file",
              "apply_patch", "todowrite",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
@@ -91,10 +99,12 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
              "manage_notes", "manage_calendar",
+             "send_imessage", "read_imessages", "open_in_safari",
              "resolve_contact", "manage_contact",
              # Email tool names come from BUILTIN_EMAIL_TOOLS (unioned below)
              # so the fence regex, dispatch, and non-admin blocklist all cover
-             # the same set.
+             # the same set. approve/cancel_pending_email live in that set too,
+             # so the staged-send flow can be resolved after the user decides.
              # Cookbook tools (LLM serving + downloads). Without these
              # entries, native function calls to e.g. list_served_models
              # are rejected as "Unknown function call" before reaching

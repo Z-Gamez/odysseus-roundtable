@@ -73,12 +73,19 @@ def test_no_rounds_exhausted_on_normal_finish(monkeypatch):
 def test_emits_intent_nudge_exhausted_when_cap_is_exhausted(monkeypatch):
     _patch_common(monkeypatch)
 
-    events = _run_loop(monkeypatch, "Let me check the logs", max_rounds=5)
+    # Read the cap rather than hard-coding it: this fork raises
+    # _MAX_INTENT_NUDGES above upstream's 2 (local models were observed
+    # burning three nudges and stalling again). The round budget has to
+    # clear the cap, or the loop exhausts rounds first and the guard —
+    # the thing under test — never runs.
+    from src.agent_loop import _MAX_INTENT_NUDGES
+    events = _run_loop(monkeypatch, "Let me check the logs",
+                       max_rounds=_MAX_INTENT_NUDGES + 3)
 
     guard = next((e for e in events if e.get("type") == "intent_nudge_exhausted"), None)
     assert guard is not None, events
     assert guard["reason"] == "intent_without_action_nudge_cap"
-    assert guard["nudges"] == 2
+    assert guard["nudges"] == _MAX_INTENT_NUDGES
 
 
 def test_emits_loop_breaker_triggered_when_loop_breaker_trips(monkeypatch):

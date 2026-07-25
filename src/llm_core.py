@@ -456,6 +456,176 @@ def _is_ollama_native_url(url: str) -> bool:
     return local_ollama_host and (path == "" or path == "/api" or path.startswith("/api/"))
 
 
+def ollama_native_tools_model(model: str) -> bool:
+    """Curated/configured fallback for "does this model do native tool calls?"
+
+    Only consulted when the server can't tell us (see ollama_supports_tools —
+    old Ollama, unreachable host). Users can extend it with the
+    `ollama_native_tools_model` setting (a list of model-name substrings);
+    "ornith" is built in as the model this fork recommends for agent work.
+    """
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    try:
+        from src.settings import get_setting
+        configured = get_setting("ollama_native_tools_model", []) or []
+        if isinstance(configured, str):
+            configured = [configured]
+        for name in configured:
+            n = str(name).strip().lower()
+            if n and (n == m or n in m):
+                return True
+    except Exception:
+        pass
+    return "ornith" in m
+
+
+async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
+    """Whether a llama.cpp `llama-server` reports tool support (/props).
+
+    llama-server serves ONE model, so this is per-endpoint, not per-model. It
+    answers with `chat_template_caps.supports_tools` — the direct analogue of
+    Ollama's /api/show capabilities (verified against llama-server b10107).
+    Note that reflects the model's chat TEMPLATE; the server also needs
+    `--jinja` for tool calls to actually be parsed.
+
+    None when this isn't a llama-server (no /props) or it can't be reached, so
+    the caller can fall through to its own default.
+    """
+    p = urlparse((endpoint_url or "").strip())
+    if not (p.scheme and p.netloc):
+        return None
+    root = f"{p.scheme}://{p.netloc}"
+    key = (root, "\x00llamacpp")     # per-server, distinct from Ollama's keys
+    now = time.time()
+    hit = _OLLAMA_CAPS_CACHE.get(key)
+    if hit:
+        age_limit = _OLLAMA_CAPS_TTL if hit[1] is not None else _OLLAMA_CAPS_TTL_UNKNOWN
+        if now - hit[0] < age_limit:
+            return hit[1]
+    result: Optional[bool] = None
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{root}/props")
+        if r.status_code == 200:
+            caps = (r.json() or {}).get("chat_template_caps")
+            if isinstance(caps, dict) and "supports_tools" in caps:
+                result = bool(caps.get("supports_tools")) and bool(
+                    caps.get("supports_tool_calls", True))
+    except Exception as e:
+        logger.debug("llama.cpp /props capability probe failed: %s", e)
+    _OLLAMA_CAPS_CACHE[key] = (now, result)
+    return result
+
+
+async def probe_supports_tools(endpoint_url: str, model: str = "") -> Optional[bool]:
+    """Ask the server whether it does native tool calls. None = it didn't say.
+
+    Same two probes as local_native_mode but WITHOUT the curated-list fallback,
+    so callers can tell "the server said no" apart from "nobody answered". That
+    distinction is the whole point at endpoint-creation time: persisting a
+    guess as though it were a measurement is worse than leaving it null.
+
+    Deliberately not gated on the localhost heuristic. A llama-server or Ollama
+    on a LAN box, a Tailscale host, or a remapped container port is exactly the
+    case the heuristic misses, and it is the case that silently degraded to
+    fenced blocks.
+    """
+    caps = await ollama_supports_tools(endpoint_url, model) if model else None
+    if caps is not None:
+        return caps
+    return await llamacpp_supports_tools(endpoint_url)
+
+
+async def local_native_mode(endpoint_url: str, model: str) -> bool:
+    """Should this LOCAL model use NATIVE function calling (vs fenced blocks)?
+
+    Asks the server itself, because both local backends can answer:
+      - Ollama:    /api/show -> capabilities contains "tools"
+      - llama.cpp: /props    -> chat_template_caps.supports_tools
+
+    Only when neither answers (old Ollama, another OpenAI-compatible server,
+    host down) does it fall back to the curated/configured model list. Callers
+    apply the higher-precedence rules first: an explicit endpoint
+    supports_tools flag, then the per-model force-fenced blocklist.
+
+    This matters because Odysseus's localhost heuristic labels ANY local /v1
+    endpoint "Ollama" — a llama-server on :8080 included. Without the
+    llama.cpp branch such an endpoint probed a nonexistent /api/show, fell
+    through to the curated list, and silently got the fenced format.
+    """
+    caps = await ollama_supports_tools(endpoint_url, model)
+    if caps is not None:
+        logger.info("ollama reports tools capability for %r: %s", model, caps)
+        return bool(caps)
+    caps = await llamacpp_supports_tools(endpoint_url)
+    if caps is not None:
+        logger.info("llama.cpp reports tools capability at %r: %s", endpoint_url, caps)
+        return bool(caps)
+    caps = ollama_native_tools_model(model)
+    logger.info("no local capability probe answered for %r — curated fallback "
+                "says native=%s", model, caps)
+    return bool(caps)
+
+
+# Back-compat alias: the name predates llama.cpp support.
+ollama_native_mode = local_native_mode
+
+
+def _ollama_native_root(url: str) -> str:
+    """scheme://host:port/api for ANY Ollama URL shape.
+
+    _ollama_api_root doesn't recognise the OpenAI-compat base
+    (http://host:11434/v1) and would hand it back unchanged, which is not a
+    native API root — /api/show must be derived from the host instead.
+    """
+    p = urlparse((url or "").strip())
+    if p.scheme and p.netloc:
+        return f"{p.scheme}://{p.netloc}/api"
+    return _ollama_api_root(url)
+
+
+# (api_root, model) -> (fetched_at, result). Answers are stable per model, so a
+# long TTL keeps this off the per-turn path; unknowns retry sooner.
+_OLLAMA_CAPS_CACHE: Dict[Tuple[str, str], Tuple[float, Optional[bool]]] = {}
+_OLLAMA_CAPS_TTL = 600.0
+_OLLAMA_CAPS_TTL_UNKNOWN = 60.0
+
+
+async def ollama_supports_tools(endpoint_url: str, model: str) -> Optional[bool]:
+    """Whether Ollama reports the "tools" capability for `model` (/api/show).
+
+    True/False when the server answers, None when it can't be determined (old
+    Ollama with no `capabilities` field, host down, non-Ollama endpoint) — the
+    caller then falls back to ollama_native_tools_model(). Cached so this costs
+    one small HTTP call per model, not one per turn.
+    """
+    root = _ollama_native_root(endpoint_url)
+    name = (model or "").strip()
+    if not name or not root:
+        return None
+    key = (root, name)
+    now = time.time()
+    hit = _OLLAMA_CAPS_CACHE.get(key)
+    if hit:
+        age_limit = _OLLAMA_CAPS_TTL if hit[1] is not None else _OLLAMA_CAPS_TTL_UNKNOWN
+        if now - hit[0] < age_limit:
+            return hit[1]
+    result: Optional[bool] = None
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.post(f"{root}/show", json={"model": name})
+        if r.status_code == 200:
+            caps = r.json().get("capabilities")
+            if isinstance(caps, list):
+                result = any(str(c).strip().lower() == "tools" for c in caps)
+    except Exception as e:
+        logger.debug("ollama /api/show capability probe failed for %s: %s", name, e)
+    _OLLAMA_CAPS_CACHE[key] = (now, result)
+    return result
+
+
 def _is_ollama_openai_compat_url(url: str) -> bool:
     """Return True for local Ollama's OpenAI-compatible /v1 surface.
 
@@ -635,14 +805,35 @@ def _build_ollama_payload(
         "stream": stream,
     }
     options: Dict = {}
-    if temperature is not None:
+    # Unset temperature (the DEFAULT_TEMPERATURE sentinel) is omitted so the
+    # model's Modelfile default applies — parity with `ollama run` (see
+    # _is_unset_temperature).
+    if temperature is not None and not _is_unset_temperature(temperature):
         options["temperature"] = temperature
     if max_tokens and max_tokens > 0:
         options["num_predict"] = max_tokens
     if num_ctx is not None and num_ctx > 0 and num_ctx != DEFAULT_CONTEXT:
+        # Cap the requested window. A model's full 128K window makes Ollama allocate a
+        # huge KV cache (VRAM spill -> CPU offload -> slow, plus a model reload). The cap
+        # keeps it fast; configurable via the ollama_num_ctx setting (0 = no cap).
+        try:
+            from src.settings import get_setting
+            cap = int(get_setting("ollama_num_ctx", 0) or 0)
+        except Exception:
+            cap = 0
+        if cap > 0:
+            num_ctx = min(num_ctx, cap)
         options["num_ctx"] = num_ctx
     if options:
         payload["options"] = options
+    # Keep the model resident between requests so it doesn't unload + reload each turn.
+    try:
+        from src.settings import get_setting
+        ka = get_setting("ollama_keep_alive", "")
+        if ka:
+            payload["keep_alive"] = ka
+    except Exception:
+        pass
     if tools:
         payload["tools"] = tools
     return payload
@@ -1224,6 +1415,22 @@ def _omit_temperature(provider: str, model: str) -> bool:
     return _restricts_temperature(model) or _moonshot_rejects_custom_temperature(
         provider, model
     )
+
+
+# Ollama applies the model's own Modelfile temperature when the request omits
+# one — exactly what `ollama run` does. Odysseus's "unset" sentinel is
+# DEFAULT_TEMPERATURE (1.0), and actually SENDING it overrides the model's
+# tuned default (most instruct models ship 0.6–0.8), making local models
+# noticeably more random than `ollama run`. So for Ollama targets an unset
+# temperature is omitted and the model default wins. (A preset explicitly set
+# to 1.0 is indistinguishable from the sentinel and also falls back to the
+# model default. API providers are unaffected — their server-side default is
+# already 1.0, so the sentinel was a no-op there all along.)
+def _is_unset_temperature(temperature) -> bool:
+    try:
+        return temperature is None or float(temperature) == float(LLMConfig.DEFAULT_TEMPERATURE)
+    except (TypeError, ValueError):
+        return False
 
 
 # Anthropic removed the sampling parameters (temperature, top_p, top_k) starting
@@ -1842,7 +2049,9 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             "messages": messages_copy,
             "temperature": temperature,
         }
-        if _omit_temperature(provider, model):
+        if _omit_temperature(provider, model) or (
+            _is_ollama_openai_compat_url(url) and _is_unset_temperature(temperature)
+        ):
             payload.pop("temperature", None)
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
@@ -2050,7 +2259,9 @@ async def llm_call_async(
             "messages": messages_copy,
             "temperature": temperature,
         }
-        if _omit_temperature(provider, model):
+        if _omit_temperature(provider, model) or (
+            _is_ollama_openai_compat_url(url) and _is_unset_temperature(temperature)
+        ):
             payload.pop("temperature", None)
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
@@ -2132,7 +2343,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                     tool_choice_none: bool = False, workload: str = "foreground"):
+                     tool_choice_none: bool = False, workload: str = "foreground",
+                     suppress_thinking: bool = False):
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
         async for chunk in _stream_llm_inner(
@@ -2147,6 +2359,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tools=tools,
             session_id=session_id,
             tool_choice_none=tool_choice_none,
+            suppress_thinking=suppress_thinking,
         ):
             yield chunk
 
@@ -2155,7 +2368,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+                            tool_choice_none: bool = False, suppress_thinking: bool = False):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2180,6 +2393,20 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
     else:
         messages_copy = non_sys
+
+    # Fast mode (chat-bar toggle): when on, append the /no_think soft-switch to the
+    # latest user turn for ALL models, so reasoning models (Qwen3, etc.) skip their
+    # thinking step and act directly. Harmless for models that don't recognise it.
+    try:
+        from src.settings import get_setting
+        if get_setting("fast_mode", False):
+            for _i in range(len(messages_copy) - 1, -1, -1):
+                if messages_copy[_i].get("role") == "user" and isinstance(messages_copy[_i].get("content"), str):
+                    messages_copy[_i] = dict(messages_copy[_i])
+                    messages_copy[_i]["content"] = messages_copy[_i]["content"].rstrip() + " /no_think"
+                    break
+    except Exception:
+        pass
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
@@ -2206,7 +2433,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             "temperature": temperature,
             "stream": True,
         }
-        if _omit_temperature(provider, model):
+        if _omit_temperature(provider, model) or (
+            _is_ollama_openai_compat_url(url) and _is_unset_temperature(temperature)
+        ):
             payload.pop("temperature", None)
         if provider not in {"openrouter", "groq"}:
             payload["stream_options"] = {"include_usage": True}
@@ -2226,8 +2455,24 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
         # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
         # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
-        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
+        if _is_ollama_openai_compat_url(url) and (_supports_thinking(model) or suppress_thinking):
             payload["think"] = False
+        # Turning reasoning off takes a different field on every server, and
+        # sending the wrong one fails SILENTLY (200 + a full reasoning block),
+        # so send all three — each server ignores the others' fields. Probed
+        # against Ollama 0.x /v1 with qwen3:14b, 'hey', max_tokens=256:
+        #   nothing sent          -> 470 reasoning chars
+        #   think: false          -> 362   (ignored; /v1 is not /api/chat)
+        #   chat_template_kwargs  -> 365   (ignored)
+        #   reasoning_effort:none -> 0     (honored)
+        # llama.cpp is the mirror image: it gates reasoning through the chat
+        # template, so chat_template_kwargs is the one that lands there.
+        if suppress_thinking:
+            payload["reasoning_effort"] = "none"
+            payload["chat_template_kwargs"] = {
+                **(payload.get("chat_template_kwargs") or {}),
+                "enable_thinking": False,
+            }
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
         _scrub_openai_chat_tool_reasoning(payload, target_url, model)

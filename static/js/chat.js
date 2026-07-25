@@ -3231,6 +3231,170 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
                   window._manageMemoryTimer = setTimeout(
                     () => window.dispatchEvent(new CustomEvent('memory-refresh')), 600);
                 }
+                // --- Email approval card ---
+                // send_email/reply_to_email stage agent mail as a pending draft
+                // (agent_email_confirm). Render real Approve/Decline buttons that
+                // hit the server directly — approval must NOT depend on the model
+                // calling a follow-up tool (local models reliably fumble that).
+                if (/pending_id='([a-f0-9]{6,})'/.test(json.output || '') &&
+                    /email/.test(json.tool || '')) {
+                  const pid = (json.output.match(/pending_id='([a-f0-9]{6,})'/) || [])[1];
+                  const chatBox = document.getElementById('chat-history');
+                  if (pid && chatBox && !document.getElementById('email-approve-' + pid)) {
+                    const card = document.createElement('div');
+                    card.className = 'email-approval-card';
+                    card.id = 'email-approve-' + pid;
+                    card.innerHTML =
+                      '<div class="email-approval-head">✉ Email awaiting your approval</div>' +
+                      '<div class="email-approval-meta">Loading draft…</div>' +
+                      '<pre class="email-approval-body"></pre>' +
+                      '<div class="email-approval-actions">' +
+                        '<button type="button" class="email-approve-btn">Approve &amp; send</button>' +
+                        '<button type="button" class="email-decline-btn">Decline</button>' +
+                      '</div>';
+                    chatBox.appendChild(card);
+                    uiModule.scrollHistory();
+                    fetch('/api/email/pending', { credentials: 'same-origin' })
+                      .then(r => r.json())
+                      .then(d => {
+                        const row = (d.pending || []).find(p => p.id === pid);
+                        if (!row) return;
+                        card.querySelector('.email-approval-meta').innerHTML =
+                          '<div><span class="email-approval-k">To</span>' + esc(row.to_addr || '') + '</div>' +
+                          '<div><span class="email-approval-k">Subject</span>' + esc(row.subject || '') + '</div>';
+                        const b = row.body || '';
+                        card.querySelector('.email-approval-body').textContent =
+                          b.length > 700 ? b.slice(0, 700) + '…' : b;
+                      }).catch(() => {});
+                    const settle = (txt, ok) => {
+                      card.querySelector('.email-approval-actions').innerHTML =
+                        '<span class="email-approval-result ' + (ok ? 'ok' : 'no') + '">' + txt + '</span>';
+                    };
+                    card.querySelector('.email-approve-btn').addEventListener('click', (ev) => {
+                      ev.target.disabled = true;
+                      fetch('/api/email/pending/' + pid + '/approve', { method: 'POST', credentials: 'same-origin' })
+                        .then(r => r.json())
+                        .then(d => {
+                          if (!d.success) { settle('⚠ ' + (d.error || 'Approve failed'), false); return; }
+                          settle('✓ Approved — sending…', true);
+                          // Poll the delivery status so the card can say "Sent"
+                          // once the scheduler has actually SMTPed it (or show
+                          // the error if delivery fails).
+                          const span = card.querySelector('.email-approval-result');
+                          let tries = 0;
+                          const iv = setInterval(() => {
+                            tries++;
+                            fetch('/api/email/pending/' + pid + '/status', { credentials: 'same-origin' })
+                              .then(r => r.json())
+                              .then(s => {
+                                if (s.status === 'sent') {
+                                  span.textContent = '✓ Approved — Sent';
+                                  clearInterval(iv);
+                                } else if (s.status === 'failed') {
+                                  span.textContent = '⚠ Send failed: ' + (s.error || 'unknown error');
+                                  span.classList.remove('ok');
+                                  span.classList.add('no');
+                                  clearInterval(iv);
+                                } else if (tries > 40) {
+                                  clearInterval(iv); // give up quietly after ~2 min
+                                }
+                              })
+                              .catch(() => { if (tries > 40) clearInterval(iv); });
+                          }, 3000);
+                        })
+                        .catch(() => settle('⚠ Approve failed (network)', false));
+                    });
+                    card.querySelector('.email-decline-btn').addEventListener('click', () => {
+                      fetch('/api/email/pending/' + pid, { method: 'DELETE', credentials: 'same-origin' })
+                        .then(r => r.json())
+                        .then(d => settle(d.success ? '✕ Declined — draft discarded' : '⚠ ' + (d.error || 'Decline failed'), false))
+                        .catch(() => settle('⚠ Decline failed (network)', false));
+                    });
+                  }
+                }
+                // --- Messages (iMessage/SMS) approval card ---
+                // send_imessage stages a text; render Approve/Decline buttons
+                // that hit the server directly (the AppleScript send runs on
+                // Approve, never on a model follow-up). Mirrors the email card.
+                if (/pending_id='([a-f0-9]{6,})'/.test(json.output || '') &&
+                    /imessage|message/.test(json.tool || '')) {
+                  const pid = (json.output.match(/pending_id='([a-f0-9]{6,})'/) || [])[1];
+                  const chatBox = document.getElementById('chat-history');
+                  if (pid && chatBox && !document.getElementById('imsg-approve-' + pid)) {
+                    const card = document.createElement('div');
+                    card.className = 'email-approval-card';
+                    card.id = 'imsg-approve-' + pid;
+                    card.innerHTML =
+                      '<div class="email-approval-head">💬 Text awaiting your approval</div>' +
+                      '<div class="email-approval-meta">Loading…</div>' +
+                      '<pre class="email-approval-body"></pre>' +
+                      '<div class="email-approval-actions">' +
+                        '<button type="button" class="email-approve-btn">Approve &amp; send</button>' +
+                        '<button type="button" class="email-decline-btn">Decline</button>' +
+                      '</div>';
+                    chatBox.appendChild(card);
+                    uiModule.scrollHistory();
+                    // Fill in recipient/body from the staged record. If the row
+                    // can't be loaded the card must say so — silently leaving
+                    // "Loading…" made it look blank/broken.
+                    fetch('/api/messages/pending', { credentials: 'same-origin' })
+                      .then(r => r.json())
+                      .then(d => {
+                        const row = (d.pending || []).find(p => p.id === pid);
+                        if (!row) {
+                          card.querySelector('.email-approval-meta').textContent =
+                            'Could not load the staged message (it may have already been handled).';
+                          return;
+                        }
+                        // to_display carries "Name (+1...)" when a contact name
+                        // was resolved, so the user sees WHO before approving.
+                        card.querySelector('.email-approval-meta').innerHTML =
+                          '<div><span class="email-approval-k">To</span>' + esc(row.to_display || row.to || '(unknown)') + '</div>' +
+                          '<div><span class="email-approval-k">Via</span>' + esc(row.service === 'sms' ? 'SMS' : 'iMessage') + '</div>';
+                        const b = row.body || '';
+                        card.querySelector('.email-approval-body').textContent =
+                          b.length > 700 ? b.slice(0, 700) + '…' : b;
+                      })
+                      .catch(() => {
+                        card.querySelector('.email-approval-meta').textContent =
+                          'Could not load the staged message (network error).';
+                      });
+                    const settle = (txt, ok) => {
+                      card.querySelector('.email-approval-actions').innerHTML =
+                        '<span class="email-approval-result ' + (ok ? 'ok' : 'no') + '">' + txt + '</span>';
+                    };
+                    // macOS errors are multi-line (hint + raw AppleScript
+                    // detail), so render them wrapped rather than in the
+                    // single-line result span.
+                    const failWith = (msg) => {
+                      const actions = card.querySelector('.email-approval-actions');
+                      actions.innerHTML = '<span class="email-approval-result no"></span>';
+                      const span = actions.querySelector('.email-approval-result');
+                      span.style.whiteSpace = 'pre-wrap';
+                      span.textContent = '⚠ ' + msg;
+                    };
+                    card.querySelector('.email-approve-btn').addEventListener('click', (ev) => {
+                      ev.target.disabled = true;
+                      settle('✓ Approved — sending…', true);
+                      fetch('/api/messages/pending/' + pid + '/approve', { method: 'POST', credentials: 'same-origin' })
+                        .then(r => r.json())
+                        .then(d => {
+                          if (d.success) {
+                            card.querySelector('.email-approval-result').textContent = '✓ Approved — Sent';
+                          } else {
+                            failWith(d.error || 'Send failed');
+                          }
+                        })
+                        .catch(() => failWith('Send failed (network error)'));
+                    });
+                    card.querySelector('.email-decline-btn').addEventListener('click', () => {
+                      fetch('/api/messages/pending/' + pid, { method: 'DELETE', credentials: 'same-origin' })
+                        .then(r => r.json())
+                        .then(d => settle(d.success ? '✕ Declined — not sent' : '⚠ ' + (d.error || 'Decline failed'), false))
+                        .catch(() => settle('⚠ Decline failed (network)', false));
+                    });
+                  }
+                }
                 // --- Apply UI control actions embedded in tool_output ---
                 if (json.ui_event) {
                   chatStream.handleUIControl(json);

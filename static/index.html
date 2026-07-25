@@ -260,6 +260,40 @@
   <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#282c34);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
     <div id="loader-wave" style="color:color-mix(in srgb, #9cdef2 62%, var(--brand-color,var(--red,#e06c75)));font-family:monospace;font-size:11px;opacity:.5;position:relative;padding-top:10px;line-height:1;white-space:pre">▁▂▃</div>
   </div>
+  <!-- Native window controls — only visible inside the frameless desktop app
+       (body.native-app is added when pywebview announces itself). -->
+  <div class="win-controls" id="win-controls" role="group" aria-label="Window controls">
+    <button type="button" class="win-btn" id="win-min" title="Minimize" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1"/></svg></button>
+    <button type="button" class="win-btn" id="win-max" title="Maximize" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" stroke-width="1"/></svg></button>
+    <button type="button" class="win-btn win-close" id="win-cls" title="Close" tabindex="-1"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.1"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.1"/></svg></button>
+  </div>
+  <script nonce="{{CSP_NONCE}}">
+  (function(){
+    // Frameless desktop window: wire the in-page window controls + drag regions.
+    function nativeApp(){
+      if (document.body.classList.contains('native-app')) return;
+      document.body.classList.add('native-app');
+      var api = function(){ return window.pywebview && window.pywebview.api; };
+      var on = function(id, fn){ var el = document.getElementById(id);
+        if (el) el.addEventListener('click', function(){ var a = api(); if (a && a[fn]) a[fn](); }); };
+      on('win-min', 'win_minimize'); on('win-max', 'win_toggle_max'); on('win-cls', 'win_close');
+      // Drag regions: the top bar + sidebar header move the window. `app-region:
+      // drag` (style.css) gives native drag/snap on new WebView2; the
+      // pywebview-drag-region class is the JS fallback for older runtimes.
+      ['.chat-top-bar', '.sidebar-header'].forEach(function(sel){
+        var el = document.querySelector(sel);
+        if (!el) return;
+        el.classList.add('pywebview-drag-region');
+        el.addEventListener('dblclick', function(e){
+          if (e.target !== el) return; // only bare-strip double-clicks maximize
+          var a = api(); if (a && a.win_toggle_max) a.win_toggle_max();
+        });
+      });
+    }
+    if (window.pywebview) nativeApp();
+    else window.addEventListener('pywebviewready', nativeApp);
+  })();
+  </script>
   <script nonce="{{CSP_NONCE}}">
   (function(){
     var el=document.getElementById('loader-wave');
@@ -664,6 +698,7 @@
               <option value="dots">Dots</option>
               <option value="synapse">Synapse</option>
               <option value="rain">Rain</option>
+              <option value="matrix">Matrix code</option>
               <option value="constellations">Constellations</option>
               <option value="perlin-flow">Perlin Flow</option>
               <option value="petals">Petals</option>
@@ -732,6 +767,7 @@
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg></button>
     <button class="icon-rail-btn" id="rail-cookbook" title="Cookbook"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></button>
     <button class="icon-rail-btn" id="rail-research" title="Deep Research"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
+    <button class="icon-rail-btn" id="rail-roundtable" title="Round Table — SAW"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><circle cx="12" cy="3.6" r="1.5"/><circle cx="12" cy="20.4" r="1.5"/><circle cx="3.6" cy="12" r="1.5"/><circle cx="20.4" cy="12" r="1.5"/></svg></button>
     <button class="icon-rail-btn" id="rail-email" title="Email"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></button>
     <button class="icon-rail-btn" id="rail-gallery" title="Gallery"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></button>
     <button class="icon-rail-btn" id="rail-archive" title="Library"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/></svg></button>
@@ -874,6 +910,10 @@
         <div class="list-item" id="tool-compare-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>
           <span class="grow">Compare</span>
+        </div>
+        <div class="list-item" id="tool-roundtable-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><circle cx="12" cy="12" r="5"/><circle cx="12" cy="3.6" r="1.5"/><circle cx="12" cy="20.4" r="1.5"/><circle cx="3.6" cy="12" r="1.5"/><circle cx="20.4" cy="12" r="1.5"/></svg>
+          <span class="grow">Round Table</span>
         </div>
         <div class="list-item" id="tool-cookbook-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1142,6 +1182,12 @@
           <button type="button" class="input-icon-btn" title="Shell Access" id="bash-toggle-btn" data-mode-tool="true" aria-label="Shell access" aria-pressed="false">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+            </svg>
+          </button>
+          <!-- Fast mode (skip model reasoning / no-think) — applies to all models -->
+          <button type="button" class="input-icon-btn" title="Fast mode — skip model reasoning so it acts directly (/no_think). Applies to all models." id="fastmode-toggle-btn" aria-label="Fast mode" aria-pressed="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 2L3 14h9l-1 8 10-12h-9z"/>
             </svg>
           </button>
           <!-- Workspace indicator (hidden until a folder is set) -->
@@ -1573,6 +1619,22 @@
                 </select>
               </div>
               <div id="set-imgSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6;flex-shrink:0"><path d="M13 2L3 14h9l-1 8 10-12h-9z"/></svg>Local Models (Ollama)</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Performance for local models. A smaller context window means faster responses and less VRAM - lower it if local models feel slow.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label">Context (num_ctx)</label>
+                <input type="number" id="set-ollamaNumCtx" min="0" step="1024" style="width:110px;box-sizing:border-box;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:8px;padding:6px 9px;font:inherit;">
+                <span style="font-size:11px;opacity:.55;margin-left:8px;">8192 = fastest &middot; 16384 = balanced &middot; 0 = no cap</span>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">Keep loaded</label>
+                <input type="text" id="set-ollamaKeepAlive" placeholder="30m" style="width:110px;box-sizing:border-box;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:8px;padding:6px 9px;font:inherit;">
+                <span style="font-size:11px;opacity:.55;margin-left:8px;">e.g. 30m, 1h, -1 (forever)</span>
+              </div>
             </div>
           </div>
           <!-- TTS panel hidden — user opted out of read-aloud entirely. Kept
@@ -2526,6 +2588,9 @@
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
+<script type="module" src="/static/js/compare/index.js"></script>
+<script src="/static/js/roundtable.js"></script>  <!-- SAW Round Table overlay -->
+
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260723compareicon1"></script>

@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json, atomic_write_text
+from core.atomic_io import atomic_write_json
 from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
@@ -164,6 +164,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             cookie_kwargs["max_age"] = TOKEN_TTL
         response.set_cookie(**cookie_kwargs)
         return {"ok": True, "username": username}
+
 
     @router.post("/logout")
     async def logout(request: Request, response: Response):
@@ -655,6 +656,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         _INT_RANGES = {
             "agent_max_rounds": (1, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
+            "ollama_num_ctx": (0, 131072),      # 0 = no cap
         }
         for key in DEFAULT_SETTINGS:
             if key not in body:

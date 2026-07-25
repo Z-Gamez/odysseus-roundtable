@@ -1,0 +1,122 @@
+name: Build macOS app
+
+# Builds the standalone Odysseus.app (Apple Silicon) with PyInstaller and
+# packages it as a drag-to-Applications DMG. PyInstaller cannot cross-compile,
+# so this runs on a macOS runner. Trigger manually; pass a release tag to
+# attach the DMG to that GitHub release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to attach the DMG to (blank = artifact only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple Silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pywebview pillow playwright
+
+      - name: Generate .icns from the Windows icon
+        run: |
+          python - <<'EOF'
+          from PIL import Image
+          import os
+          os.makedirs("icon.iconset", exist_ok=True)
+          src = Image.open("static/odysseus.ico").convert("RGBA")
+          for s in (16, 32, 64, 128, 256, 512):
+              src.resize((s, s), Image.LANCZOS).save(f"icon.iconset/icon_{s}x{s}.png")
+              src.resize((s*2, s*2), Image.LANCZOS).save(f"icon.iconset/icon_{s}x{s}@2x.png")
+          EOF
+          mkdir -p installer
+          iconutil -c icns icon.iconset -o installer/odysseus.icns
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller --noconfirm OdysseusMac.spec
+
+      - name: Ad-hoc sign the app
+        run: codesign --force --deep -s - dist/Odysseus.app
+
+      - name: Verify signature integrity
+        # An invalid signature ALSO produces macOS's "app is damaged" dialog,
+        # so prove the bundle verifies before shipping. (Gatekeeper will still
+        # quarantine the download — un-notarized apps need `xattr -cr` or
+        # Privacy & Security -> Open Anyway on first launch; that part is
+        # documented, not fixable without an Apple Developer account.)
+        run: |
+          codesign --verify --deep --strict --verbose=2 dist/Odysseus.app
+          codesign -dv dist/Odysseus.app 2>&1 | head -5
+
+      - name: Smoke test the frozen server
+        run: |
+          ODYSSEUS_PORT=7100 ./dist/Odysseus.app/Contents/MacOS/Odysseus --server > server.log 2>&1 &
+          echo $! > server.pid
+          code=000
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7100/ || true)
+            if [ "$code" = "302" ] || [ "$code" = "200" ]; then break; fi
+            sleep 3
+          done
+          echo "server answered: $code"
+          if [ "$code" != "302" ] && [ "$code" != "200" ]; then
+            echo "frozen server never came up"; tail -40 server.log; exit 1
+          fi
+          curl -s http://127.0.0.1:7100/static/sw.js | grep -q "odysseus-v" || { echo "static broken"; exit 1; }
+          # Identity marker the launchers use to tell Odysseus apart from a
+          # port squatter (macOS AirPlay answers 403 on 7000).
+          curl -s -D - -o /dev/null http://127.0.0.1:7100/api/health | grep -qi "x-odysseus: 1" || { echo "health identity marker missing"; exit 1; }
+
+      - name: Verify frozen python emulation (no GUI on -c/-m)
+        run: |
+          ./dist/Odysseus.app/Contents/MacOS/Odysseus -c "print('emulation-ok')" | grep -q emulation-ok
+          echo "def ok(): pass" > /tmp/gate_ok.py
+          ./dist/Odysseus.app/Contents/MacOS/Odysseus -m py_compile /tmp/gate_ok.py
+          echo "def broken(:" > /tmp/gate_bad.py
+          if ./dist/Odysseus.app/Contents/MacOS/Odysseus -m py_compile /tmp/gate_bad.py 2>/dev/null; then
+            echo "bad file compiled — dispatch broken"; exit 1
+          fi
+          echo "frozen python emulation verified"
+
+      - name: Probe the frameless window (controls visible + wired)
+        timeout-minutes: 6
+        env:
+          PROBE_URL: http://127.0.0.1:7100
+        run: python scripts/macos_window_probe.py
+
+      - name: Stop smoke server
+        if: always()
+        run: kill "$(cat server.pid 2>/dev/null)" 2>/dev/null || true
+
+      - name: Package DMG
+        run: |
+          mkdir -p dmg-staging
+          cp -R dist/Odysseus.app dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create -volname "Odysseus" -srcfolder dmg-staging -ov -format UDZO Odysseus-macOS-arm64.dmg
+          ls -lh Odysseus-macOS-arm64.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Odysseus-macOS-arm64
+          path: Odysseus-macOS-arm64.dmg
+
+      - name: Attach to release
+        if: ${{ github.event.inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.inputs.release_tag }}" Odysseus-macOS-arm64.dmg --clobber

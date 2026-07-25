@@ -31,6 +31,13 @@ BUILTIN_EMAIL_TOOLS = frozenset({
     "mark_email_read",
     "bulk_email",
     "download_attachment",
+    # Our staged-send approval flow. send_email only STAGES a draft; without
+    # these the model can never resolve it after the user decides, and the
+    # draft rots in the queue forever. They belong in this set so everything
+    # derived from it (TOOL_TAGS, the admin email toggle, the non-admin
+    # blocklist) covers them automatically.
+    "approve_pending_email",
+    "cancel_pending_email",
 })
 
 
@@ -42,6 +49,7 @@ BUILTIN_EMAIL_TOOLS = frozenset({
 NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "bash",
     "python",
+    "browser",
     "manage_bg_jobs",
     "read_file",
     "write_file",
@@ -149,6 +157,9 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "manage_calendar", "api_call", "app_api", "ui_control",
     "send_email", "reply_to_email", "bulk_email", "delete_email",
     "archive_email", "mark_email_read", "unsubscribe_email",
+    # Resolving a staged send is itself mutating — approving actually
+    # dispatches the mail — so plan mode must deny both, same as send_email.
+    "approve_pending_email", "cancel_pending_email",
     # The draft tools create documents and download_attachment writes to
     # disk — mutating. They have no native schemas (yet), so without these
     # static entries plan-mode safety for their bare fence tags would depend

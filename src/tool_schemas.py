@@ -93,6 +93,46 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "open_in_safari",
+            "description": "Open a URL in the user's REAL browser — on macOS their actual Safari (their logins, cookies, bookmarks); elsewhere the default browser. Use this for plain 'open safari and go to X', 'navigate to X', 'open X', 'pull up X' — anytime the user just wants a page opened for THEM to look at. Do NOT use the `browser` tool for that: its Safari automation session is logged-out and isolated. Only use `browser` when the agent itself must click/read/fill a page.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL or bare domain to open (e.g. 'youtube.com' or 'https://youtube.com')."}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser",
+            "description": "Drive an AUTOMATION browser so the AGENT can click/read/fill a page (their Chrome with logins on Chrome; an isolated LOGGED-OUT session on Safari). NOT for simply opening a page for the user to look at — use open_in_safari for that. One tool, many actions via 'action'. Typical flow: navigate -> snapshot (returns element refs like e5) -> click/type by ref -> read. High-stakes actions (submitting forms, buying, sending, deleting) need \"confirm\": true — first ASK THE USER, then re-call with confirm.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["navigate", "snapshot", "read", "click", "type", "key", "scroll", "back", "forward", "screenshot", "tabs", "wait"], "description": "What to do."},
+                    "url": {"type": "string", "description": "For navigate (or tabs op=new): URL or bare domain."},
+                    "ref": {"type": "string", "description": "For click/type: the element ref (e.g. 'e5') from a prior snapshot."},
+                    "text": {"type": "string", "description": "For type: the text to enter."},
+                    "key": {"type": "string", "description": "For key: key name (Enter, Escape, ArrowDown, ...)."},
+                    "direction": {"type": "string", "enum": ["up", "down"], "description": "For scroll."},
+                    "submit": {"type": "boolean", "description": "For type: press Enter to submit after typing (treated as high-stakes; needs confirm)."},
+                    "confirm": {"type": "boolean", "description": "Set true ONLY after the user has approved a high-stakes action."},
+                    "op": {"type": "string", "enum": ["list", "select", "new"], "description": "For tabs: which tab operation."},
+                    "index": {"type": "integer", "description": "For tabs op=select: tab index."},
+                    "selector": {"type": "string", "description": "For wait: CSS selector to wait for."},
+                    "ms": {"type": "integer", "description": "For wait: milliseconds."},
+                    "full_page": {"type": "boolean", "description": "For screenshot: capture the full page."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": "Read a file from disk. Optionally read a line range with offset/limit for large files.",
             "parameters": {
@@ -1127,6 +1167,38 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_imessages",
+            "description": "Read the Mac's iMessage/SMS history. macOS only. Use when the user asks what someone said, to check/summarize their texts, to find an old message, or what's unread. Actions: 'chats' (recent conversations), 'conversation' (a thread with someone — pass who), 'search' (pass query), 'unread'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["chats", "conversation", "search", "unread"], "description": "What to read. Default 'chats'."},
+                    "who": {"type": "string", "description": "For action=conversation: contact name, phone number, or handle."},
+                    "query": {"type": "string", "description": "For action=search: text to look for."},
+                    "limit": {"type": "integer", "description": "Max rows to return (default 25)."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_imessage",
+            "description": "Text / iMessage / SMS someone — message a person via the Mac's Messages app. macOS only. Use this whenever the user says text, txt, message, iMessage, or SMS a person. You can address the message by the person's NAME (resolved via macOS Contacts); you do NOT need their phone number, so never stop to ask for one when the user gave you a name. This STAGES the message and shows the user an Approve/Decline card — it is NOT sent until they approve, so do not claim it was sent.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Who to text. Accepts a CONTACT NAME (e.g. 'Michaela') — the Mac's Messages app resolves it against macOS Contacts automatically — OR a phone number (e.g. +15551234567) or an iMessage email/handle. Prefer the name the user said; do NOT ask for a phone number if a name was given."},
+                    "body": {"type": "string", "description": "The message text to send"},
+                    "service": {"type": "string", "enum": ["imessage", "sms"], "description": "Optional transport hint; normally omit — the Send Message action picks iMessage vs SMS automatically."},
+                },
+                "required": ["to", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_emails",
             "description": "List emails from an account/folder, newest first. Returns subject, sender, date, UID, and account for each email. Use list_email_accounts first when the user mentions Gmail/work/a custom mailbox. For last/latest/newest email requests, use max_results=1 and unread_only=false.",
             "parameters": {
@@ -1437,7 +1509,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = json.dumps(args)
         else:
             content = args.get("path", "")
-    elif tool_type in ("grep", "glob", "ls"):
+    elif tool_type in ("grep", "glob", "ls", "browser"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""

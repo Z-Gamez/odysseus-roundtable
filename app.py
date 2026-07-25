@@ -14,7 +14,6 @@ import time
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-
 def register_static_mime_types() -> None:
     """Force stable JS module MIME types across platforms.
 
@@ -766,6 +765,10 @@ app.include_router(setup_task_routes(task_scheduler))
 from routes.assistant_routes import setup_assistant_routes
 app.include_router(setup_assistant_routes(task_scheduler))
 
+# SAW Round Table — multi-agent SAFe orchestration (BSA -> Developer -> QAS).
+from routes.roundtable_routes import setup_roundtable_routes
+app.include_router(setup_roundtable_routes())
+
 # Calendar (CalDAV)
 from routes.calendar_routes import setup_calendar_routes
 calendar_router = setup_calendar_routes(upload_handler=upload_handler)
@@ -837,6 +840,10 @@ app.include_router(setup_note_routes(task_scheduler, upload_handler=upload_handl
 from routes.email_routes import setup_email_routes
 email_router = setup_email_routes()
 app.include_router(email_router)
+
+# macOS Messages approval card (send_imessage tool stages, user approves here).
+from routes.messages_routes import setup_messages_routes
+app.include_router(setup_messages_routes())
 
 # Codex integration — HTTP surface for the Codex plugin/MCP bridge. Reuses
 # api_token scopes (todos:read|write, email:read|draft|send) so external
@@ -929,8 +936,16 @@ async def get_version():
     return {"version": APP_VERSION}
 
 @app.get("/api/health")
-async def health_check() -> Dict[str, str]:
-    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+async def health_check() -> JSONResponse:
+    # The app marker + X-Odysseus header let the desktop launchers verify the
+    # responder is actually THIS server: macOS AirPlay Receiver squats port
+    # 7000 and answers 403 to everything, which a naive "any response = up"
+    # probe mistook for a running backend (white-screen on fresh boot).
+    return JSONResponse(
+        {"app": "odysseus", "status": "healthy",
+         "timestamp": datetime.now(timezone.utc).isoformat()},
+        headers={"X-Odysseus": "1"},
+    )
 
 @app.post("/api/client-perf")
 async def client_perf(request: Request):

@@ -62,6 +62,7 @@ _COMMON_TOOL_NAMES = {
     "manage_tokens",
     "manage_webhooks",
     "mark_email_read",
+    "open_in_safari",
     "pipeline",
     "python",
     "read_email",

@@ -33,6 +33,7 @@ from .admin_tools import (
     do_manage_tokens, do_manage_settings,
 )
 from .mac_messages import MacMessagesTool
+from .open_url import OpenUrlTool
 
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
@@ -63,6 +64,7 @@ TOOL_HANDLERS = {
     "send_to_session": SendToSessionTool().execute,
     "manage_session": ManageSessionTool().execute,
     "send_imessage": MacMessagesTool().execute,
+    "open_in_safari": OpenUrlTool().execute,
 }
 # Config/integration admin tools (manage_endpoints/mcp/webhooks/tokens/settings).
 TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
@@ -90,7 +92,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "browser", "read_file"
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
              "manage_notes", "manage_calendar",
-             "send_imessage",
+             "send_imessage", "open_in_safari",
     "resolve_contact", "manage_contact", "list_email_accounts", "send_email", "list_emails",
              "read_email", "reply_to_email", "bulk_email", "archive_email",
              "delete_email", "mark_email_read",

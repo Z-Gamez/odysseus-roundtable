@@ -71,7 +71,8 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "python": "Execute Python code for computation, data processing, math, scripting, and parsing. Not for writing code for the user. Prefer a dedicated tool for reading, writing, or searching files; use python only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
     "web_fetch": "Fetch and read the text content of a specific URL/website the user names (e.g. 'check example.com', 'open this link'). Use when you have a concrete URL; for open-ended lookups use web_search instead.",
-    "browser": "Control the user's real web browser (their Chrome, with their logins/tabs): navigate to pages, read them, click buttons/links, type into fields, fill and submit forms, manage tabs, screenshot. Use for INTERACTIVE tasks on a website — logging in, filling a form, clicking through a flow, doing something on a page — NOT read-only lookups (use web_search/web_fetch for those). High-stakes actions ask the user to confirm first.",
+    "open_in_safari": "Open a URL in the user's REAL browser for THEM to look at — on macOS their actual Safari with their logins/cookies/bookmarks; elsewhere the default browser. Use for 'open safari and go to X', 'navigate to X', 'open X', 'pull up X'. This is the right tool for plain 'open a page' requests; do NOT use `browser` for those (its Safari session is logged-out and isolated).",
+    "browser": "Drive an AUTOMATION browser so the AGENT can click/read/fill a page: navigate, read, click buttons/links, type into fields, submit forms, manage tabs, screenshot. Their real Chrome (logged in) on Chrome; a logged-out isolated session on Safari. Use for INTERACTIVE tasks the agent performs on a page — logging in, filling a form, clicking through a flow — NOT for simply opening a page for the user to view (use open_in_safari) and NOT for read-only lookups (use web_search/web_fetch). High-stakes actions ask the user to confirm first.",
     "read_file": "Read a file from disk and return its contents. View source code, config files, logs. Supports an optional line range (offset/limit) for large files.",
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
@@ -350,6 +351,16 @@ class ToolIndex:
         r"open\s+(?:a\s+)?(?:new\s+)?(?:tab|website|web\s*page))\b",
         re.I,
     )
+    # "Just open this page in my browser for me to look at" — the real Safari
+    # (open_in_safari), NOT the automation browser. Fires on Safari mentions and
+    # on open/go-to/pull-up/navigate + a URL-ish target.
+    _OPEN_URL_RE = re.compile(
+        r"\bsafari\b"
+        r"|\bnavigate\s+to\b"
+        r"|\b(?:open|go\s*to|goto|pull\s+up|visit|launch)\b[^.\n]*"
+        r"(?:https?://|www\.|\b[\w-]+\.(?:com|org|net|io|dev|gov|edu|co|app|ai)\b)",
+        re.I,
+    )
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
@@ -552,6 +563,11 @@ class ToolIndex:
         # real Chrome) is the `browser` tool — admin-gated, surfaced on clear intent.
         if self._BROWSER_RE.search(query):
             base.add("browser")
+        # "open safari and go to X" / "navigate to X" / "open X" — surface the
+        # real-browser opener so these stop collapsing to a UI-panel open or a
+        # low-signal reply.
+        if self._OPEN_URL_RE.search(query):
+            base.add("open_in_safari")
         # Hard steering: when the query is a clear "save info about a specific
         # person" pattern (address paste + name, phone next to a name, etc.),
         # the model has been observed defaulting to manage_memory even with

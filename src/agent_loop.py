@@ -277,6 +277,11 @@ _DOMAIN_RULES = {
 - To send a text / iMessage / SMS, use `send_imessage` (macOS only). Do NOT use shell/AppleScript directly.
 - Pass the person's NAME straight through as `to` — the Mac resolves it against macOS Contacts at send time. Never ask the user for a phone number they didn't give, and don't call `resolve_contact` first (it searches the CardDAV book / email history, not the Mac's Contacts).
 - The send is staged for the user's Approve/Decline card — do not claim the text was sent until it is approved.""",
+    "open_url": """\
+## Open-a-page rules
+- "Open Safari and go to X", "navigate to X", "open X", "pull up X" = just open the page in the user's OWN browser: use `open_in_safari` with the URL. On macOS it opens their real Safari (their logins, cookies, bookmarks).
+- Do NOT use the `browser` tool for that — its Safari session is logged-out and isolated, so the page would appear signed out. Only use `browser` when YOU need to click/read/fill the page yourself (and note Safari automation is logged out; logged-in automation needs Chrome).
+- Don't `open_panel`/`ui_control` for a website — that's for Odysseus's own UI panels, not web pages.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -292,6 +297,7 @@ _DOMAIN_TOOL_MAP = {
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
     "messaging": {"send_imessage", "resolve_contact", "manage_contact"},
+    "open_url": {"open_in_safari", "browser"},
 }
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -1075,6 +1081,13 @@ def _classify_agent_request(messages: List[Dict], last_user: str,
         domains.add("web")
     if has(r"\b(open|show|toggle|turn on|turn off|disable|enable|switch model|change model|settings|theme|panel)\b"):
         domains.add("ui")
+    # Open a web page in the user's own browser (open_in_safari), distinct from
+    # the UI-panel "open" above and from read-only web lookups. Fires on Safari
+    # mentions, "navigate to X", and open/go-to/pull-up + a URL-ish target.
+    if has(r"\bsafari\b",
+           r"\bnavigate to\b",
+           r"\b(?:open|go ?to|goto|pull up|visit|launch)\b[^.\n]*(?:https?://|www\.|\b[\w-]+\.(?:com|org|net|io|dev|gov|edu|co|app|ai)\b)"):
+        domains.add("open_url")
     if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash|python)\b"):

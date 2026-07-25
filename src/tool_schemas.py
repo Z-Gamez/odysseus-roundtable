@@ -82,8 +82,22 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "open_in_safari",
+            "description": "Open a URL in the user's REAL browser — on macOS their actual Safari (their logins, cookies, bookmarks); elsewhere the default browser. Use this for plain 'open safari and go to X', 'navigate to X', 'open X', 'pull up X' — anytime the user just wants a page opened for THEM to look at. Do NOT use the `browser` tool for that: its Safari automation session is logged-out and isolated. Only use `browser` when the agent itself must click/read/fill a page.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL or bare domain to open (e.g. 'youtube.com' or 'https://youtube.com')."}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "browser",
-            "description": "Control the user's real web browser (their Chrome, with their logins/tabs) from chat. One tool, many actions via 'action'. Typical flow: navigate -> snapshot (returns element refs like e5) -> click/type by ref -> read. High-stakes actions (submitting forms, buying, sending, deleting) need \"confirm\": true — first ASK THE USER, then re-call with confirm. Requires Chrome started with --remote-debugging-port (the tool says how if not connected).",
+            "description": "Drive an AUTOMATION browser so the AGENT can click/read/fill a page (their Chrome with logins on Chrome; an isolated LOGGED-OUT session on Safari). NOT for simply opening a page for the user to look at — use open_in_safari for that. One tool, many actions via 'action'. Typical flow: navigate -> snapshot (returns element refs like e5) -> click/type by ref -> read. High-stakes actions (submitting forms, buying, sending, deleting) need \"confirm\": true — first ASK THE USER, then re-call with confirm.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -15,6 +15,11 @@ import pytest
 import src.tools.contacts as contacts_tool
 from routes import email_helpers
 
+# NOTE: patches below use the dotted-path form on purpose. Another suite
+# (tests/test_security_regressions.py) evicts routes.email_helpers from
+# sys.modules, which would leave a module-object patch pointing at a stale
+# copy while do_resolve_contact re-imports a fresh one.
+
 
 def _executable_source(fn) -> str:
     """Function source with comments and the docstring stripped, so assertions
@@ -45,7 +50,7 @@ def test_shared_helper_exists_and_is_sync():
 
 def test_tool_uses_email_history_results(monkeypatch):
     """The tool surfaces what the shared search returns, tagged as email history."""
-    monkeypatch.setattr(email_helpers, "search_mail_contacts",
+    monkeypatch.setattr("routes.email_helpers.search_mail_contacts",
                         lambda name, owner="", limit=10: [
                             {"email": "Michaela@Example.com", "name": "Michaela"}])
     # No CardDAV configured in the test env — that branch degrades quietly.
@@ -62,7 +67,7 @@ def test_tool_passes_owner_through(monkeypatch):
         seen["name"], seen["owner"] = name, owner
         return []
 
-    monkeypatch.setattr(email_helpers, "search_mail_contacts", fake_search)
+    monkeypatch.setattr("routes.email_helpers.search_mail_contacts", fake_search)
     asyncio.run(contacts_tool.do_resolve_contact('{"name":"Bob"}', owner="admin"))
     assert seen == {"name": "Bob", "owner": "admin"}
 
@@ -71,7 +76,7 @@ def test_search_failure_does_not_break_the_tool(monkeypatch):
     def boom(name, owner="", limit=10):
         raise RuntimeError("IMAP down")
 
-    monkeypatch.setattr(email_helpers, "search_mail_contacts", boom)
+    monkeypatch.setattr("routes.email_helpers.search_mail_contacts", boom)
     out = asyncio.run(contacts_tool.do_resolve_contact('{"name":"Nobody"}', owner="admin"))
     assert out["exit_code"] == 0
     assert "No contacts found" in out["output"]

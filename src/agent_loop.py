@@ -16,7 +16,7 @@ from typing import AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
 from src.llm_core import (stream_llm, stream_llm_with_fallback, _is_ollama_native_url,
-                          ollama_native_tools_model, ollama_native_mode)
+                          ollama_native_tools_model, local_native_mode)
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
@@ -2564,7 +2564,9 @@ async def stream_agent_loop(
         # OpenAI's native tool-call channel unless the endpoint opts in.
         "gpt-oss",
     ))
-    # Tool-call format for Ollama endpoints (native /api/chat and the /v1
+    # Tool-call format for LOCAL endpoints (Ollama native /api/chat + /v1, and
+    # llama.cpp's OpenAI-compatible /v1 — the localhost heuristic below lumps
+    # them together, and local_native_mode asks whichever server is really there.
     # compat path). Native function calling used to be opt-in via the
     # per-endpoint supports_tools toggle, because SOME local models answer a
     # tool schema with a single native tool_call token and then stop (#1567).
@@ -2583,7 +2585,7 @@ async def stream_agent_loop(
     elif _endpoint_supports is False or _model_no_tools:
         _is_api_model = False
     elif _is_ollama_endpoint:
-        _is_api_model = await ollama_native_mode(endpoint_url, model)
+        _is_api_model = await local_native_mode(endpoint_url, model)
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat

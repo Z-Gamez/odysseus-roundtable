@@ -325,22 +325,77 @@ def ollama_native_tools_model(model: str) -> bool:
     return "ornith" in m
 
 
-async def ollama_native_mode(endpoint_url: str, model: str) -> bool:
-    """Should this Ollama model use NATIVE function calling (vs fenced blocks)?
+async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
+    """Whether a llama.cpp `llama-server` reports tool support (/props).
 
-    Ask the server (/api/show "tools" capability) and only fall back to the
-    curated/configured list when it can't answer. Callers apply the higher
-    precedence rules first: an explicit endpoint supports_tools flag, then the
-    per-model force-fenced blocklist.
+    llama-server serves ONE model, so this is per-endpoint, not per-model. It
+    answers with `chat_template_caps.supports_tools` — the direct analogue of
+    Ollama's /api/show capabilities (verified against llama-server b10107).
+    Note that reflects the model's chat TEMPLATE; the server also needs
+    `--jinja` for tool calls to actually be parsed.
+
+    None when this isn't a llama-server (no /props) or it can't be reached, so
+    the caller can fall through to its own default.
+    """
+    p = urlparse((endpoint_url or "").strip())
+    if not (p.scheme and p.netloc):
+        return None
+    root = f"{p.scheme}://{p.netloc}"
+    key = (root, "\x00llamacpp")     # per-server, distinct from Ollama's keys
+    now = time.time()
+    hit = _OLLAMA_CAPS_CACHE.get(key)
+    if hit:
+        age_limit = _OLLAMA_CAPS_TTL if hit[1] is not None else _OLLAMA_CAPS_TTL_UNKNOWN
+        if now - hit[0] < age_limit:
+            return hit[1]
+    result: Optional[bool] = None
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{root}/props")
+        if r.status_code == 200:
+            caps = (r.json() or {}).get("chat_template_caps")
+            if isinstance(caps, dict) and "supports_tools" in caps:
+                result = bool(caps.get("supports_tools")) and bool(
+                    caps.get("supports_tool_calls", True))
+    except Exception as e:
+        logger.debug("llama.cpp /props capability probe failed: %s", e)
+    _OLLAMA_CAPS_CACHE[key] = (now, result)
+    return result
+
+
+async def local_native_mode(endpoint_url: str, model: str) -> bool:
+    """Should this LOCAL model use NATIVE function calling (vs fenced blocks)?
+
+    Asks the server itself, because both local backends can answer:
+      - Ollama:    /api/show -> capabilities contains "tools"
+      - llama.cpp: /props    -> chat_template_caps.supports_tools
+
+    Only when neither answers (old Ollama, another OpenAI-compatible server,
+    host down) does it fall back to the curated/configured model list. Callers
+    apply the higher-precedence rules first: an explicit endpoint
+    supports_tools flag, then the per-model force-fenced blocklist.
+
+    This matters because Odysseus's localhost heuristic labels ANY local /v1
+    endpoint "Ollama" — a llama-server on :8080 included. Without the
+    llama.cpp branch such an endpoint probed a nonexistent /api/show, fell
+    through to the curated list, and silently got the fenced format.
     """
     caps = await ollama_supports_tools(endpoint_url, model)
-    if caps is None:
-        caps = ollama_native_tools_model(model)
-        logger.info("ollama capability probe unavailable for %r — curated "
-                    "fallback says native=%s", model, caps)
-    else:
+    if caps is not None:
         logger.info("ollama reports tools capability for %r: %s", model, caps)
+        return bool(caps)
+    caps = await llamacpp_supports_tools(endpoint_url)
+    if caps is not None:
+        logger.info("llama.cpp reports tools capability at %r: %s", endpoint_url, caps)
+        return bool(caps)
+    caps = ollama_native_tools_model(model)
+    logger.info("no local capability probe answered for %r — curated fallback "
+                "says native=%s", model, caps)
     return bool(caps)
+
+
+# Back-compat alias: the name predates llama.cpp support.
+ollama_native_mode = local_native_mode
 
 
 def _ollama_native_root(url: str) -> str:

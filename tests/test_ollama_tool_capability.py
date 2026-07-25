@@ -116,3 +116,106 @@ def test_configured_list_extends_the_fallback(monkeypatch):
     assert llm_core.ollama_native_tools_model("something-else") is False
     # Built-in default still applies alongside the configured list.
     assert llm_core.ollama_native_tools_model("ornith:9b") is True
+
+
+# ── llama.cpp (llama-server) ────────────────────────────────────────────────
+# Odysseus's localhost heuristic labels ANY local /v1 endpoint "Ollama", so a
+# llama-server on :8080 probed a nonexistent /api/show, fell through to the
+# curated model list, and silently got the fenced format. It answers /props
+# with chat_template_caps instead (field names verified against b10107).
+
+def _mock_props(monkeypatch, props=None, status=200, show_status=404, counter=None):
+    """Mock a llama-server: /api/show 404s, /props returns `props`."""
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, url, json=None):      # Ollama probe
+            if counter is not None:
+                counter["show"] = counter.get("show", 0) + 1
+            return httpx.Response(show_status, json={"error": "not found"},
+                                  request=httpx.Request("POST", url))
+
+        async def get(self, url):                  # llama.cpp probe
+            if counter is not None:
+                counter["props"] = counter.get("props", 0) + 1
+                counter["props_url"] = url
+            return httpx.Response(status, json=props or {},
+                                  request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(llm_core.httpx, "AsyncClient", _Client)
+
+
+_CAPS_TRUE = {"chat_template_caps": {"supports_tools": True, "supports_tool_calls": True}}
+_CAPS_FALSE = {"chat_template_caps": {"supports_tools": False, "supports_tool_calls": False}}
+
+
+def test_llamacpp_props_reports_tools(monkeypatch):
+    seen = {}
+    _mock_props(monkeypatch, _CAPS_TRUE, counter=seen)
+    assert asyncio.run(llm_core.llamacpp_supports_tools("http://localhost:8080/v1")) is True
+    assert seen["props_url"] == "http://localhost:8080/props"
+
+
+def test_llamacpp_props_reports_no_tools(monkeypatch):
+    _mock_props(monkeypatch, _CAPS_FALSE)
+    assert asyncio.run(llm_core.llamacpp_supports_tools("http://localhost:8080/v1")) is False
+
+
+def test_llamacpp_unknown_without_caps(monkeypatch):
+    _mock_props(monkeypatch, {"chat_template": "..."})   # older llama-server
+    assert asyncio.run(llm_core.llamacpp_supports_tools("http://localhost:8080/v1")) is None
+
+
+def test_llamacpp_unknown_when_no_props(monkeypatch):
+    _mock_props(monkeypatch, {}, status=404)
+    assert asyncio.run(llm_core.llamacpp_supports_tools("http://localhost:8080/v1")) is None
+
+
+def test_llamacpp_endpoint_gets_native_not_fenced(monkeypatch):
+    """The regression: a llama-server on localhost must not be mistaken for
+    Ollama and demoted to the fenced format."""
+    _mock_props(monkeypatch, _CAPS_TRUE)
+    # A model name that is NOT in the curated fallback list — so passing can
+    # only come from the llama.cpp probe, not from a lucky name match.
+    assert asyncio.run(llm_core.local_native_mode(
+        "http://localhost:8080/v1", "some-random-gguf")) is True
+
+
+def test_ollama_answer_wins_before_llamacpp_probe(monkeypatch):
+    """When Ollama answers, llama.cpp's /props is never consulted."""
+    seen = {}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None):
+            return httpx.Response(200, json={"capabilities": ["tools"]},
+                                  request=httpx.Request("POST", url))
+        async def get(self, url):
+            seen["props"] = True
+            return httpx.Response(200, json=_CAPS_FALSE,
+                                  request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(llm_core.httpx, "AsyncClient", _Client)
+    assert asyncio.run(llm_core.local_native_mode("http://localhost:11434/v1", "m")) is True
+    assert "props" not in seen, "llama.cpp probe should not run once Ollama answered"
+
+
+def test_llamacpp_result_is_cached(monkeypatch):
+    seen = {}
+    _mock_props(monkeypatch, _CAPS_TRUE, counter=seen)
+
+    async def twice():
+        a = await llm_core.llamacpp_supports_tools("http://localhost:8080/v1")
+        b = await llm_core.llamacpp_supports_tools("http://localhost:8080/v1")
+        return a, b
+
+    assert asyncio.run(twice()) == (True, True)
+    assert seen["props"] == 1, "per-server probe should hit /props once"
+
+
+def test_ollama_native_mode_alias_preserved():
+    assert llm_core.ollama_native_mode is llm_core.local_native_mode

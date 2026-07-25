@@ -810,6 +810,7 @@ body.bg-pattern-sparkles {
     }
     body.native-app .icon-rail.right-side {
       margin: 10px 10px 10px 8px;
+    }
     body.sidebar-collapsed:not(.hamburger-only) .icon-rail,
     html.ody-sidebar-mini .icon-rail {
       display: flex;

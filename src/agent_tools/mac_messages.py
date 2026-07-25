@@ -18,6 +18,7 @@ macOS only: on other platforms the tool and the approve endpoint return a clear
 Contract matches the rest of agent_tools: async execute(content, ctx) -> dict.
 """
 import json
+import logging
 import os
 import re
 import secrets
@@ -29,6 +30,8 @@ import time
 from typing import Dict, List, Optional
 
 from src.constants import DATA_DIR
+
+logger = logging.getLogger(__name__)
 
 _STORE = os.path.join(DATA_DIR, "pending_messages.json")
 _LOCK = threading.Lock()
@@ -224,6 +227,109 @@ def get(pid: str) -> Optional[dict]:
     return _load().get(pid)
 
 
+# --- AppleScript delivery (primary) -----------------------------------------
+# Drives Messages.app through its public AppleScript surface, the same approach
+# the `imsg` CLI uses. Recipient/body are argv, never interpolated, so nothing
+# can be injected. The account/participant form is current; service/buddy is
+# kept as a fallback for older systems. `with timeout` makes a wedged Messages
+# report -1712 itself instead of hanging until we kill it.
+_APPLESCRIPT = """
+on run argv
+    set theRecipient to item 1 of argv
+    set theBody to item 2 of argv
+    with timeout of 25 seconds
+        tell application "Messages"
+            try
+                set targetService to 1st account whose service type = iMessage
+                set targetBuddy to participant theRecipient of targetService
+                send theBody to targetBuddy
+            on error
+                set targetService to 1st service whose service type = iMessage
+                set targetBuddy to buddy theRecipient of targetService
+                send theBody to targetService's buddy theRecipient
+            end try
+        end tell
+    end timeout
+end run
+"""
+
+_AUTOMATION_HINT = (
+    "macOS hasn't granted Odysseus permission to control Messages.\n\n"
+    "Open System Settings → Privacy & Security → Automation, expand Odysseus, "
+    "and enable Messages. If Odysseus isn't listed yet, macOS never got to show "
+    "the consent prompt — run this once in Terminal to trigger it, click OK, "
+    "then retry:\n\n"
+    "  osascript -e 'tell application \"Messages\" to get name'\n\n"
+    "(Reinstalling Odysseus changes its code signature and can reset this.)"
+)
+
+
+def _ensure_messages_running(timeout_s: float = 10.0) -> None:
+    """Launch Messages.app and wait until it's up.
+
+    Sending to a cold Messages is a common source of AppleEvent timeouts: the
+    send arrives while the app is still starting and never gets answered.
+    Best-effort — the send itself reports the real error."""
+    try:
+        subprocess.run(["open", "-g", "-a", "Messages"], capture_output=True, timeout=15)
+    except Exception:
+        return
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            if subprocess.run(["pgrep", "-x", "Messages"],
+                              capture_output=True, timeout=5).returncode == 0:
+                time.sleep(0.8)   # let it finish wiring up its services
+                return
+        except Exception:
+            return
+        time.sleep(0.4)
+
+
+def _send_via_applescript(recipient: str, body: str, service: str = "") -> Optional[str]:
+    """Deliver via Messages.app AppleScript. None on success, else an error.
+
+    Retries once on a timeout — the first AppleEvent after Messages launches
+    (or after macOS decides to show a consent prompt) is the one that tends to
+    stall. The raw osascript stderr is always preserved so an unmapped failure
+    stays diagnosable from the approval card.
+    """
+    if sys.platform != "darwin":
+        return "Sending messages is only available on macOS."
+    _ensure_messages_running()
+    last = ""
+    for attempt in (1, 2):
+        try:
+            proc = subprocess.run(
+                ["osascript", "-", recipient, body],
+                input=_APPLESCRIPT, text=True, capture_output=True, timeout=40,
+            )
+        except FileNotFoundError:
+            return "osascript not found — is this macOS?"
+        except subprocess.TimeoutExpired:
+            last = "osascript did not return within 40s"
+            continue
+        if proc.returncode == 0:
+            return None
+        last = (proc.stderr or "").strip() or "AppleScript failed with no output"
+        low = last.lower()
+        # Not-authorized is terminal — retrying can't fix a missing TCC grant.
+        if "-1743" in last or "not authorized" in low or "assistive" in low:
+            return f"{_AUTOMATION_HINT}\n\nDetail: {last}"
+        if "-1728" in last or "can't get" in low:
+            return (f"Couldn't reach '{recipient}' on iMessage. Check the number/handle, "
+                    f"or that they're reachable via iMessage.\n\nDetail: {last}")
+        if "-1712" in last or "timed out" in low:
+            time.sleep(1.5)   # transient: let Messages settle, then retry once
+            continue
+        return last           # unknown failure — surface it verbatim, no retry
+    return (
+        "Messages didn't respond (AppleEvent timed out twice).\n\n"
+        "Most often this means the Automation consent prompt never appeared. "
+        f"{_AUTOMATION_HINT}\n\nDetail: {last}"
+    )
+
+
 _MISSING_SHORTCUT_HINT = (
     f"Shortcut '{SHORTCUT_NAME}' not found. Create it in the Shortcuts app: "
     f"name it exactly '{SHORTCUT_NAME}', have it accept text input, pull the "
@@ -273,6 +379,28 @@ def _send_via_shortcut(recipient: str, body: str, service: str = "") -> Optional
     return None
 
 
+def deliver(recipient: str, body: str, service: str = "") -> Optional[str]:
+    """Send now: AppleScript (full automation, no setup), Shortcut as backstop.
+
+    AppleScript is the primary path so a fresh install works with nothing but
+    the one-time Automation grant. If it fails for an environmental reason
+    (TCC not granted, Messages wedged) and the user happens to have the
+    OdysseusSendMessage shortcut, fall back to it rather than failing outright.
+    A bad RECIPIENT is not retried — the shortcut would fail identically.
+    """
+    err = _send_via_applescript(recipient, body, service)
+    if err is None:
+        return None
+    if "Couldn't reach" in err:
+        return err
+    fallback = _send_via_shortcut(recipient, body, service)
+    if fallback is None:
+        logger.info("iMessage: AppleScript failed, delivered via %s fallback", SHORTCUT_NAME)
+        return None
+    # Lead with the AppleScript failure — that's the one the user can fix.
+    return err
+
+
 def approve(pid: str) -> dict:
     with _LOCK:
         d = _load()
@@ -283,7 +411,7 @@ def approve(pid: str) -> dict:
             return {"success": True, "already": True}
         row["status"] = "sending"
         _save(d)
-    err = _send_via_shortcut(row["to"], row["body"], row.get("service", ""))
+    err = deliver(row["to"], row["body"], row.get("service", ""))
     with _LOCK:
         d = _load()
         row = d.get(pid) or row

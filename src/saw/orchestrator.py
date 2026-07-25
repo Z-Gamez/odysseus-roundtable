@@ -634,19 +634,7 @@ def _dev_messages(role: RoleSpec, title: str, spec_text: str,
     if review_feedback:
         user += ("\n\n# Previous review FAILED — you must address every point\n"
                  + review_feedback)
-    sys_prompt = role.system_prompt
-    # Ponytail (⚙ config toggle): lazy-senior-dev minimal-code rules for the
-    # Developer ONLY — reviewer roles keep judging against the normal gates.
-    try:
-        from src.settings import get_setting
-        if get_setting("saw_ponytail", False):
-            from src.llm_core import _ponytail_system_text
-            pt = _ponytail_system_text("full")
-            if pt:
-                sys_prompt = sys_prompt + "\n\n" + pt
-    except Exception:
-        pass
-    return [{"role": "system", "content": sys_prompt},
+    return [{"role": "system", "content": role.system_prompt},
             {"role": "user", "content": user}]
 
 

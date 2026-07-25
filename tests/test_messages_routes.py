@@ -47,7 +47,7 @@ def test_approve_attempts_send_and_returns_200(client, monkeypatch):
         calls["args"] = (recipient, body)
         return None  # delivered
 
-    monkeypatch.setattr(mac_messages, "_send_via_shortcut", fake_send)
+    monkeypatch.setattr(mac_messages, "deliver", fake_send)
     pid = mac_messages.stage("+1555", "hi", "imessage", "admin")
     r = client.post(f"/api/messages/pending/{pid}/approve")
     assert r.status_code == 200, r.text
@@ -57,14 +57,14 @@ def test_approve_attempts_send_and_returns_200(client, monkeypatch):
 
 
 def test_approve_surfaces_real_error_text(client, monkeypatch):
-    monkeypatch.setattr(mac_messages, "_send_via_shortcut",
-                        lambda r, b, s="": "Shortcut 'OdysseusSendMessage' not found.")
+    monkeypatch.setattr(mac_messages, "deliver",
+                        lambda r, b, s="": "Automation permission missing for Messages.")
     pid = mac_messages.stage("+1555", "hi", "imessage", "admin")
     r = client.post(f"/api/messages/pending/{pid}/approve")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["success"] is False
-    assert "OdysseusSendMessage" in body["error"]   # not a generic "send failed"
+    assert "Automation permission" in body["error"]   # not a generic "send failed"
 
 
 def test_status_and_decline_reachable(client):

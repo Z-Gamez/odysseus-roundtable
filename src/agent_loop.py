@@ -296,7 +296,7 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
-    "messaging": {"send_imessage", "resolve_contact", "manage_contact"},
+    "messaging": {"send_imessage", "read_imessages", "resolve_contact", "manage_contact"},
     "open_url": {"open_in_safari", "browser"},
 }
 

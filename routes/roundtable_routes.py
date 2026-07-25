@@ -138,8 +138,7 @@ def setup_roundtable_routes():
                           "endpoint_id": rc.get("endpoint_id", ""), "model": rc.get("model", "")})
         return {"roles": roles, "endpoints": _available_models(get_current_user(request)),
                 "rte_mode": get_setting("saw_rte_mode", "dry_run"),
-                "max_iterations": get_setting("saw_max_iterations", 3),
-                "ponytail": bool(get_setting("saw_ponytail", False))}
+                "max_iterations": get_setting("saw_max_iterations", 3)}
 
     @router.post("/config")
     async def set_config(request: Request) -> Any:
@@ -154,11 +153,6 @@ def setup_roundtable_routes():
             s["saw_rte_mode"] = mode
             save_settings(s)
             return {"ok": True, "rte_mode": mode}
-        if "ponytail" in body:   # Developer-only minimal-code ruleset (config/ponytail.md)
-            on = bool(body.get("ponytail"))
-            s["saw_ponytail"] = on
-            save_settings(s)
-            return {"ok": True, "ponytail": on}
         if "max_iterations" in body:   # Dev<->QAS retry budget (1..10, or 0 = ∞)
             try:
                 n = max(0, min(int(body.get("max_iterations")), 10))

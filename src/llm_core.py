@@ -1090,52 +1090,6 @@ def _is_unset_temperature(temperature) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Ponytail — "lazy senior dev" minimal-code rules
-# (github.com/DietrichGebert/ponytail, MIT; vendored at config/ponytail.md).
-# Injected into the system prompt of chat/agent streaming when the chat-bar
-# toggle / /ponytail command turns it on. Levels come from ponytail's own
-# help card: lite softens the ladder, ultra sharpens it, full IS the ruleset.
-# ---------------------------------------------------------------------------
-_PONYTAIL_LEVELS = {
-    "lite": ("Ponytail level: LITE — build exactly what is asked; when a lazier "
-             "alternative exists, name it in one line instead of building it."),
-    "full": "",
-    "ultra": ("Ponytail level: ULTRA — deletion before addition: challenge the "
-              "requirement itself before building anything, and prefer removing "
-              "code over adding it."),
-}
-
-
-def _ponytail_rules_text() -> str:
-    """The vendored ruleset, cached after first read ('' when missing)."""
-    cached = getattr(_ponytail_rules_text, "_cache", None)
-    if cached is not None:
-        return cached
-    text = ""
-    try:
-        from src.runtime_paths import get_app_root
-        path = os.path.join(get_app_root(), "config", "ponytail.md")
-        with open(path, encoding="utf-8") as f:
-            text = f.read().strip()
-    except Exception:
-        logger.warning("ponytail: config/ponytail.md unreadable — mode disabled", exc_info=True)
-    _ponytail_rules_text._cache = text
-    return text
-
-
-def _ponytail_system_text(level: str) -> str:
-    """Ruleset + level modifier for an active level, else ''."""
-    level = (level or "").strip().lower()
-    if level not in ("lite", "full", "ultra"):
-        return ""
-    rules = _ponytail_rules_text()
-    if not rules:
-        return ""
-    modifier = _PONYTAIL_LEVELS[level]
-    return (rules + "\n\n" + modifier).strip()
-
-
 # Anthropic removed the sampling parameters (temperature, top_p, top_k) starting
 # with Claude Opus 4.7. On Opus 4.7 and later, sending `temperature` at all —
 # even 0.0 — returns HTTP 400. Earlier Claude models (Opus 4.6 and below, every
@@ -2065,22 +2019,6 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     messages_copy[_i] = dict(messages_copy[_i])
                     messages_copy[_i]["content"] = messages_copy[_i]["content"].rstrip() + " /no_think"
                     break
-    except Exception:
-        pass
-
-    # Ponytail (chat-bar toggle / the /ponytail command): append the lazy-senior-
-    # dev ruleset to the consolidated system message. Appended LAST so it stays
-    # after the stable prompt prefix (KV-cache friendliness) and reads as the
-    # final word on code style.
-    try:
-        from src.settings import get_setting
-        _pt = _ponytail_system_text(get_setting("ponytail_mode", "off"))
-        if _pt:
-            if messages_copy and messages_copy[0].get("role") == "system":
-                messages_copy[0] = {"role": "system",
-                                    "content": (messages_copy[0].get("content") or "") + "\n\n" + _pt}
-            else:
-                messages_copy.insert(0, {"role": "system", "content": _pt})
     except Exception:
         pass
 

@@ -36,13 +36,6 @@ The full license texts are kept in [`licenses/`](licenses/).
   Deep Research feature (`services/research/`, `src/research_handler.py`,
   `routes/research_routes.py`, `services/search/`). Full text in
   [`licenses/DeepResearch-Apache-2.0.txt`](licenses/DeepResearch-Apache-2.0.txt).
-- **[Ponytail](https://github.com/DietrichGebert/ponytail)** by
-  **Dietrich Gebert** — the "lazy senior dev" minimal-code ruleset and its
-  command prompts. Copyright © 2026 DietrichGebert. **MIT License.** The core
-  ruleset is vendored verbatim at `config/ponytail.md` (injected behind the
-  chat Ponytail toggle and the Round Table Developer option), and the
-  `/ponytail*` slash-command prompts are adapted in
-  `static/js/slashCommands.js`.
 
 ---
 

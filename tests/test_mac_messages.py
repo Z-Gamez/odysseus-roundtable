@@ -1,11 +1,11 @@
 """macOS text-send tool — staging + approval state machine.
 
 The agent stages a text (never sends); the chat's Approve/Decline card hits
-the REST endpoints, and only Approve delivers. Delivery runs the macOS
-Shortcuts CLI (`shortcuts run OdysseusSendMessage`) rather than Messages
-AppleScript, which is unreliable on macOS 26. These tests cover the storage/
-approval logic and the Shortcuts invocation with the subprocess mocked; the
-live send is exercised on the Mac.
+the REST endpoints, and only Approve delivers. deliver() runs Messages
+AppleScript first (full automation, no setup) and falls back to the Shortcuts
+CLI. These tests cover the storage/approval state machine and the Shortcut
+backstop's own invocation; the AppleScript path and delivery ORDER live in
+test_mac_messages_read.py, and the live send is exercised on the Mac.
 """
 import asyncio
 import json
@@ -46,7 +46,7 @@ def test_approve_sends_and_records_status(monkeypatch):
         sent["args"] = (recipient, body, service)
         return None  # success
 
-    monkeypatch.setattr(mac_messages, "_send_via_shortcut", fake_send)
+    monkeypatch.setattr(mac_messages, "deliver", fake_send)
     pid = mac_messages.stage("+1555", "hello", "imessage", "o")
     res = mac_messages.approve(pid)
     assert res["success"] is True
@@ -55,8 +55,8 @@ def test_approve_sends_and_records_status(monkeypatch):
 
 
 def test_approve_records_failure(monkeypatch):
-    monkeypatch.setattr(mac_messages, "_send_via_shortcut",
-                        lambda r, b, s: "Couldn't reach that number")
+    monkeypatch.setattr(mac_messages, "deliver",
+                        lambda r, b, s="": "Couldn't reach that number")
     pid = mac_messages.stage("+1555", "hello", "sms", "o")
     res = mac_messages.approve(pid)
     assert res["success"] is False
@@ -186,8 +186,8 @@ def test_pending_visible_when_staged_without_owner():
 
 
 def test_failed_error_persisted_for_the_card(monkeypatch):
-    raw = "shortcuts: the OdysseusSendMessage shortcut reported a failure"
-    _shortcuts_result(monkeypatch, returncode=1, stderr=raw)
+    raw = "Messages didn't respond (AppleEvent timed out twice)."
+    monkeypatch.setattr(mac_messages, "deliver", lambda r, b, s="": raw)
     pid = mac_messages.stage("+1555", "hi", "imessage", "")
     res = mac_messages.approve(pid)
     assert res["success"] is False

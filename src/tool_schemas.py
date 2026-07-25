@@ -1111,6 +1111,22 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_imessages",
+            "description": "Read the Mac's iMessage/SMS history. macOS only. Use when the user asks what someone said, to check/summarize their texts, to find an old message, or what's unread. Actions: 'chats' (recent conversations), 'conversation' (a thread with someone — pass who), 'search' (pass query), 'unread'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["chats", "conversation", "search", "unread"], "description": "What to read. Default 'chats'."},
+                    "who": {"type": "string", "description": "For action=conversation: contact name, phone number, or handle."},
+                    "query": {"type": "string", "description": "For action=search: text to look for."},
+                    "limit": {"type": "integer", "description": "Max rows to return (default 25)."}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "send_imessage",
             "description": "Text / iMessage / SMS someone — message a person via the Mac's Messages app. macOS only. Use this whenever the user says text, txt, message, iMessage, or SMS a person. You can address the message by the person's NAME (resolved via macOS Contacts); you do NOT need their phone number, so never stop to ask for one when the user gave you a name. This STAGES the message and shows the user an Approve/Decline card — it is NOT sent until they approve, so do not claim it was sent.",
             "parameters": {

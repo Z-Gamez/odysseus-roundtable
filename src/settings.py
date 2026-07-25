@@ -43,15 +43,6 @@ DEFAULT_SETTINGS = {
     # their thinking step and act directly — less overthinking/looping on tool-use and
     # browsing. Harmless no-op for models that don't recognise the switch.
     "fast_mode": False,
-    # Ponytail (chat-bar toggle / the /ponytail command): "lazy senior dev" rules
-    # from github.com/DietrichGebert/ponytail (MIT, vendored at config/ponytail.md)
-    # injected into the chat/agent system prompt. Levels: off | lite | full | ultra
-    # (lite = name the lazier alternative; full = the YAGNI->stdlib->native->one-line
-    # ladder; ultra = deletion before addition, challenge the requirement).
-    "ponytail_mode": "off",
-    # Round Table: apply the ponytail ruleset to the Developer role's prompt only
-    # (reviewer roles keep judging against the normal gates).
-    "saw_ponytail": False,
     # Local (Ollama) performance: cap the context window Odysseus asks Ollama to
     # allocate. A model's full window (often 128K) makes Ollama allocate a giant KV
     # cache that spills out of VRAM and forces a model reload - far slower than the

@@ -2037,7 +2037,8 @@ async def llm_call_async(
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None):
+                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
+                     suppress_thinking: bool = False):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2122,8 +2123,24 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
         # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
         # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
-        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
+        if _is_ollama_openai_compat_url(url) and (_supports_thinking(model) or suppress_thinking):
             payload["think"] = False
+        # Turning reasoning off takes a different field on every server, and
+        # sending the wrong one fails SILENTLY (200 + a full reasoning block),
+        # so send all three — each server ignores the others' fields. Probed
+        # against Ollama 0.x /v1 with qwen3:14b, 'hey', max_tokens=256:
+        #   nothing sent          -> 470 reasoning chars
+        #   think: false          -> 362   (ignored; /v1 is not /api/chat)
+        #   chat_template_kwargs  -> 365   (ignored)
+        #   reasoning_effort:none -> 0     (honored)
+        # llama.cpp is the mirror image: it gates reasoning through the chat
+        # template, so chat_template_kwargs is the one that lands there.
+        if suppress_thinking:
+            payload["reasoning_effort"] = "none"
+            payload["chat_template_kwargs"] = {
+                **(payload.get("chat_template_kwargs") or {}),
+                "enable_thinking": False,
+            }
         _apply_local_cache_affinity(payload, url, session_id)
         h = _provider_headers(provider, headers)
         if provider == "copilot":

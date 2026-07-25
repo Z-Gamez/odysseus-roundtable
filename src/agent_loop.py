@@ -2279,16 +2279,24 @@ async def stream_agent_loop(
         direct_actual_model = model
         real_input_tokens = 0
         real_output_tokens = 0
+        # A thinking model spends its whole budget on the reasoning block and
+        # returns EMPTY content with finish_reason="length" — the user then got
+        # the canned "Hey." below. Suppress thinking (pure waste for a greeting),
+        # give a real budget instead of 128, and retry if it still comes back
+        # empty after reasoning.
+        _direct_budget = min(max_tokens or 512, 512)
+        _saw_thinking = False
         try:
             async for chunk in stream_llm_with_fallback(
                 [(endpoint_url, model, headers)] + list(fallbacks or []),
                 direct_messages,
                 temperature=temperature,
-                max_tokens=min(max_tokens or 128, 128),
+                max_tokens=_direct_budget,
                 prompt_type=None,
                 tools=None,
                 timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
                 session_id=session_id,
+                suppress_thinking=True,
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                     try:
@@ -2312,7 +2320,9 @@ async def stream_agent_loop(
                         yield chunk
                         continue
                     if "delta" in data:
-                        if not data.get("thinking"):
+                        if data.get("thinking"):
+                            _saw_thinking = True
+                        else:
                             direct_response += data.get("delta", "")
                         yield chunk
                         continue
@@ -2324,6 +2334,39 @@ async def stream_agent_loop(
             fallback = "Hey."
             direct_response += fallback
             yield f"data: {json.dumps({'delta': fallback})}\n\n"
+
+        if not direct_response.strip() and _saw_thinking:
+            # Reasoning ate the whole budget. Retry once, much larger, rather
+            # than rendering a canned reply the user didn't ask for.
+            logger.info("[agent] low-signal reply was all reasoning — retrying with a larger budget")
+            try:
+                async for chunk in stream_llm_with_fallback(
+                    [(endpoint_url, model, headers)] + list(fallbacks or []),
+                    direct_messages,
+                    temperature=temperature,
+                    max_tokens=2048,
+                    prompt_type=None,
+                    tools=None,
+                    timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
+                    session_id=session_id,
+                    suppress_thinking=True,
+                ):
+                    if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                        try:
+                            data = json.loads(chunk[6:])
+                        except json.JSONDecodeError:
+                            yield chunk
+                            continue
+                        if data.get("type") == "usage":
+                            usage = data.get("data", {}) or {}
+                            real_input_tokens += usage.get("input_tokens", 0) or 0
+                            real_output_tokens += usage.get("output_tokens", 0) or 0
+                            continue
+                        if "delta" in data and not data.get("thinking"):
+                            direct_response += data.get("delta", "")
+                        yield chunk
+            except Exception as _retry_err:
+                logger.warning("[agent] low-signal retry failed: %s", _retry_err)
 
         if not direct_response.strip():
             fallback = "Hey."

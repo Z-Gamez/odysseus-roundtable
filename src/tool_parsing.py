@@ -129,6 +129,26 @@ _XML_DIRECT_TOOL_RE = re.compile(
 _XML_INVOKE_OPEN_RE = re.compile(r'<invoke\s+name=["\'](\w+)["\']>\s*', re.IGNORECASE)
 _XML_INVOKE_CLOSE_RE = re.compile(r'</invoke>', re.IGNORECASE)
 _XML_DIRECT_OPEN_RE = re.compile(r"<\s*([A-Za-z_][\w-]*)\s*>", re.IGNORECASE)
+# Qwen3-Coder / xLAM XML dialect:
+#   <tool_call>
+#   <function=read_file>
+#   <parameter=path>
+#   SPEC.md
+#   </parameter>
+#   </function>
+#   </tool_call>
+# The name rides in the TAG (`<function=name>`), not an attribute, so the
+# <invoke name="..."> patterns above miss it entirely. llama.cpp only converts
+# whatever shape its chat template declares, so on a template that expects a
+# different form these arrive as ordinary text — the model looks like it is
+# narrating tool calls while nothing executes. Observed for real: a Round Table
+# Developer emitted 24 of these across five iterations and the run never moved.
+# Forward-only delimiters, same as the patterns above, to keep the lazy rescan
+# linear on untrusted output.
+_XML_FUNC_EQ_OPEN_RE = re.compile(r"<function\s*=\s*([A-Za-z_][\w-]*)\s*>", re.IGNORECASE)
+_XML_FUNC_EQ_CLOSE_RE = re.compile(r"</function\s*>", re.IGNORECASE)
+_XML_PARAM_EQ_OPEN_RE = re.compile(r"<parameter\s*=\s*([A-Za-z_][\w-]*)\s*>", re.IGNORECASE)
+_XML_PARAM_EQ_CLOSE_RE = re.compile(r"</parameter\s*>", re.IGNORECASE)
 # Split <parameter ...>...</parameter> delimiters: the parameter scan inside an
 # invoke body is forward-only too, so a closed invoke stuffed with unclosed
 # parameter openers can't drive finditer's O(n^2) rescan. See _iter_named_blocks.
@@ -885,6 +905,28 @@ def _parse_xml_invoke(name, body) -> Optional[ToolBlock]:
     return function_call_to_tool_block(tool_name, json.dumps(params))
 
 
+def _parse_xml_func_eq(name, body) -> Optional[ToolBlock]:
+    """Parse the Qwen3-Coder / xLAM dialect:
+
+        <function=read_file>
+        <parameter=path>
+        SPEC.md
+        </parameter>
+        </function>
+
+    Same shape as an <invoke>, but the names ride in the TAG rather than an
+    attribute, so the <invoke name="..."> patterns miss it completely. Reuses
+    function_call_to_tool_block for exactly the reasons in _parse_xml_invoke:
+    one place decides the tool set and the per-tool content format.
+    """
+    tool_name = name.lower()
+    params = {}
+    for pname, pval in _iter_named_blocks(body, _XML_PARAM_EQ_OPEN_RE, _XML_PARAM_EQ_CLOSE_RE):
+        params[pname] = pval.strip()
+    from src.tool_schemas import function_call_to_tool_block
+    return function_call_to_tool_block(tool_name, json.dumps(params))
+
+
 def _parse_xml_direct_tool(name, body) -> Optional[ToolBlock]:
     """Parse direct XML tool tags inside <tool_call>.
 
@@ -1334,6 +1376,13 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
                 block = _parse_xml_invoke(inv_name, inv_body)
                 if block:
                     blocks.append(block)
+            if not blocks:
+                for fn_name, fn_body in _iter_named_blocks(
+                    body, _XML_FUNC_EQ_OPEN_RE, _XML_FUNC_EQ_CLOSE_RE
+                ):
+                    block = _parse_xml_func_eq(fn_name, fn_body)
+                    if block:
+                        blocks.append(block)
             if not blocks:
                 for d_name, d_body in _iter_xml_direct(body):
                     block = _parse_xml_direct_tool(d_name, d_body)

@@ -2397,9 +2397,18 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     # Fast mode (chat-bar toggle): when on, append the /no_think soft-switch to the
     # latest user turn for ALL models, so reasoning models (Qwen3, etc.) skip their
     # thinking step and act directly. Harmless for models that don't recognise it.
+    #
+    # The text switch alone is NOT enough. /no_think is a Qwen-on-Ollama prompt
+    # convention; llama.cpp gates reasoning through the chat template and ignores
+    # it outright. A llama-server model would keep thinking with Fast Mode on,
+    # and could spend its whole budget reasoning and return EMPTY content
+    # (observed: finish_reason=length, 0 content chars, 942 reasoning chars).
+    # So Fast Mode also sets the real API fields further down, via
+    # suppress_thinking — see _apply_thinking_suppression.
     try:
         from src.settings import get_setting
         if get_setting("fast_mode", False):
+            suppress_thinking = True
             for _i in range(len(messages_copy) - 1, -1, -1):
                 if messages_copy[_i].get("role") == "user" and isinstance(messages_copy[_i].get("content"), str):
                     messages_copy[_i] = dict(messages_copy[_i])

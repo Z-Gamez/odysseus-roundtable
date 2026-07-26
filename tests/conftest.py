@@ -5,6 +5,8 @@ import types
 import importlib.util
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Importing core.database below runs init_db() at import time, and its default
@@ -93,3 +95,49 @@ def pytest_collection_modifyitems(config, items):
         path = getattr(item, "path", None) or item.fspath
         for marker_name in markers_for_path(path):
             item.add_marker(getattr(pytest.mark, marker_name))
+
+
+try:  # once, at collection time — never during a test's setup
+    import src.settings as _settings
+except Exception:  # settings unavailable in this environment; skip the patch
+    _settings = None
+
+
+@pytest.fixture(autouse=True)
+def _neutral_chat_bar_toggles():
+    """Keep the developer's UI toggles out of the test run.
+
+    `fast_mode` is a chat-bar switch stored in user settings, and stream_llm
+    reads it directly: when on it appends /no_think AND turns reasoning off via
+    reasoning_effort / chat_template_kwargs. That means a developer who happens
+    to have Fast Mode enabled sees different request payloads than one who
+    doesn't, and payload-shape assertions fail for reasons unrelated to the
+    change under test. (Caught exactly that way — two suppression tests started
+    failing purely because the toggle was on.)
+
+    Default it off so payload tests are deterministic. Tests that care about
+    Fast Mode set it explicitly and override this.
+
+    Deliberately does NOT request pytest's `monkeypatch`. Requesting it here
+    changes when pytest instantiates it, which reorders teardown for every test
+    in the run: tests/test_upload_limits_centralized.py has an autouse fixture
+    that reloads a module on teardown, and with monkeypatch finalising later
+    that reload re-read an intentionally-invalid env var and raised. Save and
+    restore the attribute by hand so this fixture stays invisible to ordering.
+    """
+    if _settings is None:
+        yield
+        return
+
+    _real = _settings.get_setting
+
+    def _patched(key, default=None):
+        if key == "fast_mode":
+            return False
+        return _real(key, default)
+
+    _settings.get_setting = _patched
+    try:
+        yield
+    finally:
+        _settings.get_setting = _real

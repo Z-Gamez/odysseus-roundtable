@@ -4104,6 +4104,13 @@ async def stream_agent_loop(
     yield f"data: {json.dumps({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})}\n\n"
 
     full_response = ""
+    # Reasoning for the WHOLE turn. round_reasoning is reset every round, but
+    # the empty-response guard runs once after the loop — so if a thinking model
+    # reasoned in round 1 and produced nothing in round 2, the guard saw "" and
+    # reported "the model returned an empty response" even though there WAS
+    # reasoning to fall back on. Observed with llama.cpp: finish_reason=length,
+    # 0 content chars, 942 reasoning chars.
+    turn_reasoning = ""
     total_start = time.time()
     time_to_first_token = None
     first_token_received = False
@@ -4481,6 +4488,7 @@ async def stream_agent_loop(
                         # round_response unchanged.
                         if data.get("thinking"):
                             round_reasoning += data["delta"]
+                            turn_reasoning += data["delta"]
                         else:
                             _delta_text = (
                                 _strip_doc_model_artifacts(data["delta"])
@@ -5673,7 +5681,7 @@ async def stream_agent_loop(
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
     full_response, _fallback_chunk = _empty_response_fallback(
-        full_response, round_reasoning, tool_events
+        full_response, turn_reasoning, tool_events
     )
     if _fallback_chunk:
         yield _fallback_chunk

@@ -117,3 +117,11 @@ native/**/target/
 native/target/
 *.iss~
 native/
+
+# Signing material — none is in the repo today, and none should ever be.
+# Cheap insurance so a stray keystore/cert can't be committed by accident.
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem

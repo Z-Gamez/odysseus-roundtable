@@ -2758,6 +2758,25 @@ export function addMessage(role, content, modelName, metadata) {
       wrap.appendChild(createUserMsgFooter(wrap));
     }
 
+    // Collapse a repeated model label. A multi-round answer emits one assistant
+    // message per round, each re-printing the model name — and llama.cpp reports
+    // a blob path as its name, so that line is both long and meaningless
+    // ("C:\Users\...\.ollama\models\blobs\sha256-af63..."), repeated down the
+    // whole reply. Print it only when the model actually changes, which is when
+    // it carries information. Compared against the previous sibling at insert
+    // time; `_roleText` is var-scoped and simply undefined for the non-standard
+    // message shapes, so those never match and are left alone.
+    try {
+      if (role === 'assistant' && typeof _roleText === 'string' && _roleText) {
+        wrap.dataset.roleLabel = _roleText;
+        const prev = box.lastElementChild;
+        if (prev && prev.classList.contains('msg-ai') &&
+            prev.dataset.roleLabel === _roleText) {
+          wrap.classList.add('role-repeat');
+        }
+      }
+    } catch (_e) { /* labelling is cosmetic — never block the message */ }
+
     box.appendChild(wrap);
 
     // TTS is now part of the msg-actions system

@@ -41472,3 +41472,279 @@ body.theme-frosted .modal {
   .compare-grid[data-cols] { grid-template-columns: 1fr !important; overflow-y: auto; }
   .compare-pane { min-height: 60dvh; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Slim chat density
+   ---------------------------------------------------------------------------
+   Every user turn used to cost three pieces of chrome to say something the
+   layout already said: an 8px dot, a bold "You", and a bordered box. And each
+   assistant reply was a full card — border + fill + radius — which is what made
+   a back-and-forth read as a stack of cards instead of a conversation.
+
+   Appended rather than edited in place: the rules below live thousands of lines
+   apart in this file, and the density variants (:root.density-compact .msg etc)
+   carry higher specificity than the bare .msg selectors here, so those keep
+   winning and users who picked a density still get it.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Tighter default rhythm. Consecutive turns from one speaker sit close; the
+   gap only opens when the speaker changes, which is what reads as dialogue. */
+.msg {
+  margin: 2px 0;
+  padding: 6px 11px;
+  animation-duration: 0.18s;
+}
+.msg-user + .msg-ai,
+.msg-ai + .msg-user {
+  margin-top: 12px;
+}
+
+/* User: right-alignment and the tint identify the speaker — the label is noise. */
+.msg-user .role { display: none; }
+.msg-user {
+  border: 0;
+  border-radius: 12px 12px 3px 12px;
+  margin-right: 0;
+}
+
+/* Assistant: no card at all. Plain text on the page, the way a transcript reads.
+   Removes a border, a background and a radius from every single reply. */
+.msg-ai {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 3px 0;
+  margin-left: 0;
+  width: auto;
+  max-width: 90%;
+}
+
+/* The model name stays — it does real work when switching models — but as a
+   hairline label rather than a heading. Dot shrinks with it. */
+.msg .role {
+  font-weight: 400;
+  font-size: 0.78em;
+  letter-spacing: 0.03em;
+  opacity: 0.45;
+  margin-bottom: 3px;
+  gap: 5px;
+}
+.msg .role::before {
+  width: 5px;
+  height: 5px;
+}
+
+/* Composer: the bar itself stops being a box. The border moves onto the input
+   row only, and the toggle row is reordered above it — so the toggles read as
+   controls sitting outside the field instead of clutter inside it. Pure flex
+   `order`, no DOM move, so nothing that queries these nodes is affected. */
+.chat-input-bar {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  gap: 6px;
+}
+.chat-input-top {
+  order: 2;
+  background: var(--input-bg, var(--panel));
+  border: 1px solid var(--input-border, var(--border));
+  border-radius: 12px;
+  padding: 7px 10px;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+.chat-input-top:focus-within {
+  border-color: color-mix(in srgb, var(--accent, var(--fg)) 45%, var(--input-border, var(--border)));
+}
+#pinned-tools-bar { order: 1; }
+.chat-input-bottom {
+  order: 0;
+  margin-top: 0;
+  padding: 0 2px;
+}
+
+/* Plan mode used to tint and dash-outline .chat-input-bar, which WAS the box.
+   Now the box is .chat-input-top, so that treatment has to move with it —
+   otherwise the tint paints a band behind the toggle row as well, and the
+   dashed border is invisible because the bar's border-width is now 0. */
+body.plan-mode-active .chat-input-bar {
+  background: transparent;
+  border: 0;
+}
+body.plan-mode-active .chat-input-top {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--red)) 7%, var(--input-bg, var(--panel)));
+}
+
+/* ═══ Slim chat, pass 2 ═══════════════════════════════════════════════════════
+   From looking at the rendered result: the user tint still read as a bubble,
+   the composer kept a hairline box, and the assistant footer carried five
+   pieces of chrome to surface two useful controls.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* User: no bubble at all. Right-alignment alone identifies the speaker, which
+   is the same reasoning that removed the "You" label. */
+.msg-user {
+  background: transparent;
+  padding: 2px 0;
+  border-radius: 0;
+  max-width: 78%;
+}
+
+/* Composer: drop the outline entirely. The field reads as a field from its
+   placeholder and caret; the box was only ever separating it from the toggles,
+   and those now sit outside it. */
+.chat-input-top,
+body.plan-mode-active .chat-input-top {
+  border: 0;
+  background: transparent;
+  padding: 4px 0;
+}
+/* Plan mode still needs to be unmistakable, so it keeps a marker — just a left
+   rule instead of a full dashed outline. */
+body.plan-mode-active .chat-input-top {
+  border-left: 2px solid color-mix(in srgb, var(--accent, var(--red)) 60%, transparent);
+  padding-left: 8px;
+}
+
+/* Assistant footer: keep the two controls that act (copy / edit, and the
+   overflow that holds the rest) plus the context percentage. Drop the readouts
+   — tok/s, the memory pill and the divider pipes are diagnostics, and they
+   belong in the Message Stats popup that already exists, not under every line. */
+.msg-footer .response-metrics,
+.msg-footer .metrics-divider,
+.msg-footer .ctx-divider,
+.msg-footer .memory-used-pill {
+  display: none;
+}
+.msg-footer {
+  gap: 6px;
+  opacity: 0.55;
+  transition: opacity 0.14s ease;
+}
+.msg:hover .msg-footer,
+.msg-footer:focus-within {
+  opacity: 1;
+}
+
+/* Model label: the full blob path was overflowing its column. Cap it and let it
+   ellipsize rather than clip mid-glyph. */
+.msg .role {
+  max-width: 340px;
+}
+
+/* Composer column: the toggle row and the field were butting into the viewport
+   edge. Give the stack real breathing room at the bottom of the pane. */
+.chat-container .chat-input-bar {
+  padding-bottom: 10px;
+}
+.chat-input-bottom {
+  gap: 6px;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+/* Correction: the previous pass stripped the composer's BACKGROUND as well as
+   its border. Only the hairline outline was meant to go — the filled pill is
+   what separates the field from the page and gives the caret somewhere to sit.
+   Border stays off; fill, radius and padding come back. */
+.chat-input-top,
+body.plan-mode-active .chat-input-top {
+  background: var(--input-bg, var(--panel));
+  border: 0;
+  border-radius: 14px;
+  padding: 8px 12px;
+}
+/* Plan mode tints the pill instead of outlining it, and keeps the accent rule
+   on the left so the state is still unmistakable at a glance. */
+body.plan-mode-active .chat-input-top {
+  background: color-mix(in srgb, var(--accent, var(--red)) 8%, var(--input-bg, var(--panel)));
+  border-left: 2px solid color-mix(in srgb, var(--accent, var(--red)) 60%, transparent);
+  padding-left: 10px;
+}
+
+/* Drop the ❯ prompt glyph. It was a terminal affectation on a chat field, and
+   with the composer already stripped back it was the last bit of decoration
+   left. Reclaim the 18px gutter that was reserved for it — otherwise the
+   placeholder and the caret stay indented against nothing. */
+.chat-input-top::before {
+  content: none;
+}
+.chat-input-bar textarea#message,
+.ghost-text-overlay {
+  padding-left: 0;
+}
+
+/* Model picker: vertically centre it in the composer pill.
+   It was `top: 0`, which pins it to the top inner edge — fine when the field
+   was tall and boxed, visibly high now that the pill is short. Absolute
+   positioning resolves against the padding box, so no padding value centres it;
+   it needs the 50%/-50% pair. */
+.chat-input-top > .model-picker-wrap {
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  transform-origin: right center;
+}
+/* The hidden states animate with their own transform, which would clobber the
+   centring and make the chip jump to the top edge as it fades. Fold the
+   centring offset into them so they slide from where the chip actually sits. */
+body.plan-mode-active .chat-input-top > .model-picker-wrap,
+.chat-input-top > .model-picker-wrap.model-picker-autohide,
+.chat-input-top > .model-picker-wrap.picker-auto-hidden {
+  transform: translateY(calc(-50% - 4px)) scale(0.96);
+}
+
+/* ═══ Thinking section: box → inline row ═════════════════════════════════════
+   It was a full-width card — 1px accent border, tinted fill, 8px radius, 12px
+   margins — repeated once per round. On a multi-round answer that stacks into
+   more visual weight than the answer itself. It becomes a quiet line you can
+   click, and the reasoning still expands underneath exactly as before.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.thinking-section {
+  margin: 4px 0;
+  width: fit-content;
+  max-width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.thinking-header {
+  padding: 1px 0;
+  gap: 6px;
+  background: transparent;
+  border-radius: 0;
+}
+/* Muted rather than accent-red: this is an aside, not a warning. It brightens
+   on hover so it still reads as clickable. */
+.thinking-header-left {
+  font-size: 0.78em;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+}
+.thinking-toggle {
+  font-size: 0.68em;
+  color: color-mix(in srgb, var(--fg) 38%, transparent);
+}
+.thinking-section:hover .thinking-header-left,
+.thinking-section:hover .thinking-toggle {
+  color: color-mix(in srgb, var(--fg) 75%, transparent);
+}
+/* Expanded reasoning sits inside a hairline left rule instead of a filled card,
+   so it reads as a quotation of the model's own working. */
+.thinking-content {
+  padding: 0 0 0 10px;
+  border-left: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  margin-left: 2px;
+  font-size: 0.86em;
+  opacity: 0.72;
+}
+
+/* A repeated model label carries no information — hide it and let consecutive
+   rounds of one answer sit together as a single block of speech. The .role node
+   stays in the DOM (chatRenderer only adds the class) so anything reading it
+   still works. */
+.msg-ai.role-repeat > .role { display: none; }
+.msg-ai.role-repeat { margin-top: 0; }
+.msg-user + .msg-ai.role-repeat { margin-top: 12px; }

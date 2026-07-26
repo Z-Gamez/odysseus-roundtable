@@ -25,8 +25,8 @@ End-users cloning the repo will land on `dev` by default. To run the curated/sta
 Docker is the recommended path for normal testing:
 
 ```bash
-git clone https://github.com/odysseus-dev/odysseus.git
-cd odysseus
+git clone https://github.com/Z-Gamez/odysseus-roundtable.git
+cd odysseus-roundtable
 cp .env.example .env
 docker compose up -d --build
 ```

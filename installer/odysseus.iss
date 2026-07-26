@@ -3,7 +3,7 @@
 ; Build:  ISCC.exe installer\odysseus.iss   (output: installer\Output\OdysseusSetup.exe)
 
 #define MyAppName "Odysseus"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Z-Gamez"
 #define MyAppURL "https://github.com/Z-Gamez/odysseus-roundtable"
 #define MyAppExeName "Odysseus.exe"

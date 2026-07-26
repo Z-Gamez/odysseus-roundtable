@@ -67,15 +67,11 @@ then open it normally. (Alternative: **System Settings → Privacy & Security �
 
 ### 🐳 Docker (any platform)
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/Z-Gamez/odysseus-roundtable/tree/main) if you want the more curated branch.
+> `dev` and `saw-harness` both track the newest changes in this fork.
 
 ```bash
 git clone https://github.com/Z-Gamez/odysseus-roundtable.git
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/odysseus-dev/odysseus/tree/main) if you want the more curated branch.
-
-```bash
-git clone https://github.com/odysseus-dev/odysseus.git
-cd odysseus
+cd odysseus-roundtable
 cp .env.example .env
 docker compose up -d --build
 ```
@@ -94,12 +90,14 @@ Native installs, GPU notes, macOS instructions, HTTPS, and configuration live in
 ## Features
 
 - **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.
+- **Local backends** — **Ollama** and **llama.cpp** both work as first-class targets. Odysseus asks each server what it can actually do (Ollama's `/api/show`, llama.cpp's `/props`) rather than guessing from the model name, so tool-capable models get native function calling instead of silently falling back to fenced text blocks. One **context window** setting in AI defaults governs both, and llama-server is launched to match it. If `llamacpp_enabled` is set, llama.cpp starts and stops with Odysseus.
+- **Fast Mode** — a chat-bar toggle that turns off a reasoning model's thinking step for quick turns. It sends the right signal per backend (`reasoning_effort` for Ollama, the chat template for llama.cpp), not just the `/no_think` prompt convention, so it works on both.
 - **Cookbook** — hardware-aware model recommendations, downloads, and serving.
 - **Deep Research** — multi-step web research with source reading and report generation.
 - **Compare** — blind side-by-side model testing and synthesis.
 - **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
 - **Email** — IMAP/SMTP inbox with triage, tags, summaries, and reply drafts. Agents can compose and send, gated behind an in-chat **Approve / Decline** card so nothing leaves without your click.
-- **Messages (macOS)** — the agent can send an iMessage/SMS, gated behind the same **Approve / Decline** card. Just ask ("text Alex that I'm running late"); nothing sends until you approve. Delivery runs through the **Shortcuts** app (direct Messages AppleScript automation is unreliable on macOS 26), so this needs a one-time setup: in Shortcuts, create a shortcut named exactly **`OdysseusSendMessage`** that accepts text input, pulls `to` and `body` out of the input JSON, and runs the **Send Message** action. The action picks iMessage vs SMS on its own.
+- **Messages (macOS)** — the agent can send and read iMessage/SMS. Sending is gated behind the same **Approve / Decline** card: just ask ("text Alex that I'm running late") and nothing leaves until you click approve. You can address people by name — contacts are resolved from CardDAV and your mail history, so "text Alex" works without you knowing the number. Delivery runs through Messages directly via AppleScript; **no Shortcut setup is required**. The first send raises a macOS Automation permission prompt for Messages — approve it once and it persists. Reading works too ("what did Alex say yesterday?"), straight from the local Messages database, read-only.
 - **Browser** — the agent drives your **real Chrome** (your logins, bookmarks) over the DevTools Protocol on any platform. On macOS you can switch it to your **real Safari** instead — say "use Safari for the browser". Safari needs a one-time enable: run `safaridriver --enable` in Terminal, then Safari → Develop → **Allow Remote Automation**.
 - **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
 - **Round Table** — a SAFe multi-agent team (BSA → Architect → Developer → QA → Security → Tech Writer → RTE) that ships a ticket through real quality gates, with per-role model routing, a deterministic build gate, follow-up iterations, and human-in-the-loop merge. See [docs/round-table.md](docs/round-table.md).
@@ -123,6 +121,8 @@ Help is welcome. The best entry points are fresh-install testing, provider setup
 Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
 
 ## Star History
+
+Stars for the **upstream** project this fork is built on ([odysseus-dev/odysseus](https://github.com/odysseus-dev/odysseus)) — not this fork.
 
 <a href="https://www.star-history.com/?repos=odysseus-dev%2Fodysseus&type=date&legend=top-left">
  <picture>

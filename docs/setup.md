@@ -4,7 +4,7 @@ This page keeps the detailed install, deployment, troubleshooting, and configura
 
 ## Quick Start
 
-> **Branch note:** `dev` is the default branch and contains the latest development changes, but it may be unstable. For the more stable curated branch, use [`main`](https://github.com/odysseus-dev/odysseus/tree/main).
+> **Branch note:** `dev` is the default branch and contains the latest development changes, but it may be unstable. For the more stable curated branch, use [`main`](https://github.com/Z-Gamez/odysseus-roundtable/tree/main).
 
 Defaults work out of the box: clone, run, then configure models/search/email
 inside **Settings**. Only edit `.env` for deployment-level overrides like
@@ -20,8 +20,8 @@ pull request guidelines.
 
 ### Docker (recommended)
 ```bash
-git clone https://github.com/odysseus-dev/odysseus.git
-cd odysseus
+git clone https://github.com/Z-Gamez/odysseus-roundtable.git
+cd odysseus-roundtable
 cp .env.example .env       # optional, but recommended for explicit defaults
 docker compose up -d --build
 ```
@@ -38,8 +38,8 @@ only when you intentionally want LAN/reverse-proxy access.
 
 ### Native Linux / macOS
 ```bash
-git clone https://github.com/odysseus-dev/odysseus.git
-cd odysseus
+git clone https://github.com/Z-Gamez/odysseus-roundtable.git
+cd odysseus-roundtable
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -56,8 +56,8 @@ Docker on macOS cannot use the Metal GPU. For GPU-accelerated Cookbook on an
 M-series Mac, run Odysseus natively:
 
 ```bash
-git clone https://github.com/odysseus-dev/odysseus.git
-cd odysseus
+git clone https://github.com/Z-Gamez/odysseus-roundtable.git
+cd odysseus-roundtable
 ./start-macos.sh
 ```
 
@@ -330,16 +330,16 @@ do not run on macOS. MLX-only models are not served by Odysseus.
 server; safe to re-run):
 
 ```powershell
-git clone https://github.com/odysseus-dev/odysseus.git
-cd odysseus
+git clone https://github.com/Z-Gamez/odysseus-roundtable.git
+cd odysseus-roundtable
 powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1
 ```
 
 Or do it by hand:
 
 ```powershell
-git clone https://github.com/odysseus-dev/odysseus.git
-cd odysseus
+git clone https://github.com/Z-Gamez/odysseus-roundtable.git
+cd odysseus-roundtable
 py -3.11 -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -516,6 +516,36 @@ Key settings:
 | `ODYSSEUS_ICS_MAX_BYTES` | `10485760` | Calendar `.ics` import cap in bytes (10 MB). |
 
 All upload-limit vars are validated (must be a positive integer) and optional; an invalid value fails fast at startup.
+
+### Local model backends (Ollama and llama.cpp)
+
+Both are first-class targets, and Odysseus asks each server what it can do
+rather than inferring from the model name — Ollama answers on `/api/show`, and
+llama.cpp on `/props`. That matters because a tool-capable model whose name
+isn't recognised would otherwise fall back to fenced text blocks, where the
+model *describes* tool calls instead of making them.
+
+**One context setting covers both.** *Settings → Local Models → Context window*
+is the cap the prompt trimmer budgets against, whichever backend is serving.
+llama.cpp fixes its window at launch, so Odysseus starts `llama-server` with
+that same value — otherwise the trimmer budgets against the model card while
+the real window is smaller, and prompts get truncated server-side.
+
+**Optional autostart.** Set these and llama.cpp starts and stops with Odysseus,
+on every entry point (the desktop app, `uvicorn app:app`, Docker):
+
+| Setting | Meaning |
+| --- | --- |
+| `llamacpp_enabled` | `true` to launch `llama-server` with Odysseus. |
+| `llamacpp_model` | Absolute path to a `.gguf`. Required — nothing starts without it. |
+| `llamacpp_port` | Default `8080`. |
+| `llamacpp_ctx` | `0` = follow the shared Context window setting. Set a value only to override llama.cpp specifically. |
+| `llamacpp_binary` | Only needed if `llama-server` isn't on `PATH` or in a standard install location. |
+
+The launcher is idempotent — if something already answers on the port it leaves
+it alone — and a failure to start never blocks Odysseus from booting; it logs
+and continues. `--jinja` is always passed, without which llama.cpp won't parse
+tool calls even when the model supports them.
 
 ### Built-in MCP servers (optional setup)
 

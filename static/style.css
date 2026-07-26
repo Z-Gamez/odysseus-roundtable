@@ -41748,3 +41748,128 @@ body.plan-mode-active .chat-input-top > .model-picker-wrap,
 .msg-ai.role-repeat > .role { display: none; }
 .msg-ai.role-repeat { margin-top: 0; }
 .msg-user + .msg-ai.role-repeat { margin-top: 12px; }
+
+/* ═══ Chat text density ══════════════════════════════════════════════════════
+   Kept in em, not px, so the density setting (:root.density-compact 13px /
+   spacious 16px) still scales this the way the user asked it to. Most of the
+   reclaimed space comes from the gap BETWEEN blocks rather than the glyphs:
+   paragraph margins were 8px top and bottom, so every paragraph break cost
+   16px — more than a full line.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.msg .body {
+  font-size: 0.86em;
+  line-height: 1.42;
+}
+.msg .body > * {
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+/* Lists were the worst offender — item margins on top of block margins. */
+.msg .body ul,
+.msg .body ol {
+  margin-top: 4px;
+  margin-bottom: 4px;
+  padding-left: 18px;
+}
+.msg .body li { margin: 1px 0; }
+.msg .body li > p { margin: 0; }
+/* Headings inside a reply don't need display-level air. */
+.msg .body h1,
+.msg .body h2,
+.msg .body h3 {
+  margin-top: 10px;
+  margin-bottom: 4px;
+  line-height: 1.25;
+}
+/* Code keeps its own rhythm but stops double-spacing against the prose. */
+.msg .body pre {
+  margin-top: 6px;
+  margin-bottom: 6px;
+  line-height: 1.35;
+}
+
+/* The composer was capped at 800px and centred while the transcript fills the
+   full container, so the field floated narrower than the messages above it.
+   Match the message column: fill the width and let .chat-container's own 10px
+   padding set the gutters, exactly as it does for the messages. */
+.chat-input-bar,
+.chat-container .chat-input-bar {
+  max-width: none;
+  width: 100%;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* The welcome/empty state pinned the composer to 800px with higher specificity,
+   so it sat narrow on a new chat and then snapped to full width the instant the
+   first message landed. Match it — a width jump on send is worse than a wide
+   composer on an empty screen. */
+.chat-container.welcome-active .chat-input-bar {
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* The welcome state lifted the composer with margin-bottom:30vh so it floated
+   mid-screen under the greeting. Pin it to the bottom like every other chat —
+   the field then stays exactly where it is when the first message lands,
+   instead of dropping a third of the viewport on send. */
+.chat-container.welcome-active .chat-input-bar {
+  margin-bottom: 0;
+}
+
+/* ═══ Composer / rail alignment ══════════════════════════════════════════════
+   The desktop shell floats the rail as a rounded card on a 10px inset
+   (body.native-app .sidebar { margin: 10px 8px 10px 10px }), and
+   .chat-container's own 10px padding is what puts the chat column on that same
+   inset. An earlier pass here added padding-bottom:10px to the composer, which
+   pushed it to 20px — sitting a visible 10px higher than the rail's bottom
+   edge. And the toggle row carried `padding: 0 2px`, so the icons sat 2px
+   inboard of the field they belong to. Both are mine; both go back to 0 so
+   everything lands on the shell's single 10px grid.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.chat-container .chat-input-bar {
+  padding-bottom: 0;
+}
+.chat-input-bottom {
+  padding: 0;
+}
+
+/* The rail's drop shadow (0 6px 20px rgba(0,0,0,.28)) spreads 20px into the
+   chat column, which is the soft grey seam between the two — it reads as a
+   blend rather than a gap. Tighten it to a close contact shadow so the card
+   still lifts off the background without smearing into the transcript. */
+body.native-app .sidebar,
+body.native-app .icon-rail {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+
+/* ═══ Shell inset ════════════════════════════════════════════════════════════
+   The rail floats on a 10px margin and the chat column sits on a 10px padding.
+   They matched only because two separate literals happened to agree — and a
+   pass here already knocked them out of step once by adding padding to the
+   composer. Drive both from one value so the composer's bottom edge and the
+   rail's bottom edge are the same line by construction, not by coincidence.
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root { --shell-inset: 10px; }
+
+body.native-app .sidebar,
+body.native-app .icon-rail {
+  margin: var(--shell-inset) 8px var(--shell-inset) var(--shell-inset);
+}
+body.native-app .sidebar.right-side,
+body.native-app .icon-rail.right-side {
+  margin: var(--shell-inset) var(--shell-inset) var(--shell-inset) 8px;
+}
+.chat-container {
+  padding-bottom: var(--shell-inset);
+}
+/* Nothing may sit under the composer but that inset. `padding: 0` above already
+   clears the mobile safe-area rule; this pins the margin side too, in every
+   state including welcome. */
+.chat-input-bar,
+.chat-container .chat-input-bar,
+.chat-container.welcome-active .chat-input-bar {
+  margin-bottom: 0;
+  padding-bottom: 0;
+}

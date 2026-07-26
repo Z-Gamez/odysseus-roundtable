@@ -166,6 +166,37 @@ class WindowApi:
         except Exception:
             pass
 
+    def win_set_chrome(self, color):
+        """Repaint the resize rim in the page's own background colour.
+
+        The WebView2 is docked Fill and swallows every mouse message, so the
+        form keeps a PAD-wide strip of its own surface exposed for the resize
+        hit-test (see _rim). That strip was painted with a hard-coded #282c34,
+        which only disappears on themes whose background happens to be exactly
+        that — on any other theme it reads as a thin border framing the app.
+
+        The page calls this whenever it applies a theme, so the rim tracks
+        --bg and stays invisible. Best-effort: a failure here costs a slightly
+        visible rim, never a broken window.
+        """
+        try:
+            if not isinstance(color, str) or not color.strip():
+                return
+            form = self._window.native
+            import webview.platforms.winforms as wf
+            c = wf.ColorTranslator.FromHtml(color.strip())
+
+            def _paint():
+                form.BackColor = c
+
+            # BackColor must be touched on the UI thread.
+            if form.InvokeRequired:
+                form.Invoke(wf.WinForms.MethodInvoker(_paint))
+            else:
+                _paint()
+        except Exception:
+            pass
+
 
 def _apply_icon(hwnd) -> None:
     """Push the Odysseus icon onto the window (taskbar/alt-tab) via WM_SETICON."""

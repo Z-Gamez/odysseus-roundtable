@@ -266,6 +266,16 @@ export function applyColors(colors) {
   s.setProperty('--border', colors.border);
   if (colors.red) s.setProperty('--red', colors.red);
 
+  // Desktop app: the frameless host keeps a slim strip of form surface exposed
+  // around the WebView2 so resize hit-tests have somewhere to land. It used a
+  // hard-coded #282c34, so on any theme with a different background it showed
+  // as a thin border framing the whole app. Hand it the real background so it
+  // disappears. No-op in a normal browser, where the bridge is absent.
+  try {
+    const api = window.pywebview && window.pywebview.api;
+    if (api && typeof api.win_set_chrome === 'function') api.win_set_chrome(colors.bg);
+  } catch (_e) { /* cosmetic only — never break theming */ }
+
   // Keep the mobile browser toolbar / status bar matched to the theme bg
   // (same as the early head-script does on first paint).
   const _mtc = document.querySelector('meta[name="theme-color"]');

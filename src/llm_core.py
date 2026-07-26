@@ -506,7 +506,7 @@ async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
             return hit[1]
     result: Optional[bool] = None
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=_CAPS_PROBE_TIMEOUT) as client:
             r = await client.get(f"{root}/props")
         if r.status_code == 200:
             caps = (r.json() or {}).get("chat_template_caps")
@@ -515,6 +515,11 @@ async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
                     caps.get("supports_tool_calls", True))
     except Exception as e:
         logger.debug("llama.cpp /props capability probe failed: %s", e)
+    if result is None and hit is not None and hit[1] is not None:
+        logger.info("llama.cpp capability probe failed at %s; keeping last known "
+                    "answer %s", root, hit[1])
+        _OLLAMA_CAPS_CACHE[key] = (hit[0], hit[1])
+        return hit[1]
     _OLLAMA_CAPS_CACHE[key] = (now, result)
     return result
 
@@ -545,7 +550,7 @@ def llamacpp_served_ctx(endpoint_url: str) -> int:
             return hit[1] or 0
     result = 0
     try:
-        r = httpx.get(f"{root}/props", timeout=3.0)
+        r = httpx.get(f"{root}/props", timeout=_CAPS_PROBE_TIMEOUT)
         if r.status_code == 200:
             gen = (r.json() or {}).get("default_generation_settings") or {}
             result = int(gen.get("n_ctx") or 0)
@@ -627,6 +632,12 @@ def _ollama_native_root(url: str) -> str:
 _OLLAMA_CAPS_CACHE: Dict[Tuple[str, str], Tuple[float, Optional[bool]]] = {}
 _OLLAMA_CAPS_TTL = 600.0
 _OLLAMA_CAPS_TTL_UNKNOWN = 60.0
+# A local server mid-generation is SLOW to answer a side request: llama-server
+# saturated across its slots took well over 3s to return /props during a Round
+# Table run. That timeout decided tool mode, so one slow answer silently
+# demoted the Developer to fenced blocks for the next 60 seconds -- it then
+# narrated tool calls as text instead of making them, and looped.
+_CAPS_PROBE_TIMEOUT = 12.0
 
 
 async def ollama_supports_tools(endpoint_url: str, model: str) -> Optional[bool]:
@@ -650,7 +661,7 @@ async def ollama_supports_tools(endpoint_url: str, model: str) -> Optional[bool]
             return hit[1]
     result: Optional[bool] = None
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=_CAPS_PROBE_TIMEOUT) as client:
             r = await client.post(f"{root}/show", json={"model": name})
         if r.status_code == 200:
             caps = r.json().get("capabilities")
@@ -658,6 +669,13 @@ async def ollama_supports_tools(endpoint_url: str, model: str) -> Optional[bool]
                 result = any(str(c).strip().lower() == "tools" for c in caps)
     except Exception as e:
         logger.debug("ollama /api/show capability probe failed for %s: %s", name, e)
+    if result is None and hit is not None and hit[1] is not None:
+        # The probe failed, but this host answered definitively before. Keep that
+        # answer instead of decaying to "unknown" — see _sticky note below.
+        logger.info("ollama capability probe failed for %r; keeping last known "
+                    "answer %s", name, hit[1])
+        _OLLAMA_CAPS_CACHE[key] = (hit[0], hit[1])
+        return hit[1]
     _OLLAMA_CAPS_CACHE[key] = (now, result)
     return result
 

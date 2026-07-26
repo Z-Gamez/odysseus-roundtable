@@ -1024,6 +1024,19 @@ async def _startup_event():
     global upload_cleanup_task
     logger.info("Application starting up...")
     webhook_manager.set_loop(asyncio.get_running_loop())
+    # Start the optional llama.cpp server here, in the SERVER's startup, rather
+    # than only from the window hosts (odysseus_app / standalone_app). Running
+    # the API directly — `uvicorn app:app`, Docker, a service wrapper — is a
+    # perfectly normal way to run Odysseus, and in all of those the launcher
+    # never fired: llama.cpp stayed down and every request to it came back 503
+    # from the dead-host cooldown. Idempotent (it no-ops when the port is
+    # already serving) so the window hosts calling it too is harmless, and it
+    # never raises — a launcher failure must not stop Odysseus from starting.
+    try:
+        from src.llamacpp_launcher import start_if_configured as _start_llamacpp
+        await asyncio.to_thread(_start_llamacpp)
+    except Exception as e:
+        logger.warning("[llamacpp] autostart skipped: %s", e)
     # Wipe any leftover incognito sessions from previous process — they're
     # ephemeral by design and must not survive a restart.
     try:

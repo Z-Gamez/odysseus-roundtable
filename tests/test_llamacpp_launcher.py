@@ -122,6 +122,34 @@ def test_both_hosts_invoke_the_launcher():
     assert "start_if_configured" in inspect.getsource(standalone_app._mac_window)
 
 
+def test_server_startup_invokes_the_launcher():
+    """The window hosts are not the only way Odysseus runs.
+
+    Wiring the launcher ONLY into odysseus_app/standalone_app meant that
+    running the API directly — `uvicorn app:app`, Docker, a service wrapper —
+    never started llama.cpp. It stayed down and every request to it returned
+    503 from the dead-host cooldown, with nothing in the UI explaining why.
+    The server's own startup is the one path common to every way of running it.
+    """
+    import inspect
+    import app as app_module
+    src = inspect.getsource(app_module._startup_event)
+    assert "start_if_configured" in src, (
+        "server startup no longer autostarts llama.cpp; anyone not launching "
+        "through a window host gets 503s from an endpoint that never came up"
+    )
+
+
+def test_server_startup_tolerates_launcher_failure():
+    """A launcher problem must never stop Odysseus itself from booting."""
+    import inspect
+    import app as app_module
+    src = inspect.getsource(app_module._startup_event)
+    idx = src.index("start_if_configured")
+    window = src[max(0, idx - 300):idx + 300]
+    assert "try:" in window and "except" in window
+
+
 def test_agent_cannot_set_the_executable():
     """The launcher EXECUTES llamacpp_binary/extra_args at next start, so a
     settings write must not become arbitrary code execution — that would route

@@ -129,7 +129,7 @@ _XML_DIRECT_TOOL_RE = re.compile(
 _XML_INVOKE_OPEN_RE = re.compile(r'<invoke\s+name=["\'](\w+)["\']>\s*', re.IGNORECASE)
 _XML_INVOKE_CLOSE_RE = re.compile(r'</invoke>', re.IGNORECASE)
 _XML_DIRECT_OPEN_RE = re.compile(r"<\s*([A-Za-z_][\w-]*)\s*>", re.IGNORECASE)
-# Qwen3-Coder / xLAM XML dialect:
+# XML tool calls that carry the names in the TAG rather than an attribute:
 #   <tool_call>
 #   <function=read_file>
 #   <parameter=path>
@@ -138,11 +138,16 @@ _XML_DIRECT_OPEN_RE = re.compile(r"<\s*([A-Za-z_][\w-]*)\s*>", re.IGNORECASE)
 #   </function>
 #   </tool_call>
 # The name rides in the TAG (`<function=name>`), not an attribute, so the
-# <invoke name="..."> patterns above miss it entirely. llama.cpp only converts
-# whatever shape its chat template declares, so on a template that expects a
-# different form these arrive as ordinary text — the model looks like it is
-# narrating tool calls while nothing executes. Observed for real: a Round Table
-# Developer emitted 24 of these across five iterations and the run never moved.
+# <invoke name="..."> patterns above miss it entirely. Matching is on SYNTAX
+# ONLY — no model or endpoint is consulted — so any model that emits this shape
+# is handled, not one vendor's. (Seen from Qwen3-Coder and xLAM-style
+# fine-tunes, but nothing here is keyed to them.)
+#
+# It matters because a server only converts the shape its chat template
+# declares; anything else arrives as ordinary text, and the model then looks
+# like it is narrating tool calls while nothing executes. Observed for real: a
+# Round Table Developer emitted 24 of these across five iterations and the run
+# never moved, and a QA role then repeated one call until the turn was killed.
 # Forward-only delimiters, same as the patterns above, to keep the lazy rescan
 # linear on untrusted output.
 _XML_FUNC_EQ_OPEN_RE = re.compile(r"<function\s*=\s*([A-Za-z_][\w-]*)\s*>", re.IGNORECASE)
@@ -906,7 +911,7 @@ def _parse_xml_invoke(name, body) -> Optional[ToolBlock]:
 
 
 def _parse_xml_func_eq(name, body) -> Optional[ToolBlock]:
-    """Parse the Qwen3-Coder / xLAM dialect:
+    """Parse an XML tool call whose names ride in the tag:
 
         <function=read_file>
         <parameter=path>
@@ -915,7 +920,8 @@ def _parse_xml_func_eq(name, body) -> Optional[ToolBlock]:
         </function>
 
     Same shape as an <invoke>, but the names ride in the TAG rather than an
-    attribute, so the <invoke name="..."> patterns miss it completely. Reuses
+    attribute, so the <invoke name="..."> patterns miss it completely. Applies
+    to ANY model emitting this syntax — nothing here inspects the model. Reuses
     function_call_to_tool_block for exactly the reasons in _parse_xml_invoke:
     one place decides the tool set and the per-tool content format.
     """

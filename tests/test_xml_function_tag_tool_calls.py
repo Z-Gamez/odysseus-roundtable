@@ -1,4 +1,4 @@
-"""Qwen3-Coder / xLAM XML tool calls must execute, not land as prose.
+"""XML tool calls that name the tool in the TAG must execute, not land as prose.
 
 Real failure, Round Table run rt_769b9c966817: the Developer looped five times
 against QA and never advanced. Its output carried 24 tool calls in this shape:
@@ -14,9 +14,13 @@ against QA and never advanced. Its output carried 24 tool calls in this shape:
 Everything upstream of the parser was working. The agent-debug log shows
 `_is_api_model=True tools_sent=11` on every round, so tools WERE attached, and
 llama-server returns proper native `tool_calls` when it recognises what the
-model produced. It simply produced a dialect the chat template does not
+model produced. It simply produced a shape the chat template does not
 declare, so llama.cpp passed it through as content — and Odysseus's XML
 patterns all expect `<invoke name="tool">`, where the name is an ATTRIBUTE.
+
+This is matched on syntax alone. Qwen3-Coder and xLAM-style fine-tunes are
+where it was first seen, but nothing in the parser inspects the model, so any
+model emitting this shape is covered.
 Here the names ride in the tag itself, so every pattern missed and
 parse_tool_blocks returned zero blocks.
 
@@ -107,3 +111,39 @@ def test_invoke_dialect_still_works():
             '<parameter name="path">SPEC.md</parameter></invoke></tool_call>')
     blocks = parse_tool_blocks(text)
     assert len(blocks) == 1 and blocks[0].tool_type == "read_file"
+
+
+def test_parsing_is_model_agnostic():
+    """No model or endpoint is consulted — the shape alone decides.
+
+    This shape shows up in Qwen3-Coder and xLAM-style fine-tunes, but gating on
+    a model name would mean the next model to emit it silently loops again, the
+    exact failure this file exists to prevent.
+    """
+    import inspect
+    from src.tool_parsing import _parse_xml_func_eq
+
+    for fn in (parse_tool_blocks, _parse_xml_func_eq):
+        params = set(inspect.signature(fn).parameters)
+        assert not (params & {"model", "model_name", "endpoint", "endpoint_url",
+                              "provider", "is_api_model"}), (
+            f"{fn.__name__} takes a model/endpoint argument; this dialect must "
+            f"be recognised on syntax alone, for every model"
+        )
+
+
+def test_every_tool_in_the_map_is_reachable_through_this_syntax():
+    """Not just the handful seen in one failing run."""
+    for tool, param, value in [
+        ("read_file", "path", "a.md"),
+        ("bash", "command", "ls -la"),
+        ("web_search", "query", "physics ragdoll"),
+        ("grep", "pattern", "TODO"),
+        ("write_file", "path", "out.txt"),
+    ]:
+        text = (f"<tool_call><function={tool}><parameter={param}>{value}"
+                f"</parameter></function></tool_call>")
+        blocks = parse_tool_blocks(text)
+        assert len(blocks) == 1 and blocks[0].tool_type == tool, (
+            f"{tool} not reachable through the tag-name XML syntax"
+        )

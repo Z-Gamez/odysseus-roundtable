@@ -211,7 +211,9 @@ DEFAULT_SETTINGS = {
     "llamacpp_binary": "",
     "llamacpp_model": "",
     "llamacpp_port": 8080,
-    "llamacpp_ctx": 8192,
+    # 0 = follow the shared AI-defaults context cap (ollama_num_ctx); set a
+    # positive value only to override the window for llama.cpp specifically.
+    "llamacpp_ctx": 0,
     "llamacpp_ngl": 99,
     "llamacpp_extra_args": "",
     # Browser tool backend: "chrome" drives the user's real Chrome over CDP

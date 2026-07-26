@@ -83,7 +83,24 @@ def start_if_configured() -> Optional[subprocess.Popen]:
         model = str(get_setting("llamacpp_model", "") or "").strip()
         port = int(get_setting("llamacpp_port", 8080) or 8080)
         binary = find_binary(str(get_setting("llamacpp_binary", "") or ""))
-        ctx = int(get_setting("llamacpp_ctx", 8192) or 8192)
+        # llama.cpp fixes its window at launch, so it must agree with the
+        # AI-defaults context cap the trimmer budgets against. The shared
+        # setting wins: this used to read only llamacpp_ctx, so llama-server
+        # came up at its own default while the AI default said something
+        # larger, and long prompts were truncated server-side.
+        #
+        # llamacpp_ctx is a llama.cpp-only override, but 8192 was its former
+        # DEFAULT and the save path materializes defaults — a persisted 8192
+        # is almost certainly "never touched", not "deliberately chose 8192".
+        # Treating it as explicit would keep overriding the shared setting for
+        # every existing install, which is the bug this is fixing.
+        _LEGACY_LLAMACPP_CTX_DEFAULT = 8192
+        ctx = int(get_setting("ollama_num_ctx", 0) or 0)
+        _override = int(get_setting("llamacpp_ctx", 0) or 0)
+        if _override > 0 and _override != _LEGACY_LLAMACPP_CTX_DEFAULT:
+            ctx = _override
+        if ctx <= 0:
+            ctx = _LEGACY_LLAMACPP_CTX_DEFAULT
         ngl = int(get_setting("llamacpp_ngl", 99) or 99)
         extra = str(get_setting("llamacpp_extra_args", "") or "")
     except Exception as e:

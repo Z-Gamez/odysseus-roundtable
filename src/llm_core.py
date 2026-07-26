@@ -519,6 +519,42 @@ async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
     return result
 
 
+def llamacpp_served_ctx(endpoint_url: str) -> int:
+    """Context window a llama-server is ACTUALLY serving, or 0 if unknown.
+
+    llama.cpp fixes its window at launch (`-c`), and it is routinely far
+    smaller than the model card advertises — a 128K-card model served with
+    `-c 8192` really has 8192. Budgeting against the card lets the trimmer
+    believe there is endless room while the real window silently fills, and
+    the prompt gets truncated server-side.
+
+    Read from /props default_generation_settings.n_ctx (verified against
+    llama-server b10107, which reports the per-slot window there). Sync so the
+    trimmer, which is not async, can call it; cached per host.
+    """
+    p = urlparse((endpoint_url or "").strip())
+    if not (p.scheme and p.netloc):
+        return 0
+    root = f"{p.scheme}://{p.netloc}"
+    key = (root, "\x00llamacpp_ctx")
+    now = time.time()
+    hit = _OLLAMA_CAPS_CACHE.get(key)
+    if hit:
+        age_limit = _OLLAMA_CAPS_TTL if hit[1] else _OLLAMA_CAPS_TTL_UNKNOWN
+        if now - hit[0] < age_limit:
+            return hit[1] or 0
+    result = 0
+    try:
+        r = httpx.get(f"{root}/props", timeout=3.0)
+        if r.status_code == 200:
+            gen = (r.json() or {}).get("default_generation_settings") or {}
+            result = int(gen.get("n_ctx") or 0)
+    except Exception as e:
+        logger.debug("llama.cpp /props context probe failed: %s", e)
+    _OLLAMA_CAPS_CACHE[key] = (now, result)
+    return result
+
+
 async def probe_supports_tools(endpoint_url: str, model: str = "") -> Optional[bool]:
     """Ask the server whether it does native tool calls. None = it didn't say.
 

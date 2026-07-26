@@ -4049,13 +4049,33 @@ async def stream_agent_loop(
                 # either name here makes it function-local and breaks the
                 # earlier use at the top of this function (UnboundLocalError).
                 from src.llm_core import _detect_provider as _llm_detect_provider
-                if _llm_detect_provider(endpoint_url) == "ollama" or _is_ollama_openai_compat_url(endpoint_url):
-                    _ollama_cap = int(get_setting("ollama_num_ctx", 0) or 0)
-                    # The Modelfile's num_ctx (e.g. a user-built 12K variant) can be
-                    # SMALLER than the setting — budget against the tightest window
-                    # or Ollama truncates the prompt server-side, task first.
-                    _served_ctx = _ollama_served_num_ctx(endpoint_url, model)
-                    for _cap_v in (_ollama_cap, _served_ctx):
+                _is_ollama_backend = (_llm_detect_provider(endpoint_url) == "ollama"
+                                      or _is_ollama_openai_compat_url(endpoint_url))
+                # Applies to EVERY local backend, not just Ollama. llama.cpp
+                # fixes its window at launch (`-c`) and it is routinely far
+                # smaller than the model card — a 128K-card model served with
+                # `-c 8192` really has 8192. Budgeting against the card let the
+                # trimmer think there was endless room while the real window
+                # filled and llama.cpp truncated the prompt server-side.
+                # "Not a known cloud host" is the local test: the llama.cpp
+                # probe simply returns 0 for anything that isn't a llama-server,
+                # so a false positive costs one cached 3s HEAD and nothing else.
+                _is_self_hosted = not any(_h in (endpoint_url or "") for _h in _API_HOSTS)
+                if _is_ollama_backend or _is_self_hosted:
+                    # The user's AI-defaults context cap (shared by all local
+                    # backends — the setting key is historical).
+                    _ctx_cap = int(get_setting("ollama_num_ctx", 0) or 0)
+                    # What the server will REALLY serve. Ollama: the Modelfile's
+                    # num_ctx (a user-built 12K variant can be smaller than the
+                    # setting). llama.cpp: /props n_ctx. Budget against the
+                    # tightest of the three or the prompt is cut server-side,
+                    # task first.
+                    if _is_ollama_backend:
+                        _served_ctx = _ollama_served_num_ctx(endpoint_url, model)
+                    else:
+                        from src.llm_core import llamacpp_served_ctx as _lcpp_ctx
+                        _served_ctx = _lcpp_ctx(endpoint_url)
+                    for _cap_v in (_ctx_cap, _served_ctx):
                         if _cap_v and _cap_v > 0:
                             ctx_for_budget = min(ctx_for_budget, _cap_v) if ctx_for_budget else _cap_v
             except Exception:

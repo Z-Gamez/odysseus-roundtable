@@ -112,6 +112,26 @@ def build_command(binary: str, model: str, port: int, ctx: int,
     return cmd
 
 
+def build_router_command(binary: str, preset: str, port: int,
+                         models_max: int = 1) -> List[str]:
+    """Argv for llama-server's router mode: many models behind one endpoint.
+
+    Single-model mode pins one GGUF for the process lifetime, so hosting a
+    second model means a second server, a second port, and a second endpoint
+    row in Odysseus — and on a 12 GB card the two rarely fit at once anyway.
+
+    The router serves every model in the preset from one port and loads them
+    on demand. `models_max` caps how many stay resident: 1 means requesting a
+    different model evicts the current one, which is what makes a 35B MoE and
+    a 9B coexist on hardware that cannot hold both.
+
+    Per-model flags (context, -ngl, --cpu-moe) live in the INI, because they
+    differ per model — the whole point of the preset.
+    """
+    return [binary, "--models-preset", preset, "--models-max", str(models_max),
+            "--port", str(port), "--jinja"]
+
+
 def start_if_configured() -> Optional[subprocess.Popen]:
     """Launch llama-server when enabled+configured. Returns the process, or
     None when disabled, already running, or unlaunchable. Never raises —
@@ -121,6 +141,8 @@ def start_if_configured() -> Optional[subprocess.Popen]:
         if not get_setting("llamacpp_enabled", False):
             return None
         model = str(get_setting("llamacpp_model", "") or "").strip()
+        preset = str(get_setting("llamacpp_preset", "") or "").strip()
+        models_max = int(get_setting("llamacpp_models_max", 1) or 1)
         port = int(get_setting("llamacpp_port", 8080) or 8080)
         binary = find_binary(str(get_setting("llamacpp_binary", "") or ""))
         # llama.cpp fixes its window at launch, so it must agree with the
@@ -148,13 +170,25 @@ def start_if_configured() -> Optional[subprocess.Popen]:
         logger.warning("[llamacpp] could not read settings: %s", e)
         return None
 
-    if not model:
-        logger.info("[llamacpp] enabled but llamacpp_model is unset — not starting")
-        return None
-    model = os.path.expanduser(model)
-    if not os.path.exists(model):
-        logger.warning("[llamacpp] model not found: %s", model)
-        return None
+    # Router mode wins when a preset is configured: it serves every model in
+    # the INI, so llamacpp_model would only name one of them.
+    router = False
+    if preset:
+        preset = os.path.expanduser(preset)
+        if os.path.exists(preset):
+            router = True
+        else:
+            logger.warning("[llamacpp] preset not found, falling back to "
+                           "single-model mode: %s", preset)
+    if not router:
+        if not model:
+            logger.info("[llamacpp] enabled but neither llamacpp_preset nor "
+                        "llamacpp_model is set — not starting")
+            return None
+        model = os.path.expanduser(model)
+        if not os.path.exists(model):
+            logger.warning("[llamacpp] model not found: %s", model)
+            return None
     if not binary:
         logger.warning("[llamacpp] llama-server binary not found "
                        "(set llamacpp_binary, or install it on PATH)")
@@ -182,7 +216,10 @@ def start_if_configured() -> Optional[subprocess.Popen]:
     except Exception:
         log = subprocess.DEVNULL
 
-    cmd = build_command(binary, model, port, ctx, ngl, extra, alias)
+    if router:
+        cmd = build_router_command(binary, preset, port, models_max)
+    else:
+        cmd = build_command(binary, model, port, ctx, ngl, extra, alias)
     kwargs = {"stdout": log, "stderr": log}
     if os.name == "nt":
         # Detach so it survives the launcher and shows no console window.
@@ -192,8 +229,9 @@ def start_if_configured() -> Optional[subprocess.Popen]:
         kwargs["start_new_session"] = True
     try:
         proc = subprocess.Popen(cmd, **kwargs)
-        logger.info("[llamacpp] started %s on port %s (pid %s)",
-                    os.path.basename(binary), port, proc.pid)
+        logger.info("[llamacpp] started %s on port %s in %s mode (pid %s)",
+                    os.path.basename(binary), port,
+                    "router" if router else "single-model", proc.pid)
         return proc
     except Exception as e:
         logger.warning("[llamacpp] failed to start: %s", e)

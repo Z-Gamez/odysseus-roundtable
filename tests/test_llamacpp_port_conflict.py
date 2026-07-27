@@ -114,3 +114,75 @@ def test_real_llama_server_is_still_left_alone(monkeypatch, _configured):
     _patch(monkeypatch, open_socket=True, payload=_LLAMA_PROPS)
     assert LL.start_if_configured() is None
     assert not _configured, "must not start a second llama-server"
+
+
+# --- router mode -----------------------------------------------------------
+#
+# One llama-server process pins one GGUF, so hosting a second model used to
+# mean a second port and a second endpoint row -- and on 12 GB the two models
+# will not be resident together anyway. Router mode serves both from one port
+# and swaps them on demand.
+
+def _router_settings(monkeypatch, tmp_path, **over):
+    ini = tmp_path / "models.ini"
+    ini.write_text("[A]\nmodel = a.gguf\n")
+    binary = tmp_path / "llama-server"
+    binary.write_text("")
+    values = {"llamacpp_enabled": True, "llamacpp_preset": str(ini),
+              "llamacpp_models_max": 1, "llamacpp_port": 8080,
+              "llamacpp_binary": str(binary), "llamacpp_model": "",
+              "ollama_num_ctx": 65536, "llamacpp_ctx": 0, "llamacpp_ngl": 99,
+              "llamacpp_extra_args": "", "llamacpp_alias": ""}
+    values.update(over)
+    import src.settings
+    monkeypatch.setattr(src.settings, "get_setting",
+                        lambda k, d=None: values.get(k, d))
+    spawned = []
+    monkeypatch.setattr(LL.subprocess, "Popen",
+                        lambda cmd, **k: spawned.append(cmd) or _DummyProc())
+    _patch(monkeypatch, open_socket=False)
+    return spawned, str(ini)
+
+
+def test_router_command_uses_preset_not_single_model():
+    cmd = LL.build_router_command("llama-server", "m.ini", 8080, 1)
+    assert "--models-preset" in cmd and "m.ini" in cmd
+    assert "--models-max" in cmd and "1" in cmd
+    assert "--jinja" in cmd, "no --jinja means llama-server parses no tool calls"
+    assert "-m" not in cmd, "router mode must not pin a single GGUF"
+
+
+def test_preset_starts_router_mode(monkeypatch, tmp_path):
+    spawned, ini = _router_settings(monkeypatch, tmp_path)
+    assert LL.start_if_configured() is not None
+    assert len(spawned) == 1
+    assert "--models-preset" in spawned[0] and ini in spawned[0]
+
+
+def test_preset_wins_over_a_configured_single_model(monkeypatch, tmp_path):
+    """llamacpp_model names only one model; the preset names them all."""
+    spawned, _ = _router_settings(monkeypatch, tmp_path,
+                                  llamacpp_model=r"C:\some\other.gguf")
+    LL.start_if_configured()
+    assert "--models-preset" in spawned[0]
+    assert "-m" not in spawned[0], (
+        "a leftover llamacpp_model silently pinned one model and hid the rest"
+    )
+
+
+def test_missing_preset_falls_back_instead_of_dying(monkeypatch, tmp_path):
+    """A bad path must not leave the user with no server at all."""
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"GGUF")
+    spawned, _ = _router_settings(monkeypatch, tmp_path,
+                                  llamacpp_preset=str(tmp_path / "nope.ini"),
+                                  llamacpp_model=str(model))
+    assert LL.start_if_configured() is not None
+    assert "-m" in spawned[0], "should have fallen back to single-model mode"
+
+
+def test_no_preset_and_no_model_starts_nothing(monkeypatch, tmp_path):
+    spawned, _ = _router_settings(monkeypatch, tmp_path,
+                                  llamacpp_preset="", llamacpp_model="")
+    assert LL.start_if_configured() is None
+    assert not spawned

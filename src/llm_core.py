@@ -481,14 +481,19 @@ def ollama_native_tools_model(model: str) -> bool:
     return "ornith" in m
 
 
-async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
+async def llamacpp_supports_tools(endpoint_url: str,
+                                  model: str = "") -> Optional[bool]:
     """Whether a llama.cpp `llama-server` reports tool support (/props).
 
-    llama-server serves ONE model, so this is per-endpoint, not per-model. It
-    answers with `chat_template_caps.supports_tools` — the direct analogue of
+    Answers with `chat_template_caps.supports_tools` — the direct analogue of
     Ollama's /api/show capabilities (verified against llama-server b10107).
     Note that reflects the model's chat TEMPLATE; the server also needs
     `--jinja` for tool calls to actually be parsed.
+
+    `model` is part of the cache key because a llama-server in ROUTER mode
+    (`--models-preset`) serves several models from one host and /props
+    describes whichever is loaded now. Keyed on host alone, one model's answer
+    would be reused for the next after a swap.
 
     None when this isn't a llama-server (no /props) or it can't be reached, so
     the caller can fall through to its own default.
@@ -497,7 +502,7 @@ async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
     if not (p.scheme and p.netloc):
         return None
     root = f"{p.scheme}://{p.netloc}"
-    key = (root, "\x00llamacpp")     # per-server, distinct from Ollama's keys
+    key = (root, "\x00llamacpp", model or "")   # distinct from Ollama's keys
     now = time.time()
     hit = _OLLAMA_CAPS_CACHE.get(key)
     if hit:
@@ -509,8 +514,18 @@ async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
         async with httpx.AsyncClient(timeout=_CAPS_PROBE_TIMEOUT) as client:
             r = await client.get(f"{root}/props")
         if r.status_code == 200:
-            caps = (r.json() or {}).get("chat_template_caps")
-            if isinstance(caps, dict) and "supports_tools" in caps:
+            body = r.json() or {}
+            # /props describes whichever model is RESIDENT. In router mode that
+            # may not be the one asked about, and its caps must not be recorded
+            # under this model's key. model_alias names the resident model, so
+            # a mismatch means "unknown", not "the other model's answer".
+            served = body.get("model_alias")
+            mismatched = bool(model) and bool(served) and served != model
+            caps = body.get("chat_template_caps")
+            if mismatched:
+                logger.debug("llama.cpp /props describes %r, not %r — "
+                             "capability unknown until it is loaded", served, model)
+            elif isinstance(caps, dict) and "supports_tools" in caps:
                 result = bool(caps.get("supports_tools")) and bool(
                     caps.get("supports_tool_calls", True))
     except Exception as e:
@@ -524,7 +539,7 @@ async def llamacpp_supports_tools(endpoint_url: str) -> Optional[bool]:
     return result
 
 
-def llamacpp_served_ctx(endpoint_url: str) -> int:
+def llamacpp_served_ctx(endpoint_url: str, model: str = "") -> int:
     """Context window a llama-server is ACTUALLY serving, or 0 if unknown.
 
     llama.cpp fixes its window at launch (`-c`), and it is routinely far
@@ -535,29 +550,66 @@ def llamacpp_served_ctx(endpoint_url: str) -> int:
 
     Read from /props default_generation_settings.n_ctx (verified against
     llama-server b10107, which reports the per-slot window there). Sync so the
-    trimmer, which is not async, can call it; cached per host.
+    trimmer, which is not async, can call it.
+
+    Cached per (host, model): in ROUTER mode one host serves several models
+    with DIFFERENT windows, so a host-only key would hand the trimmer the
+    previous model's window after a swap — budgeting a 12K model at 64K and
+    truncating exactly the code this is meant to protect.
     """
     p = urlparse((endpoint_url or "").strip())
     if not (p.scheme and p.netloc):
         return 0
     root = f"{p.scheme}://{p.netloc}"
-    key = (root, "\x00llamacpp_ctx")
+    key = (root, "\x00llamacpp_ctx", model or "")
     now = time.time()
     hit = _OLLAMA_CAPS_CACHE.get(key)
     if hit:
         age_limit = _OLLAMA_CAPS_TTL if hit[1] else _OLLAMA_CAPS_TTL_UNKNOWN
         if now - hit[0] < age_limit:
             return hit[1] or 0
-    result = 0
-    try:
-        r = httpx.get(f"{root}/props", timeout=_CAPS_PROBE_TIMEOUT)
-        if r.status_code == 200:
-            gen = (r.json() or {}).get("default_generation_settings") or {}
-            result = int(gen.get("n_ctx") or 0)
-    except Exception as e:
-        logger.debug("llama.cpp /props context probe failed: %s", e)
+    # Router first when we know which model we mean. /props only ever
+    # describes the RESIDENT model (n_ctx 0 when none is), and the trimmer
+    # budgets BEFORE the request that would swap the model in — so asking
+    # /props about a not-yet-loaded model returns the wrong window, or none.
+    result = _llamacpp_router_ctx(root, model) if model else 0
+    if not result:
+        try:
+            r = httpx.get(f"{root}/props", timeout=_CAPS_PROBE_TIMEOUT)
+            if r.status_code == 200:
+                gen = (r.json() or {}).get("default_generation_settings") or {}
+                result = int(gen.get("n_ctx") or 0)
+        except Exception as e:
+            logger.debug("llama.cpp /props context probe failed: %s", e)
     _OLLAMA_CAPS_CACHE[key] = (now, result)
     return result
+
+
+def _llamacpp_router_ctx(root: str, model: str) -> int:
+    """Per-model window from a router's /v1/models, or 0 if not applicable.
+
+    A llama-server in router mode reports each configured model's own launch
+    argv under status.args — including --ctx-size — whether or not that model
+    is currently loaded. That is the only way to budget correctly for a model
+    before the request that loads it.
+
+    Returns 0 for a single-model server (no such field), so the caller falls
+    back to /props.
+    """
+    try:
+        r = httpx.get(f"{root}/v1/models", timeout=_CAPS_PROBE_TIMEOUT)
+        if r.status_code != 200:
+            return 0
+        for entry in (r.json() or {}).get("data") or []:
+            if entry.get("id") != model:
+                continue
+            args = ((entry.get("status") or {}).get("args")) or []
+            for i, a in enumerate(args):
+                if a in ("--ctx-size", "-c") and i + 1 < len(args):
+                    return int(args[i + 1])
+    except Exception as e:
+        logger.debug("llama.cpp router context lookup failed: %s", e)
+    return 0
 
 
 async def probe_supports_tools(endpoint_url: str, model: str = "") -> Optional[bool]:
@@ -600,9 +652,10 @@ async def local_native_mode(endpoint_url: str, model: str) -> bool:
     if caps is not None:
         logger.info("ollama reports tools capability for %r: %s", model, caps)
         return bool(caps)
-    caps = await llamacpp_supports_tools(endpoint_url)
+    caps = await llamacpp_supports_tools(endpoint_url, model)
     if caps is not None:
-        logger.info("llama.cpp reports tools capability at %r: %s", endpoint_url, caps)
+        logger.info("llama.cpp reports tools capability at %r for %r: %s",
+                    endpoint_url, model, caps)
         return bool(caps)
     caps = ollama_native_tools_model(model)
     logger.info("no local capability probe answered for %r — curated fallback "

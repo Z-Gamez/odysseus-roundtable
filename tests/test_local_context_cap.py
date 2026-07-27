@@ -84,7 +84,9 @@ def test_served_ctx_probe_rejects_garbage_urls():
 def _clamp_source():
     src = inspect.getsource(agent_loop)
     start = src.index('_ctx_cap = int(get_setting("ollama_num_ctx"')
-    return src[start - 1600:start + 900]
+    # Generous trailing window: this slice has to reach past the probe calls
+    # to the min() itself, and comments in between have pushed it out before.
+    return src[start - 1600:start + 1400]
 
 
 def test_clamp_is_not_gated_on_ollama_alone():
@@ -104,3 +106,102 @@ def test_clamp_takes_the_tightest_window():
     """Setting, and what the server actually serves, are both floors."""
     body = _clamp_source()
     assert "min(ctx_for_budget" in body
+
+
+# --- router mode: one host, several windows ---------------------------------
+
+def test_served_ctx_is_cached_per_model_not_per_host(monkeypatch):
+    """A router host serves several models with DIFFERENT windows.
+
+    Keyed on host alone, the first model's window is handed back for the
+    second after a swap. Budgeting a 12K model at 64K makes the trimmer pack
+    a prompt llama.cpp then truncates server-side — silently cutting exactly
+    the code the caller is trying to protect.
+    """
+    llm_core._OLLAMA_CAPS_CACHE.clear()
+    windows = {"Qwen3.6:35B": 65536, "Ornith:9B": 12288}
+    current = {"loaded": "Qwen3.6:35B"}
+
+    class _R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"default_generation_settings":
+                    {"n_ctx": windows[current["loaded"]]}}
+
+    monkeypatch.setattr(llm_core.httpx, "get", lambda *a, **k: _R())
+
+    url = "http://localhost:8080/v1"
+    assert llm_core.llamacpp_served_ctx(url, "Qwen3.6:35B") == 65536
+
+    # Router swaps the resident model; /props now reports the smaller window.
+    current["loaded"] = "Ornith:9B"
+    assert llm_core.llamacpp_served_ctx(url, "Ornith:9B") == 12288, (
+        "the previous model's context window was reused after a router swap"
+    )
+    # And the first model's answer is still cached under its own key.
+    current["loaded"] = "Qwen3.6:35B"
+    assert llm_core.llamacpp_served_ctx(url, "Qwen3.6:35B") == 65536
+    llm_core._OLLAMA_CAPS_CACHE.clear()
+
+
+def test_router_reports_each_models_window_before_it_is_loaded(monkeypatch):
+    """The trimmer budgets BEFORE the request that swaps the model in.
+
+    /props only ever describes the resident model, and reports n_ctx 0 when
+    the router is idle. Asking it about a not-yet-loaded model gives the wrong
+    window or none, so a 12K model gets budgeted at the 64K default and
+    llama.cpp truncates the prompt server-side. Router mode publishes each
+    model's own launch argv under /v1/models status.args instead.
+    """
+    llm_core._OLLAMA_CAPS_CACHE.clear()
+
+    def _fake_get(url, *a, **k):
+        class _R:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                if url.endswith("/v1/models"):
+                    return {"data": [
+                        {"id": "Ornith:9B", "status": {"args": [
+                            "llama-server", "--alias", "Ornith:9B",
+                            "--ctx-size", "12288", "--n-gpu-layers", "99"]}},
+                        {"id": "Qwen3.6:35B", "status": {"args": [
+                            "llama-server", "--alias", "Qwen3.6:35B",
+                            "--ctx-size", "65536", "--cpu-moe"]}},
+                    ]}
+                # Router is idle: no model resident, so no window to report.
+                return {"default_generation_settings": {"n_ctx": 0}}
+        return _R()
+
+    monkeypatch.setattr(llm_core.httpx, "get", _fake_get)
+    url = "http://localhost:8080/v1"
+
+    assert llm_core.llamacpp_served_ctx(url, "Ornith:9B") == 12288, (
+        "budgeted a 12K model against something else; llama.cpp would cut the "
+        "prompt server-side"
+    )
+    assert llm_core.llamacpp_served_ctx(url, "Qwen3.6:35B") == 65536
+    llm_core._OLLAMA_CAPS_CACHE.clear()
+
+
+def test_single_model_server_still_uses_props(monkeypatch):
+    """Non-router servers have no status.args — must fall back, not report 0."""
+    llm_core._OLLAMA_CAPS_CACHE.clear()
+
+    def _fake_get(url, *a, **k):
+        class _R:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                if url.endswith("/v1/models"):
+                    return {"data": [{"id": "solo", "object": "model"}]}
+                return {"default_generation_settings": {"n_ctx": 8192}}
+        return _R()
+
+    monkeypatch.setattr(llm_core.httpx, "get", _fake_get)
+    assert llm_core.llamacpp_served_ctx("http://localhost:8080/v1", "solo") == 8192
+    llm_core._OLLAMA_CAPS_CACHE.clear()

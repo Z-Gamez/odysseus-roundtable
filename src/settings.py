@@ -221,6 +221,15 @@ DEFAULT_SETTINGS = {
     # unreadable sha256 filename shown in the model picker, every reply
     # header and every Round Table step.
     "llamacpp_alias": "",
+    # Path to a llama-server router preset (INI). When set, llama.cpp serves
+    # every model in the file from one port and loads them on demand, and
+    # llamacpp_model/_ctx/_ngl/_alias are ignored — those live per-model in
+    # the INI, since they differ per model. Empty = single-model mode.
+    "llamacpp_preset": "",
+    # How many router models stay resident. 1 evicts the current model when a
+    # different one is requested, which is what lets a large MoE and a small
+    # dense model share a GPU that cannot hold both.
+    "llamacpp_models_max": 1,
     # Browser tool backend: "chrome" drives the user's real Chrome over CDP
     # (all platforms); "safari" drives real Safari via safaridriver (macOS only,
     # needs `safaridriver --enable` + Develop → Allow Remote Automation).

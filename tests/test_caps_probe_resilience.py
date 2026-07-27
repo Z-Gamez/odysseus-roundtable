@@ -72,9 +72,13 @@ _CAPS_FALSE = {"chat_template_caps": {"supports_tools": False}}
 _BUSY = httpx.ReadTimeout("server busy generating")
 
 
-def _age_out(root="http://localhost:8080", tag="\x00llamacpp"):
-    """Make the cached entry look stale so the next call re-probes."""
-    key = (root, tag)
+def _age_out(root="http://localhost:8080", tag="\x00llamacpp", model=""):
+    """Make the cached entry look stale so the next call re-probes.
+
+    The key carries the model too, since a router-mode host serves several
+    models with different capabilities from one address.
+    """
+    key = (root, tag, model)
     ts, val = L._OLLAMA_CAPS_CACHE[key]
     L._OLLAMA_CAPS_CACHE[key] = (ts - 10_000, val)
     return val
@@ -106,7 +110,7 @@ def test_tool_mode_survives_a_probe_timeout(monkeypatch):
     blob = r"C:\Users\x\.ollama\models\blobs\sha256-deadbeef"
     assert asyncio.run(L.local_native_mode(url, blob)) is True
 
-    _age_out()
+    _age_out(model=blob)
     monkeypatch.setattr(L.httpx, "AsyncClient", _fake_client(raise_exc=_BUSY))
     assert asyncio.run(L.local_native_mode(url, blob)) is True, (
         "tool mode collapsed to the curated name list after one slow probe; a "
@@ -135,3 +139,39 @@ def test_probe_timeout_is_generous_enough_for_a_busy_server():
         "the capability probe competes with the agent's own generation for the "
         "server's attention; a tight timeout decides tool mode by luck"
     )
+
+
+# --- router mode -----------------------------------------------------------
+
+def test_resident_models_caps_are_not_recorded_for_another_model(monkeypatch):
+    """/props describes whichever model is LOADED, not the one asked about.
+
+    In router mode one host serves several models. Probing model B while model
+    A is resident must not file A's answer under B's key — B would inherit a
+    capability it may not have, and the agent would attach tool schemas to a
+    model that cannot use them (or withhold them from one that can).
+    """
+    L._OLLAMA_CAPS_CACHE.clear()
+    payload = {"model_alias": "Ornith:9B",
+               "chat_template_caps": {"supports_tools": True,
+                                      "supports_tool_calls": True}}
+    monkeypatch.setattr(L.httpx, "AsyncClient", _fake_client(payload))
+
+    # The resident model answers for itself.
+    assert asyncio.run(
+        L.llamacpp_supports_tools("http://localhost:8080/v1", "Ornith:9B")) is True
+    # A different model gets "unknown", not Ornith's answer.
+    assert asyncio.run(
+        L.llamacpp_supports_tools("http://localhost:8080/v1", "Qwen3.6:35B")) is None, (
+        "the resident model's capability was attributed to a different model"
+    )
+    L._OLLAMA_CAPS_CACHE.clear()
+
+
+def test_single_model_server_without_alias_still_answers(monkeypatch):
+    """Non-router /props may omit model_alias — must not go silent."""
+    L._OLLAMA_CAPS_CACHE.clear()
+    monkeypatch.setattr(L.httpx, "AsyncClient", _fake_client(_CAPS_TRUE))
+    assert asyncio.run(
+        L.llamacpp_supports_tools("http://localhost:8080/v1", "whatever")) is True
+    L._OLLAMA_CAPS_CACHE.clear()

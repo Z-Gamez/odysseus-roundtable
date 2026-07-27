@@ -4074,7 +4074,9 @@ async def stream_agent_loop(
                         _served_ctx = _ollama_served_num_ctx(endpoint_url, model)
                     else:
                         from src.llm_core import llamacpp_served_ctx as _lcpp_ctx
-                        _served_ctx = _lcpp_ctx(endpoint_url)
+                        # Pass the model: in router mode one host serves
+                        # several windows, and the cache is keyed per model.
+                        _served_ctx = _lcpp_ctx(endpoint_url, model)
                     for _cap_v in (_ctx_cap, _served_ctx):
                         if _cap_v and _cap_v > 0:
                             ctx_for_budget = min(ctx_for_budget, _cap_v) if ctx_for_budget else _cap_v

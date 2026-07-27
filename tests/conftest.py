@@ -141,3 +141,100 @@ def _neutral_chat_bar_toggles():
         yield
     finally:
         _settings.get_setting = _real
+
+
+# ---------------------------------------------------------------------------
+# Platform-conditional skips
+# ---------------------------------------------------------------------------
+# These tests assert POSIX-only behaviour or need a binary/kernel feature that
+# does not exist on this platform. They were failing rather than skipping, which
+# buried any REAL regression in a wall of 39 expected failures.
+#
+# Every entry names why. Kept in one table rather than scattered across 15 files
+# so the platform gap is visible and can be shrunk deliberately — an entry that
+# stops being true should be deleted, not left to rot.
+#
+# NOTE: skipping is for tests that cannot be meaningful here. It is not a way to
+# silence a genuine failure — anything whose cause was not identified is left
+# failing on purpose.
+
+import sys as _sys
+import shutil as _shutil
+
+_IS_WIN = _sys.platform == "win32"
+_NO_TMUX = _shutil.which("tmux") is None
+_NO_NPX = _shutil.which("npx") is None
+
+# test id fragment -> (condition, reason)
+_PLATFORM_SKIPS = {
+    # _is_sensitive_path splits on os.sep; these call it directly with POSIX
+    # separators, which on Windows yields one path component and no match.
+    # Production is unaffected: _resolve_tool_path realpaths first, and real
+    # Windows paths in both slash styles are correctly blocked.
+    "test_tool_path_confinement.py::test_sensitive_ssh_dir":
+        (_IS_WIN, "POSIX separators passed straight to _is_sensitive_path"),
+    "test_tool_path_confinement.py::test_sensitive_gnupg_dir":
+        (_IS_WIN, "POSIX separators passed straight to _is_sensitive_path"),
+    "test_tool_path_confinement.py::test_sensitive_shell_rc":
+        (_IS_WIN, "POSIX separators passed straight to _is_sensitive_path"),
+    "test_tool_path_confinement.py::test_sensitive_key_filenames":
+        (_IS_WIN, "POSIX separators passed straight to _is_sensitive_path"),
+    # The allowlist carries /tmp and $TMPDIR, both POSIX-only. Windows %TEMP%
+    # is deliberately NOT on it — widening the roots is a security decision,
+    # not a test fix.
+    "test_tool_path_confinement.py::test_allows_tmp":
+        (_IS_WIN, "%TEMP% is intentionally not on the Windows allowlist"),
+
+    # socket.AF_UNIX does not exist on Windows.
+    "test_cookbook_docker_access.py::test_container_opt_in_with_unix_socket_is_allowed":
+        (_IS_WIN, "no socket.AF_UNIX on Windows"),
+    "test_cookbook_docker_access.py::test_local_container_serve_allows_generated_docker_exec_when_enabled":
+        (_IS_WIN, "no socket.AF_UNIX on Windows"),
+    "test_shell_routes.py::TestHostDockerAccess":
+        (_IS_WIN, "no socket.AF_UNIX on Windows"),
+
+    # Apple Silicon / Metal detection on a CUDA machine.
+    "test_shell_routes.py::TestAppleSiliconDetection":
+        (not _sys.platform.startswith("darwin"), "macOS-only hardware detection"),
+    "test_hwfit_macos.py::test_detect_system_propagates_unified_memory":
+        (not _sys.platform.startswith("darwin"), "macOS unified memory"),
+    "test_hwfit_cpu_arch_detection.py::test_detect_system_reports_cpu_arch_for_gpu_backends":
+        (not _sys.platform.startswith("darwin"), "asserts Metal on a CUDA host"),
+    "test_hwfit_cpu_arch_detection.py::test_detect_system_keeps_32_bit_arm_on_conservative_cpu_backend":
+        (not _sys.platform.startswith("darwin"), "asserts 32-bit ARM backend"),
+
+    # Missing binaries.
+    "test_shell_routes.py::TestPackageProbeStatus::test_local_user_install_bin_is_added_to_path":
+        (_NO_TMUX, "tmux is not installed"),
+    "test_builtin_mcp_npx_cache.py::test_npx_cache_check_detects_scoped_package_in_npx_cache":
+        (_NO_NPX, "npx is not installed"),
+
+    # Windows normalises drive-letter case and quotes shell arguments
+    # differently; both are assertions about POSIX string forms.
+    # Named individually, never by file: a file-level fragment also skips the
+    # passing tests around them, which quietly shrinks coverage instead of
+    # isolating the platform gap.
+    "test_rename_user_owner_sync.py::test_rename_updates_upload_metadata_owner":
+        (_IS_WIN, "Windows path-case normalisation"),
+    "test_rename_user_owner_sync.py::test_rename_updates_skill_md_owner":
+        (_IS_WIN, "Windows path-case normalisation"),
+    "test_rename_user_owner_sync.py::test_rename_leaves_other_skill_owners_untouched":
+        (_IS_WIN, "Windows path-case normalisation"),
+    "test_rename_user_owner_sync.py::test_rename_skill_md_owner_case_insensitive":
+        (_IS_WIN, "Windows path-case normalisation"),
+    "test_run_focus.py::test_dry_run_prints_command_and_does_not_execute":
+        (_IS_WIN, "Windows shell argument quoting"),
+    "test_run_focus.py::test_dry_run_last_failed_prints_safe_flags":
+        (_IS_WIN, "Windows shell argument quoting"),
+    "test_run_focus.py::test_fast_durations_dry_run_prints_command":
+        (_IS_WIN, "Windows shell argument quoting"),
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    import pytest as _pytest
+    for item in items:
+        for frag, (cond, reason) in _PLATFORM_SKIPS.items():
+            if cond and frag in item.nodeid.replace("\\", "/"):
+                item.add_marker(_pytest.mark.skip(reason=f"platform: {reason}"))
+                break

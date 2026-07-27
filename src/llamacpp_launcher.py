@@ -61,11 +61,51 @@ def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
         s.close()
 
 
+def identify_port(port: int, host: str = "127.0.0.1",
+                  timeout: float = 2.0) -> Optional[bool]:
+    """Who is on `port`? True=llama-server, False=someone else, None=nobody.
+
+    A bare "is the port open" check is not enough to decide idempotency. WSL's
+    port proxy (wslrelay) claimed 8080 first; the launcher saw an open socket,
+    concluded llama-server was already up, and returned quietly. Odysseus then
+    aimed its endpoint at a proxy that knows nothing about /v1, and every call
+    failed with a 503 that pointed nowhere near the real cause.
+
+    /props is the cheapest llama-server fingerprint: unauthenticated, present
+    on every build Odysseus supports, and unique enough that no proxy fakes it.
+    """
+    if not port_in_use(port, host):
+        return None
+    try:
+        import json as _json
+        from urllib.request import urlopen
+        with urlopen(f"http://{host}:{int(port)}/props", timeout=timeout) as r:
+            data = _json.loads(r.read().decode("utf-8", "replace"))
+        if isinstance(data, dict) and (
+            "default_generation_settings" in data or "chat_template_caps" in data
+        ):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def build_command(binary: str, model: str, port: int, ctx: int,
-                  ngl: int, extra: str = "") -> List[str]:
-    """Argv for llama-server. `extra` is split shell-style, never shell=True."""
+                  ngl: int, extra: str = "", alias: str = "") -> List[str]:
+    """Argv for llama-server. `extra` is split shell-style, never shell=True.
+
+    `alias` maps to llama-server's --alias, which is what /v1/models and /props
+    report as the model id. Without it llama-server reports the -m path, so a
+    GGUF pulled from Ollama's blob store shows up everywhere as
+    "C:\\Users\\...\\blobs\\sha256-af63361d2ac3..." — in the model picker, in
+    each reply's header, and in every Round Table step. Setting it here fixes
+    the name at the source rather than prettifying it in the UI, so anything
+    that round-trips the model id keeps matching.
+    """
     cmd = [binary, "-m", model, "--port", str(port), "--jinja",
            "-c", str(ctx), "-ngl", str(ngl)]
+    if alias.strip():
+        cmd += ["--alias", alias.strip()]
     if extra.strip():
         import shlex
         cmd += shlex.split(extra.strip(), posix=(os.name != "nt"))
@@ -103,6 +143,7 @@ def start_if_configured() -> Optional[subprocess.Popen]:
             ctx = _LEGACY_LLAMACPP_CTX_DEFAULT
         ngl = int(get_setting("llamacpp_ngl", 99) or 99)
         extra = str(get_setting("llamacpp_extra_args", "") or "")
+        alias = str(get_setting("llamacpp_alias", "") or "")
     except Exception as e:
         logger.warning("[llamacpp] could not read settings: %s", e)
         return None
@@ -118,8 +159,20 @@ def start_if_configured() -> Optional[subprocess.Popen]:
         logger.warning("[llamacpp] llama-server binary not found "
                        "(set llamacpp_binary, or install it on PATH)")
         return None
-    if port_in_use(port):
-        logger.info("[llamacpp] port %s already serving — leaving it alone", port)
+    who = identify_port(port)
+    if who is True:
+        logger.info("[llamacpp] llama-server already serving on port %s — "
+                    "leaving it alone", port)
+        return None
+    if who is False:
+        # Starting anyway would just fail to bind, and the old code's silent
+        # return taught us nothing. Say exactly what is wrong and how to fix it.
+        logger.error(
+            "[llamacpp] port %s is held by a process that is NOT llama-server "
+            "(no /props response). Odysseus will send model calls to it and get "
+            "errors. Free the port (on Windows check WSL's proxy: "
+            "`netsh interface portproxy show all`, and `wslrelay.exe`) or set "
+            "llamacpp_port to a free port.", port)
         return None
 
     log_dir = os.path.expanduser("~/.odysseus")
@@ -129,7 +182,7 @@ def start_if_configured() -> Optional[subprocess.Popen]:
     except Exception:
         log = subprocess.DEVNULL
 
-    cmd = build_command(binary, model, port, ctx, ngl, extra)
+    cmd = build_command(binary, model, port, ctx, ngl, extra, alias)
     kwargs = {"stdout": log, "stderr": log}
     if os.name == "nt":
         # Detach so it survives the launcher and shows no console window.

@@ -216,6 +216,11 @@ DEFAULT_SETTINGS = {
     "llamacpp_ctx": 0,
     "llamacpp_ngl": 99,
     "llamacpp_extra_args": "",
+    # Display name llama-server reports for the loaded GGUF (--alias).
+    # Empty = report the -m path, which for an Ollama blob is an
+    # unreadable sha256 filename shown in the model picker, every reply
+    # header and every Round Table step.
+    "llamacpp_alias": "",
     # Browser tool backend: "chrome" drives the user's real Chrome over CDP
     # (all platforms); "safari" drives real Safari via safaridriver (macOS only,
     # needs `safaridriver --enable` + Develop → Allow Remote Automation).

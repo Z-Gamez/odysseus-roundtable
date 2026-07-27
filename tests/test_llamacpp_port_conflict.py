@@ -203,7 +203,7 @@ def test_default_binding_stays_on_localhost():
 
 def test_explicit_bind_address_is_passed_through():
     assert LL._host_args("0.0.0.0") == ["--host", "0.0.0.0"]
-    assert LL._host_args("192.168.1.161") == ["--host", "192.168.1.161"]
+    assert LL._host_args("10.0.0.5") == ["--host", "10.0.0.5"]
 
 
 def test_router_and_single_model_both_honour_the_bind_address():

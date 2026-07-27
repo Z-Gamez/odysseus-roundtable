@@ -186,3 +186,36 @@ def test_no_preset_and_no_model_starts_nothing(monkeypatch, tmp_path):
                                   llamacpp_preset="", llamacpp_model="")
     assert LL.start_if_configured() is None
     assert not spawned
+
+
+# --- network binding -------------------------------------------------------
+#
+# llama-server has no authentication. The bind address is therefore a security
+# control, not a convenience setting: widening it exposes the model, and every
+# prompt sent to it, to anything that can reach the port.
+
+def test_default_binding_stays_on_localhost():
+    """Absent explicit configuration, nothing may be exposed to the network."""
+    assert LL._host_args("") == []
+    assert LL._host_args("127.0.0.1") == []
+    assert LL._host_args("localhost") == []
+
+
+def test_explicit_bind_address_is_passed_through():
+    assert LL._host_args("0.0.0.0") == ["--host", "0.0.0.0"]
+    assert LL._host_args("192.168.1.161") == ["--host", "192.168.1.161"]
+
+
+def test_router_and_single_model_both_honour_the_bind_address():
+    """A setting that only worked in one mode would silently leave the other
+    unreachable, which looks like a network fault rather than a config one."""
+    r = LL.build_router_command("llama-server", "m.ini", 8080, 1, "0.0.0.0")
+    assert "--host" in r and "0.0.0.0" in r
+    s = LL.build_command("llama-server", "m.gguf", 8080, 4096, 99,
+                         bind_host="0.0.0.0")
+    assert "--host" in s and "0.0.0.0" in s
+
+
+def test_localhost_default_adds_no_flag_in_either_mode():
+    assert "--host" not in LL.build_router_command("llama-server", "m.ini", 8080)
+    assert "--host" not in LL.build_command("llama-server", "m.gguf", 8080, 4096, 99)

@@ -91,7 +91,8 @@ def identify_port(port: int, host: str = "127.0.0.1",
 
 
 def build_command(binary: str, model: str, port: int, ctx: int,
-                  ngl: int, extra: str = "", alias: str = "") -> List[str]:
+                  ngl: int, extra: str = "", alias: str = "",
+                  bind_host: str = "") -> List[str]:
     """Argv for llama-server. `extra` is split shell-style, never shell=True.
 
     `alias` maps to llama-server's --alias, which is what /v1/models and /props
@@ -102,8 +103,8 @@ def build_command(binary: str, model: str, port: int, ctx: int,
     the name at the source rather than prettifying it in the UI, so anything
     that round-trips the model id keeps matching.
     """
-    cmd = [binary, "-m", model, "--port", str(port), "--jinja",
-           "-c", str(ctx), "-ngl", str(ngl)]
+    cmd = ([binary, "-m", model, "--port", str(port), "--jinja",
+            "-c", str(ctx), "-ngl", str(ngl)] + _host_args(bind_host))
     if alias.strip():
         cmd += ["--alias", alias.strip()]
     if extra.strip():
@@ -112,8 +113,29 @@ def build_command(binary: str, model: str, port: int, ctx: int,
     return cmd
 
 
+def _host_args(bind_host: str) -> List[str]:
+    """`--host` for llama-server, or nothing when left at the default.
+
+    llama-server binds 127.0.0.1 unless told otherwise, so another machine on
+    the LAN cannot reach it at all — the connection is refused before any of
+    Odysseus's probing gets a chance to say why. Setting llamacpp_host to
+    0.0.0.0 is what lets a second machine (a Mac mini running the UI, say) use
+    a model served here.
+
+    SECURITY: llama-server has no authentication. Binding beyond localhost
+    means anyone who can reach the port can use the model and see the prompts
+    sent to it. Only widen this on a network you trust, or put it behind a
+    private overlay (Tailscale/WireGuard) instead.
+    """
+    h = (bind_host or "").strip()
+    if not h or h in ("127.0.0.1", "localhost"):
+        return []
+    return ["--host", h]
+
+
 def build_router_command(binary: str, preset: str, port: int,
-                         models_max: int = 1) -> List[str]:
+                         models_max: int = 1,
+                         bind_host: str = "") -> List[str]:
     """Argv for llama-server's router mode: many models behind one endpoint.
 
     Single-model mode pins one GGUF for the process lifetime, so hosting a
@@ -128,8 +150,8 @@ def build_router_command(binary: str, preset: str, port: int,
     Per-model flags (context, -ngl, --cpu-moe) live in the INI, because they
     differ per model — the whole point of the preset.
     """
-    return [binary, "--models-preset", preset, "--models-max", str(models_max),
-            "--port", str(port), "--jinja"]
+    return ([binary, "--models-preset", preset, "--models-max", str(models_max),
+             "--port", str(port), "--jinja"] + _host_args(bind_host))
 
 
 def start_if_configured() -> Optional[subprocess.Popen]:
@@ -166,6 +188,7 @@ def start_if_configured() -> Optional[subprocess.Popen]:
         ngl = int(get_setting("llamacpp_ngl", 99) or 99)
         extra = str(get_setting("llamacpp_extra_args", "") or "")
         alias = str(get_setting("llamacpp_alias", "") or "")
+        bind_host = str(get_setting("llamacpp_host", "") or "").strip()
     except Exception as e:
         logger.warning("[llamacpp] could not read settings: %s", e)
         return None
@@ -217,9 +240,9 @@ def start_if_configured() -> Optional[subprocess.Popen]:
         log = subprocess.DEVNULL
 
     if router:
-        cmd = build_router_command(binary, preset, port, models_max)
+        cmd = build_router_command(binary, preset, port, models_max, bind_host)
     else:
-        cmd = build_command(binary, model, port, ctx, ngl, extra, alias)
+        cmd = build_command(binary, model, port, ctx, ngl, extra, alias, bind_host)
     kwargs = {"stdout": log, "stderr": log}
     if os.name == "nt":
         # Detach so it survives the launcher and shows no console window.

@@ -251,6 +251,12 @@ DEFAULT_SETTINGS = {
     # every model in the file from one port and loads them on demand, and
     # llamacpp_model/_ctx/_ngl/_alias are ignored — those live per-model in
     # the INI, since they differ per model. Empty = single-model mode.
+    # Address llama-server binds. Blank/127.0.0.1 = this machine only, which is
+    # the safe default: llama-server has NO authentication, so anything that can
+    # reach the port can use the model and read the prompts sent to it. Set to
+    # 0.0.0.0 only to let another machine on a trusted network use a model
+    # served here (e.g. a Mac mini running the UI against this box's GPU).
+    "llamacpp_host": "",
     "llamacpp_preset": "",
     # How many router models stay resident. 1 evicts the current model when a
     # different one is requested, which is what lets a large MoE and a small

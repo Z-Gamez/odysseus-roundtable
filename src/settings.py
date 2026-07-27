@@ -186,6 +186,19 @@ DEFAULT_SETTINGS = {
     # is a slow local one.
     "skill_capture_model": "",
     "skill_capture_timeout_seconds": 120,
+    # Where the agent's bash/python tools RUN. "local" (default) or
+    # "ssh:user@host" to send heavy work — Gradle, Flutter, test suites, the
+    # Round Table build gate — to a real machine while the UI stays here.
+    # This does NOT move the model: endpoint base_url already points anywhere,
+    # so "run a bigger model than this laptop fits" is an endpoint change, not
+    # this setting.
+    "agent_execution_target": "local",
+    # Working directory ON THE REMOTE HOST. The local workspace path has no
+    # counterpart there; blank means "don't cd", which is safer than cd-ing
+    # somewhere that does not exist and running the build in the login dir.
+    "agent_ssh_workspace": "",
+    "agent_ssh_port": "",
+    "agent_ssh_connect_timeout": 10,
     # Max relevant skills injected into the prompt for one request. The skills
     # library can grow beyond this; cleanup/retirement is an explicit review flow.
     "skill_max_injected": 3,

@@ -383,6 +383,24 @@ class BashTool:
                 "tmux_session": _tmux_session_name(str(session_id)),
             }
 
+        # Remote target: hand the command to the execution backend. Checked
+        # here rather than at the top of execute() so the tmux/interactive
+        # branch above keeps its local semantics — a tmux session lives on the
+        # host that owns the terminal, and pretending otherwise would attach to
+        # a session that does not exist.
+        from src import execution_backend
+        if execution_backend.is_remote():
+            _r = await execution_backend.run(
+                content, timeout=DEFAULT_BASH_TIMEOUT, progress_cb=progress_cb)
+            if _r.get("error"):
+                return _r
+            _out = (_r.get("stdout") or "").rstrip()
+            _err = (_r.get("stderr") or "").rstrip()
+            if _err:
+                _out = (_out + "\nSTDERR: " + _err).strip() if _out else "STDERR: " + _err
+            return {"output": _truncate(_out, MAX_OUTPUT_CHARS) or "(no output)",
+                    "exit_code": _r.get("exit_code") or 0}
+
         if _WIN_BASH:
             content = rewrite_for_win_bash(content)
             proc = await asyncio.create_subprocess_exec(
@@ -419,6 +437,26 @@ class PythonTool:
         from src.tool_execution import agent_cwd, _truncate
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
+
+        from src import execution_backend
+        if execution_backend.is_remote():
+            # Run through the remote python3, not this interpreter's path —
+            # sys.executable is a local venv that does not exist over there.
+            # Heredoc keeps the body off the command line, so quoting inside
+            # the snippet cannot break the invocation.
+            _payload = ("python3 -I - <<'ODYSSEUS_PY_EOF'\n"
+                        + content + "\nODYSSEUS_PY_EOF")
+            _r = await execution_backend.run(
+                _payload, timeout=DEFAULT_PYTHON_TIMEOUT, progress_cb=progress_cb)
+            if _r.get("error"):
+                return _r
+            _out = (_r.get("stdout") or "").rstrip()
+            _err = (_r.get("stderr") or "").rstrip()
+            if _err:
+                _out = (_out + "\nSTDERR: " + _err).strip() if _out else "STDERR: " + _err
+            return {"output": _truncate(_out, MAX_OUTPUT_CHARS) or "(no output)",
+                    "exit_code": _r.get("exit_code") or 0}
+
         proc = await asyncio.create_subprocess_exec(
             (sys.executable or "python"), "-I", "-c", content,
             stdout=asyncio.subprocess.PIPE,

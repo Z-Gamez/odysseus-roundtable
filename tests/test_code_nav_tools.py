@@ -34,7 +34,14 @@ def repo():
         os.mkdir(g)
         with open(os.path.join(g, "config"), "w") as f:
             f.write("needle in git\n")
-        yield root
+        # Yield a forward-slash path. Every test below interpolates this
+        # straight into a JSON string, and a Windows root (C:\tmp\codenav_x)
+        # makes that JSON invalid — "\t" is a tab and "\c" is not an escape at
+        # all, so the whole argument fails to parse and the tool reports a
+        # garbage path instead of running. Forward slashes are valid JSON and
+        # resolve identically on Windows, so this fixes every call site at once
+        # rather than escaping each one.
+        yield root.replace(os.sep, "/")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -184,7 +191,10 @@ def test_ls_path_outside_rejected(repo):
 # ── read_file line range ───────────────────────────────────────────────────
 
 def test_read_file_offset_limit(repo):
-    p = os.path.join(repo, "lines.txt")
+    # Join with "/" rather than os.path.join: the latter puts a backslash back
+    # into the path on Windows, and this string goes straight into JSON where
+    # "\l" is an invalid escape.
+    p = f"{repo}/lines.txt"
     with open(p, "w") as f:
         f.write("\n".join(f"line{i}" for i in range(1, 11)) + "\n")
     r = _run("read_file", f'{{"path": "{p}", "offset": 3, "limit": 2}}')

@@ -144,3 +144,62 @@ def test_downgrade_guard_conditions():
     assert "if _relevant_tools and not _tool_names_sent and not _is_api_model:" in src
     idx = src.index("_FENCED_DOWNGRADE_WARNED.add")
     assert "logger.warning" in src[idx:idx + 400]
+
+
+# ── refresh-time resolution ──────────────────────────────────────────────────
+#
+# Creation is not the only chance to answer the question. An endpoint added
+# while its llama-server was down, or before the model was pulled, gets a NULL
+# that nothing else ever fills -- and NULL is precisely what routes the agent
+# into fenced blocks. The manual refresh re-probes the model list anyway, so it
+# is the natural place to settle it.
+
+def _refresh_window():
+    """Source of the manual-refresh branch in list_endpoint_models.
+
+    The route is nested inside the registration function, so it is not a
+    module attribute — same reason test_explicit_user_choice_is_not_overwritten
+    reads source rather than calling it.
+    """
+    import inspect
+    src = inspect.getsource(model_routes)
+    # Anchor on the refresh branch's own log line, then read forward over the
+    # whole branch — robust to edits above it.
+    idx = src.index('logger.warning("Manual model refresh failed')
+    return src[idx:idx + 1800]
+
+
+def test_refresh_resolves_tool_support():
+    window = _refresh_window()
+    assert "_probe_endpoint_tool_support" in window, (
+        "a manual model refresh re-probes the model list but never revisits "
+        "supports_tools, so an endpoint created while its server was down "
+        "keeps the NULL that sends the agent to fenced blocks"
+    )
+
+
+def test_refresh_only_fills_a_blank():
+    """True/False on the row is a deliberate answer and must survive a refresh.
+
+    supports_tools=True outranks the _model_no_tools blocklist in agent_loop,
+    and False is the force-fenced escape hatch for models that break on native
+    schemas. Overwriting either from a probe would silently undo the operator's
+    choice on a routine refresh.
+    """
+    window = _refresh_window()
+    idx = window.index("_probe_endpoint_tool_support")
+    guard = window[:idx]
+    assert "if ep.supports_tools is None:" in guard, (
+        "the refresh probe is not gated on the field being unset"
+    )
+
+
+def test_refresh_ignores_an_inconclusive_probe():
+    """None means nobody answered; writing it back would be a no-op at best and
+    must not clobber the column."""
+    window = _refresh_window()
+    idx = window.index("_probe_endpoint_tool_support")
+    after = window[idx:idx + 400]
+    assert "is not None" in after, (
+        "an inconclusive probe result must not be persisted"
+    )

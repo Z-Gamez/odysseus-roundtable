@@ -2385,6 +2385,25 @@ def setup_model_routes(model_discovery):
                 if probed:
                     all_models = probed
                     ep.cached_models = json.dumps(all_models)
+                    # A refresh is the first chance to answer a question that
+                    # was unanswerable at creation time — the server was down,
+                    # or the model had not been pulled yet — and without this
+                    # the endpoint keeps supports_tools NULL forever. NULL is
+                    # what sends the agent to fenced blocks, so it silently
+                    # narrates tool calls instead of making them.
+                    #
+                    # Only ever fills a NULL. True or False on the row is a
+                    # deliberate answer — the create-time probe or the admin
+                    # toggle — and overwriting it would undo the force-fenced
+                    # escape hatch for a model that breaks on native schemas.
+                    if ep.supports_tools is None:
+                        _st_refresh = _probe_endpoint_tool_support(base, all_models)
+                        if _st_refresh is not None:
+                            ep.supports_tools = _st_refresh
+                            logger.info(
+                                "endpoint %s tool support resolved on refresh: %s",
+                                ep_id, _st_refresh)
+                            response.headers["X-Supports-Tools"] = str(_st_refresh).lower()
                     db.commit()
                     _invalidate_models_cache()
                     response.headers["X-Model-Refresh-Status"] = "refreshed"

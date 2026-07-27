@@ -5803,4 +5803,26 @@ async def stream_agent_loop(
         except Exception as _esc_err:
             logger.warning(f"teacher escalation hook failed: {_esc_err}", exc_info=True)
 
+    # Success-path counterpart to the escalation above: that one learns from
+    # failures and needs a configured teacher, so an install with no teacher —
+    # or one whose runs simply work — never wrote a skill at all. Fire and
+    # forget; distillation is a full model call and must not be charged to the
+    # user's response time. Does its own gating, so calling it is always safe.
+    if not _is_teacher_run and not guide_only:
+        try:
+            from src.skill_capture import maybe_capture
+            maybe_capture(
+                mode="agent",
+                user_request=_extract_last_user_message(messages) or "",
+                tool_results=tool_events,
+                agent_reply=full_response,
+                rounds=round_num,
+                target={"endpoint_url": endpoint_url,
+                        "model": actual_model or model,
+                        "headers": headers},
+                owner=owner,
+            )
+        except Exception as _cap_err:
+            logger.warning(f"skill capture hook failed: {_cap_err}", exc_info=True)
+
     yield "data: [DONE]\n\n"

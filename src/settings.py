@@ -173,6 +173,19 @@ DEFAULT_SETTINGS = {
     # qualify. Keeps low-confidence auto-skills out of context until they're
     # vetted/published. 0 disables the gate.
     "skill_autosave_min_confidence": 0.85,
+    # Distil a skill from a SUCCESSFUL multi-step agent run (src/skill_capture).
+    # Without this the only writer is teacher_escalation, which needs a
+    # configured teacher AND a failure — so installs that never set one, or
+    # whose runs succeed, learn nothing at all.
+    "skill_capture_enabled": True,
+    # Floor on tool calls before a run counts as a procedure. Below this it is
+    # "ran a command", not a sequence worth a prompt slot on future requests.
+    "skill_capture_min_tool_calls": 3,
+    # Model that does the distillation. Blank = the model that just ran (it
+    # already has the context). Point it at a fast endpoint if the agent model
+    # is a slow local one.
+    "skill_capture_model": "",
+    "skill_capture_timeout_seconds": 120,
     # Max relevant skills injected into the prompt for one request. The skills
     # library can grow beyond this; cleanup/retirement is an explicit review flow.
     "skill_max_injected": 3,

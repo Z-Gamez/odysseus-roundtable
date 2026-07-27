@@ -383,18 +383,19 @@ class BashTool:
                 "tmux_session": _tmux_session_name(str(session_id)),
             }
 
-        # Remote target: hand the command to the execution backend. Checked
-        # here rather than at the top of execute() so the tmux/interactive
-        # branch above keeps its local semantics — a tmux session lives on the
-        # host that owns the terminal, and pretending otherwise would attach to
-        # a session that does not exist.
-        from src import execution_backend
-        if execution_backend.is_remote():
-            _r = await execution_backend.run(
-                content, timeout=DEFAULT_BASH_TIMEOUT, progress_cb=progress_cb)
+        # Remote target: run through the execution environment, which carries
+        # the env snapshot and cwd across calls. Checked here rather than at
+        # the top of execute() so the tmux/interactive branch above keeps its
+        # local semantics — a tmux session lives on the host that owns the
+        # terminal, and pretending otherwise attaches to one that isn't there.
+        from src import execution_env
+        if execution_env.is_remote():
+            _env = execution_env.get_environment()
+            _r = await _env.execute(content, timeout=DEFAULT_BASH_TIMEOUT,
+                                    progress_cb=progress_cb)
             if _r.get("error"):
                 return _r
-            _out = (_r.get("stdout") or "").rstrip()
+            _out = (_r.get("output") or "").rstrip()
             _err = (_r.get("stderr") or "").rstrip()
             if _err:
                 _out = (_out + "\nSTDERR: " + _err).strip() if _out else "STDERR: " + _err
@@ -438,19 +439,19 @@ class PythonTool:
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
 
-        from src import execution_backend
-        if execution_backend.is_remote():
+        from src import execution_env
+        if execution_env.is_remote():
             # Run through the remote python3, not this interpreter's path —
             # sys.executable is a local venv that does not exist over there.
             # Heredoc keeps the body off the command line, so quoting inside
             # the snippet cannot break the invocation.
             _payload = ("python3 -I - <<'ODYSSEUS_PY_EOF'\n"
                         + content + "\nODYSSEUS_PY_EOF")
-            _r = await execution_backend.run(
+            _r = await execution_env.get_environment().execute(
                 _payload, timeout=DEFAULT_PYTHON_TIMEOUT, progress_cb=progress_cb)
             if _r.get("error"):
                 return _r
-            _out = (_r.get("stdout") or "").rstrip()
+            _out = (_r.get("output") or "").rstrip()
             _err = (_r.get("stderr") or "").rstrip()
             if _err:
                 _out = (_out + "\nSTDERR: " + _err).strip() if _out else "STDERR: " + _err

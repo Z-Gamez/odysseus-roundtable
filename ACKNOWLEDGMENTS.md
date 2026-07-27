@@ -24,6 +24,15 @@ The full license texts are kept in [`licenses/`](licenses/).
   archived Sep 2025; now maintained at `anomalyco/opencode`). Copyright © the
   opencode authors. **MIT License.** Adapted for agent-loop / tool-execution
   patterns and UI concepts.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** by **Nous
+  Research** — the self-improving agent. Copyright © 2025 Nous Research.
+  **MIT License.** Its `tools/environments/` execution-environment design is
+  ported in `src/execution_env.py` and `src/remote_file_ops.py`: the base
+  command wrapper (env snapshot + in-band CWD marker, so `cd` and `export`
+  survive between spawn-per-call commands), the SSH backend's ControlMaster
+  reuse and hashed control-socket path, and the structural choice that file
+  operations run as shell commands through the same environment as everything
+  else — which is what keeps one filesystem in play on a remote target.
 - **[llmfit](https://github.com/AlexsJones/llmfit)** by **Alex Jones** — the
   engine behind the Cookbook's model download / serve / "What Fits?" feature.
   Copyright © Alex Jones. **MIT License.** Adapted in `services/hwfit/`

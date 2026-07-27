@@ -72,10 +72,11 @@ def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
 
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src import execution_backend as _eb
-        _blocked = _eb.local_fs_unavailable("EditFile")
-        if _blocked:
-            return _blocked
+        from src import execution_env
+        if execution_env.is_remote():
+            # Same environment as bash: one filesystem, no split.
+            from src import remote_file_ops
+            return await remote_file_ops.dispatch("edit_file", content)
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
         try:
             args = json.loads(content) if content.strip().startswith("{") else {}
@@ -142,10 +143,11 @@ class EditFileTool:
 
 class ReadFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src import execution_backend as _eb
-        _blocked = _eb.local_fs_unavailable("ReadFile")
-        if _blocked:
-            return _blocked
+        from src import execution_env
+        if execution_env.is_remote():
+            # Same environment as bash: one filesystem, no split.
+            from src import remote_file_ops
+            return await remote_file_ops.dispatch("read_file", content)
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
         raw_path, offset, limit = content.split("\n", 1)[0].strip(), 0, 0
         _stripped = content.strip()
@@ -196,10 +198,11 @@ class ReadFileTool:
 
 class WriteFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src import execution_backend as _eb
-        _blocked = _eb.local_fs_unavailable("WriteFile")
-        if _blocked:
-            return _blocked
+        from src import execution_env
+        if execution_env.is_remote():
+            # Same environment as bash: one filesystem, no split.
+            from src import remote_file_ops
+            return await remote_file_ops.dispatch("write_file", content)
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
         lines = content.split("\n", 1)
         raw_path = lines[0].strip()
@@ -250,10 +253,11 @@ class WriteFileTool:
 
 class ApplyPatchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src import execution_backend as _eb
-        _blocked = _eb.local_fs_unavailable("ApplyPatch")
-        if _blocked:
-            return _blocked
+        from src import execution_env
+        if execution_env.is_remote():
+            # Same environment as bash: one filesystem, no split.
+            from src import remote_file_ops
+            return await remote_file_ops.dispatch("apply_patch", content)
         """Apply a small Codex-style patch using exact context matching.
 
         This is deliberately stricter than git-apply: if an update hunk's old
@@ -429,10 +433,11 @@ def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str
 
 class LsTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src import execution_backend as _eb
-        _blocked = _eb.local_fs_unavailable("Ls")
-        if _blocked:
-            return _blocked
+        from src import execution_env
+        if execution_env.is_remote():
+            # Same environment as bash: one filesystem, no split.
+            from src import remote_file_ops
+            return await remote_file_ops.dispatch("ls", content)
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
         raw_path = ""
         _s = (content or "").strip()
@@ -482,10 +487,11 @@ class LsTool:
 
 class GlobTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src import execution_backend as _eb
-        _blocked = _eb.local_fs_unavailable("Glob")
-        if _blocked:
-            return _blocked
+        from src import execution_env
+        if execution_env.is_remote():
+            # Same environment as bash: one filesystem, no split.
+            from src import remote_file_ops
+            return await remote_file_ops.dispatch("glob", content)
         from src.tool_execution import (
             _SENSITIVE_BASENAMES,
             _is_sensitive_path,
@@ -587,10 +593,11 @@ class GlobTool:
 
 class GrepTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src import execution_backend as _eb
-        _blocked = _eb.local_fs_unavailable("Grep")
-        if _blocked:
-            return _blocked
+        from src import execution_env
+        if execution_env.is_remote():
+            # Same environment as bash: one filesystem, no split.
+            from src import remote_file_ops
+            return await remote_file_ops.dispatch("grep", content)
         from src.tool_execution import (
             _SENSITIVE_FILE_PATTERNS,
             _is_sensitive_path,
@@ -701,15 +708,14 @@ class GetWorkspaceTool:
         # that actually matters. Under a remote target the LOCAL workspace is
         # the one place bash will never look, and handing it over invites the
         # agent to cd somewhere that does not exist on the far side.
-        from src import execution_backend as _eb
-        _kind, _host = _eb.resolve_target()
-        if _kind != "local":
-            _remote_ws = _eb.remote_workspace()
-            if _remote_ws:
-                return {"output": f"{_remote_ws}  (on {_host}; commands run there)",
-                        "exit_code": 0}
-            return {"output": (f"No workspace configured on {_host}. Commands run "
-                               f"in the SSH login directory — set agent_ssh_workspace."),
+        from src import execution_env
+        if execution_env.is_remote():
+            _env = execution_env.get_environment()
+            # env.cwd is live — the CWD marker updates it after every command,
+            # so this reports where the agent actually is, not where it started.
+            _host = getattr(_env, "host", "the remote host")
+            return {"output": f"{_env.cwd}  (on {_host}; shell and file tools "
+                              f"both run there)",
                     "exit_code": 0}
         ws = get_active_workspace()
         if ws:

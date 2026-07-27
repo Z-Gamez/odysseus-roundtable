@@ -256,6 +256,12 @@ DEFAULT_SETTINGS = {
     # reach the port can use the model and read the prompts sent to it. Set to
     # 0.0.0.0 only to let another machine on a trusted network use a model
     # served here (e.g. a Mac mini running the UI against this box's GPU).
+    # Stop the auto-launched llama-server after this many idle seconds and
+    # relaunch on the next request. llama-server holds the whole model
+    # resident for its process lifetime and has no idle timeout of its own
+    # (measured: 6.45 GB of a 16 GB machine for a 9B Q6_K at ctx 12288),
+    # so an idle app keeps paying for a model nobody is using. 0 disables.
+    "llamacpp_idle_timeout_seconds": 900,
     "llamacpp_host": "",
     "llamacpp_preset": "",
     # How many router models stay resident. 1 evicts the current model when a

@@ -255,6 +255,14 @@ def start_if_configured() -> Optional[subprocess.Popen]:
         logger.info("[llamacpp] started %s on port %s in %s mode (pid %s)",
                     os.path.basename(binary), port,
                     "router" if router else "single-model", proc.pid)
+        # Hand the child to the idle supervisor. Only a process WE started is
+        # ever stopped — adopting one the user launched and killing it later
+        # would be a nasty surprise.
+        try:
+            from src.llamacpp_supervisor import note_started
+            note_started(proc)
+        except Exception:
+            pass
         return proc
     except Exception as e:
         logger.warning("[llamacpp] failed to start: %s", e)

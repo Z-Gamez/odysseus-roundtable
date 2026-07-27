@@ -2276,6 +2276,7 @@ async def llm_call_async(
     workload: str = "foreground",
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
+    await _llamacpp_idle_gate(url)
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
@@ -2471,6 +2472,21 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             yield chunk
 
 
+# Idle-unload hook. Every completion bound for the managed llama-server marks
+# the endpoint as in use, and revives it if the supervisor unloaded it — the
+# user waits on a cold start instead of getting a connection error.
+async def _llamacpp_idle_gate(url: str) -> None:
+    try:
+        from src import llamacpp_supervisor as _sup
+        if not _sup.targets_llamacpp(url):
+            return
+        _sup.note_request()
+        if not _sup.is_running():
+            await _sup.ensure_running()
+    except Exception as _e:
+        logger.debug("llama.cpp idle gate skipped: %s", _e)
+
+
 async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
@@ -2484,6 +2500,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
       - event: error                       — errors
       - data: [DONE]                       — end of stream
     """
+    await _llamacpp_idle_gate(url)
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 

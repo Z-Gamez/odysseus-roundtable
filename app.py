@@ -1033,8 +1033,12 @@ async def _startup_event():
     # already serving) so the window hosts calling it too is harmless, and it
     # never raises — a launcher failure must not stop Odysseus from starting.
     try:
+        from src.llamacpp_supervisor import start_supervisor as _start_llamacpp_supervisor
         from src.llamacpp_launcher import start_if_configured as _start_llamacpp
         await asyncio.to_thread(_start_llamacpp)
+        # Watch for idleness and unload the model when nobody is using it;
+        # no-ops when llamacpp_idle_timeout_seconds is 0.
+        _start_llamacpp_supervisor()
     except Exception as e:
         logger.warning("[llamacpp] autostart skipped: %s", e)
     # Wipe any leftover incognito sessions from previous process — they're

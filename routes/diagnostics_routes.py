@@ -27,7 +27,23 @@ def setup_diagnostics_routes(
         ntfy, and provider endpoints. Non-intrusive probes — safe to poll."""
         require_admin(request)
         from src.service_health import collect_service_health
-        return await collect_service_health(rag_manager, memory_vector)
+        health = await collect_service_health(rag_manager, memory_vector)
+        # What the loaded model is actually costing. llama-server holds the
+        # whole model resident for its process lifetime, and that number is
+        # otherwise invisible until the machine starts swapping.
+        # Nested under "services", not alongside it: the top-level shape is
+        # {overall, services, timestamp} and callers assert on exactly that.
+        # llama-server is a service anyway, so this is where it belongs.
+        try:
+            from src.llamacpp_supervisor import status as _llamacpp_status
+            svcs = health.get("services") if isinstance(health, dict) else None
+            if isinstance(svcs, dict):
+                svcs["llamacpp"] = _llamacpp_status()
+            elif isinstance(svcs, list):
+                svcs.append({"name": "llamacpp", **_llamacpp_status()})
+        except Exception:
+            pass
+        return health
 
     @router.get("/api/diagnostics/logs")
     async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:

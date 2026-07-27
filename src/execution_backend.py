@@ -100,6 +100,37 @@ def build_remote_command(command: str, *, cwd: Optional[str] = None,
     return f"{shell} -lc {shlex.quote(inner)}"
 
 
+def local_fs_unavailable(tool: str) -> Optional[Dict[str, Any]]:
+    """Error for a LOCAL-filesystem tool while execution is remote, else None.
+
+    THE hazard of a split execution target. The filesystem tools call open()
+    on this host; bash and python run on the remote one. Left alone the agent
+    writes app.py locally, runs `cat app.py` remotely, and gets "no such
+    file" — or worse, builds a stale checkout that happens to exist over there
+    and reports a clean pass for code it never compiled. Silent wrong answers,
+    not a crash.
+
+    Refusing keeps the two halves consistent: in remote mode ALL file work goes
+    through bash, which is remote, so there is exactly one filesystem in play.
+    The message names that path because the agent reads it mid-loop and can act
+    on it.
+    """
+    kind, host = resolve_target()
+    if kind == _LOCAL:
+        return None
+    return {
+        "error": (
+            f"{tool} operates on the Odysseus host's filesystem, but "
+            f"agent_execution_target is ssh:{host} — the file would land on a "
+            f"different machine than bash/python see, so results would be "
+            f"wrong rather than merely slow. Use the bash tool for file work "
+            f"while remote (heredoc to write, cat/sed/grep to read), or set "
+            f"agent_execution_target back to 'local'."
+        ),
+        "exit_code": 1,
+    }
+
+
 async def run(command: str, *, timeout: float,
               progress_cb=None, cwd: Optional[str] = None,
               target: Optional[str] = None,

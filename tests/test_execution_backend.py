@@ -165,3 +165,57 @@ def test_port_is_passed_through(monkeypatch, _settings):
     _fake_exec(monkeypatch, captured=captured)
     asyncio.run(eb.run("ls", timeout=5, target="ssh:box"))
     assert "-p" in captured and "2222" in captured
+
+
+# ── the split-filesystem hazard ──────────────────────────────────────────────
+#
+# The filesystem tools call open() on the Odysseus host; bash and python run on
+# the remote one. Unguarded, the agent writes app.py locally, runs `cat app.py`
+# remotely and gets "no such file" -- or worse, compiles a stale checkout that
+# happens to exist over there and reports a clean pass for code it never built.
+# Wrong answers, not a crash, which is the expensive kind.
+
+def test_local_fs_is_allowed_when_execution_is_local():
+    assert eb.local_fs_unavailable("write_file") is None
+
+
+def test_local_fs_is_refused_when_execution_is_remote(_settings):
+    _settings["agent_execution_target"] = "ssh:builder@gpu-box"
+    err = eb.local_fs_unavailable("write_file")
+    assert err is not None and err["exit_code"] == 1
+
+
+def test_refusal_tells_the_agent_what_to_do_instead(_settings):
+    """The agent reads this mid-loop; a bare 'not supported' just stalls it.
+
+    bash IS remote, so heredoc/cat is a genuinely working path — naming it
+    keeps one filesystem in play instead of two.
+    """
+    _settings["agent_execution_target"] = "ssh:builder@gpu-box"
+    msg = eb.local_fs_unavailable("write_file")["error"]
+    assert "bash" in msg
+    assert "agent_execution_target" in msg
+    assert "gpu-box" in msg, "name the host so the mismatch is obvious"
+
+
+def test_every_local_fs_tool_is_guarded():
+    """A tool added later without the guard reintroduces silent divergence."""
+    import inspect
+    from src.agent_tools import filesystem_tools as ft
+    for cls in ("EditFileTool", "ReadFileTool", "WriteFileTool", "ApplyPatchTool",
+                "LsTool", "GlobTool", "GrepTool"):
+        src = inspect.getsource(getattr(ft, cls))
+        assert "local_fs_unavailable" in src, (
+            f"{cls} touches the local filesystem but does not check the "
+            f"execution target; under ssh: it would write where bash cannot see"
+        )
+
+
+def test_get_workspace_reports_the_remote_path(monkeypatch, _settings):
+    """Informational, so report rather than refuse — but the LOCAL path is the
+    one place bash will never look."""
+    _settings["agent_execution_target"] = "ssh:builder@gpu-box"
+    _settings["agent_ssh_workspace"] = "/srv/work"
+    from src.agent_tools import filesystem_tools as ft
+    out = asyncio.run(ft.GetWorkspaceTool().execute("", {}))["output"]
+    assert "/srv/work" in out and "gpu-box" in out

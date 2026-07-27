@@ -20,9 +20,12 @@ jobs:
   build:
     runs-on: macos-14   # Apple Silicon (arm64)
     steps:
-      - uses: actions/checkout@v4
+      # Pinned by commit SHA like every other workflow here: a moving tag
+      # silently changed what ran, and floating @v4/@v5 kept this job on the
+      # deprecated Node 20 runtime that GitHub is removing.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: "3.12"
 
@@ -126,7 +129,7 @@ jobs:
           done
           ls -lh Odysseus-macOS-arm64.dmg
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: Odysseus-macOS-arm64
           path: Odysseus-macOS-arm64.dmg

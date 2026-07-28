@@ -203,6 +203,17 @@ _PLATFORM_SKIPS = {
     "test_hwfit_cpu_arch_detection.py::test_detect_system_keeps_32_bit_arm_on_conservative_cpu_backend":
         (not _sys.platform.startswith("darwin"), "asserts 32-bit ARM backend"),
 
+    # Windows has no POSIX execute bit, so "is this file runnable" cannot mean
+    # the same thing and the assertion inverts.
+    "test_odysseus_dispatcher.py::test_is_runnable_subcommand_requires_executable_file":
+        (_IS_WIN, "no POSIX execute bit on Windows"),
+    # Both shell out to a CLI that is not installed here (FileNotFoundError
+    # WinError 2 from the spawn, before any assertion runs).
+    "test_slash_setup_provider_aliases.py::test_opencode_setup_provider_aliases_resolve":
+        (_IS_WIN, "opencode CLI is not installed"),
+    "test_pr_blocker_audit.py::test_color_auto_requires_terminal_and_support":
+        (_IS_WIN, "requires a POSIX tty for colour detection"),
+
     # Missing binaries.
     "test_shell_routes.py::TestPackageProbeStatus::test_local_user_install_bin_is_added_to_path":
         (_NO_TMUX, "tmux is not installed"),

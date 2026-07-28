@@ -33,6 +33,11 @@ class _FakeRequest:
         self.url = _FakeURL(path)
         self.headers = {}
         self.state = SimpleNamespace()
+        # The middleware reads request.client (it is None for ASGI scopes with
+        # no peer, e.g. tests and some proxies). Starlette always provides the
+        # attribute, so a stub without it fails on attribute access rather than
+        # exercising the header logic this test exists to check.
+        self.client = SimpleNamespace(host="testclient", port=0)
 
 
 class _FakeResponse:

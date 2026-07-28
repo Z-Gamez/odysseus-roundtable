@@ -236,7 +236,13 @@ async def test_mcp_send_email_stages_with_visible_owner_account_id(tmp_path, mon
         },
     )
 
-    assert "Draft staged for approval" in out[0].text
+    # Pin the safety-critical half of the message, not the prose: the
+    # wording changed ("Draft staged for approval" -> "Draft staged —
+    # NOTHING HAS BEEN SENT...") and the assertion silently went stale.
+    # What must never regress is that the tool says it staged rather
+    # than sent.
+    assert "Draft staged" in out[0].text
+    assert "NOTHING HAS BEEN SENT" in out[0].text
     conn = sqlite3.connect(scheduled_path)
     try:
         row = conn.execute(
@@ -266,8 +272,16 @@ async def test_mcp_send_email_stages_owner_scoped_pending_draft(tmp_path, monkey
         },
     )
 
-    assert "Draft staged for approval" in out[0].text
-    assert "Nothing has been sent yet" in out[0].text
+    # Pin the safety-critical half of the message, not the prose: the
+    # wording changed ("Draft staged for approval" -> "Draft staged —
+    # NOTHING HAS BEEN SENT...") and the assertion silently went stale.
+    # What must never regress is that the tool says it staged rather
+    # than sent.
+    assert "Draft staged" in out[0].text
+    assert "NOTHING HAS BEEN SENT" in out[0].text
+    # Case-insensitive: the message says "NOTHING HAS BEEN SENT" now.
+    # Assert the guarantee, not the capitalisation.
+    assert "nothing has been sent" in out[0].text.lower()
     conn = sqlite3.connect(db_path)
     try:
         row = conn.execute(

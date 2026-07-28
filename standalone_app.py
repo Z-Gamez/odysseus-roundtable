@@ -81,10 +81,21 @@ def _run_server() -> None:
     from app import app as fastapi_app
     uvicorn.run(
         fastapi_app,
-        host="127.0.0.1",
+        host=_bind_host(),
         port=int(os.environ.get("ODYSSEUS_PORT", "7000")),
         log_level="info",
     )
+
+
+def _bind_host() -> str:
+    """Same APP_BIND contract as the Windows launcher.
+
+    No load_dotenv needed here, unlike odysseus_app: this is called after
+    `from app import app`, and importing app.py loads .env as a side effect.
+    The Windows launcher reads APP_BIND at import time and never imports app,
+    so it has to load .env itself.
+    """
+    return os.getenv("APP_BIND", "127.0.0.1")
 
 
 class _MacWindowApi:

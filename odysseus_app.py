@@ -15,7 +15,22 @@ import subprocess
 import urllib.request
 import urllib.error
 
-HOST = "127.0.0.1"
+# Loopback by default. APP_BIND=0.0.0.0 lets other devices on the network
+# reach the UI (a phone on the same Wi-Fi, say). app.py already honoured this
+# variable; the window hosts did not, so the setting silently did nothing for
+# anyone running the desktop app.
+# .env is loaded here, not just in app.py: this launcher reads APP_BIND at
+# import time and then spawns uvicorn with --host, so by the time app.py
+# loads .env inside that child the bind address has already been decided.
+# Without this, APP_BIND in .env works when app.py is run directly and
+# silently does nothing for the desktop app — the worst kind of setting.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(encoding="utf-8-sig")
+except Exception:
+    pass
+
+HOST = os.getenv("APP_BIND", "127.0.0.1")
 PORT = 7000
 URL = f"http://{HOST}:{PORT}"
 TITLE = "Odysseus"

@@ -38,7 +38,12 @@ python-dateutil
 caldav
 cryptography
 bcrypt
-mcp
+# PINNED: the low-level Server API is not stable across releases. A later
+# version removed the @server.list_tools() / @server.call_tool()
+# decorators every server in mcp_servers/ is built on, so a fresh CI
+# install crashed all four on startup while dev machines with an older
+# wheel kept working. 1.28.0 is verified against those decorators.
+mcp==1.28.0
 pyotp
 qrcode[pil]
 croniter

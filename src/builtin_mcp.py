@@ -237,9 +237,36 @@ async def register_builtin_servers(mcp_manager):
                         os.path.join(_DATA_DIR, "local", "playwright-mcp-cache"),
                     )
                     os.makedirs(cache_home, exist_ok=True)
+                    # npx is a shell script whose shebang runs `node`, so
+                    # resolving npx to an absolute path is NOT enough — the
+                    # child still has to find node on PATH. Launched from
+                    # launchd (or any non-login context) PATH is the bare
+                    # /usr/bin:/bin:/usr/sbin:/sbin, which fails with
+                    # "env: node: No such file or directory" even though npx
+                    # itself was found. Put node's own directory first.
+                    _path_parts = []
+                    _node = shutil.which("node")
+                    if _node:
+                        _path_parts.append(os.path.dirname(_node))
+                    if npx_path and os.path.sep in npx_path:
+                        _path_parts.append(os.path.dirname(npx_path))
+                    # Homebrew's two prefixes (Apple Silicon, Intel) and nvm's
+                    # default, so a GUI launch works without a login shell.
+                    _path_parts += ["/opt/homebrew/bin", "/usr/local/bin",
+                                    os.path.expanduser("~/.nvm/versions/node")]
+                    _path_parts.append(os.environ.get("PATH", ""))
+                    _seen, _clean = set(), []
+                    for _p in _path_parts:
+                        if _p and _p not in _seen:
+                            _seen.add(_p)
+                            _clean.append(_p)
                     env = {
                         "XDG_CACHE_HOME": cache_home,
                         "PLAYWRIGHT_BROWSERS_PATH": os.path.join(cache_home, "browsers"),
+                        "PATH": os.pathsep.join(_clean),
+                        # npm writes here; without HOME it falls back to / and
+                        # fails read-only under launchd.
+                        "HOME": os.environ.get("HOME", os.path.expanduser("~")),
                     }
                 ok = await mcp_manager.connect_server(
                     server_id=server_id,

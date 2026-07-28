@@ -52,8 +52,32 @@ jobs:
       - name: Build with PyInstaller
         run: python -m PyInstaller --noconfirm OdysseusMac.spec
 
-      - name: Ad-hoc sign the app
-        run: codesign --force --deep -s - dist/Odysseus.app
+      - name: Sign the app
+        # LAST step that touches the bundle — anything written afterwards
+        # breaks the seal ("a sealed resource is missing or invalid").
+        #
+        # macOS TCC keys permissions to the signing identity. With an ad-hoc
+        # signature there is no Team ID, so TCC falls back to the cdhash, which
+        # changes every build — each rebuild reads as a DIFFERENT app and the
+        # user's Contacts and Automation grants are silently dropped and
+        # re-prompted. A stable identity fixes that; ad-hoc cannot.
+        #
+        # Set the MACOS_SIGN_IDENTITY secret (a Developer ID Application cert,
+        # or a self-signed code-signing cert imported into the runner keychain)
+        # to get a stable designated requirement. Without it this falls back to
+        # ad-hoc so the build still produces a runnable app — but permissions
+        # will keep resetting, which is the known cost.
+        env:
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          if [ -n "$SIGN_IDENTITY" ]; then
+            echo "Signing with a stable identity"
+            codesign --force --deep --options runtime \
+                     --sign "$SIGN_IDENTITY" dist/Odysseus.app
+          else
+            echo "::warning::No MACOS_SIGN_IDENTITY secret — signing ad-hoc. macOS will re-prompt for Contacts/Automation after every rebuild."
+            codesign --force --deep -s - dist/Odysseus.app
+          fi
 
       - name: Verify signature integrity
         # An invalid signature ALSO produces macOS's "app is damaged" dialog,
@@ -63,7 +87,21 @@ jobs:
         # documented, not fixable without an Apple Developer account.)
         run: |
           codesign --verify --deep --strict --verbose=2 dist/Odysseus.app
-          codesign -dv dist/Odysseus.app 2>&1 | head -5
+          codesign -dv dist/Odysseus.app 2>&1 | head -8
+
+          # Fail the build if anything wrote into the bundle after signing —
+          # that is what silently resets the user's macOS permissions, and it
+          # is invisible unless checked. saw.db and the Playwright cache both
+          # used to land here.
+          if find dist/Odysseus.app -name "*.db" -o -name "*.db-wal" | grep -q .; then
+            echo "::error::A database was written inside the app bundle — this breaks the signature seal and resets TCC permissions on every rebuild."
+            find dist/Odysseus.app \( -name "*.db" -o -name "*.db-wal" \) -print
+            exit 1
+          fi
+          if [ -d dist/Odysseus.app/Contents/Frameworks/data/local ]; then
+            echo "::error::Runtime cache directory found inside the app bundle."
+            exit 1
+          fi
 
       - name: Smoke test the frozen server
         run: |

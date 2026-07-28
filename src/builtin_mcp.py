@@ -225,9 +225,16 @@ async def register_builtin_servers(mcp_manager):
             try:
                 env = None
                 if server_id == "builtin_browser":
+                    # DATA_DIR, not the app root: get_app_root() is INSIDE the
+                    # .app bundle on frozen macOS builds, and Playwright writes
+                    # a browser cache here (hundreds of MB). Writing into a
+                    # signed bundle breaks its seal permanently, which makes
+                    # macOS TCC treat every rebuild as a new app and drop the
+                    # Contacts/Automation grants the user already gave.
+                    from src.constants import DATA_DIR as _DATA_DIR
                     cache_home = os.environ.get(
                         "ODYSSEUS_BROWSER_MCP_CACHE",
-                        os.path.join(base_dir, "data", "local", "playwright-mcp-cache"),
+                        os.path.join(_DATA_DIR, "local", "playwright-mcp-cache"),
                     )
                     os.makedirs(cache_home, exist_ok=True)
                     env = {

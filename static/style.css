@@ -41917,3 +41917,33 @@ body.native-app.hamburger-right .hamburger-btn {
     right: calc(9px + env(safe-area-inset-right, 0px));
   }
 }
+
+/* ── Mobile: safe area for the chat, and right-size the composer text ────────
+   Follow-up to the top-inset fix. That handled the fixed hamburger, the top
+   bar and the sidebar, but the SCROLLING message list still ran under the
+   Dynamic Island — the bar is inset, the content behind it was not.
+   ------------------------------------------------------------------------ */
+@media (max-width: 768px) {
+  /* Pad the scroll container rather than shifting it, so messages clear the
+     island while scrolled to the top but the list still fills the screen.
+     scroll-padding keeps scroll-into-view from parking a message under it. */
+  #chat-history {
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    scroll-padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  }
+
+  /* The composer placeholder and the plan-mode label inherit desktop sizing
+     and dominate a phone-width input. 16px on the textarea itself is
+     deliberate and must NOT go lower: iOS Safari auto-zooms the page when a
+     focused input is under 16px, which is far worse than large text. Shrink
+     the PLACEHOLDER only — the typed text stays 16px. */
+  #message::placeholder {
+    font-size: 0.85rem;
+  }
+
+  .plan-mode-status,
+  .plan-mode-status-label {
+    font-size: 0.75rem;
+    letter-spacing: 0;
+  }
+}

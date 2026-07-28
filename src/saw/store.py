@@ -16,14 +16,23 @@ from typing import Any, Dict, List, Optional
 
 
 def _data_dir() -> Path:
-    # Honor an explicit override, else use <odysseus_root>/data (this file lives
-    # at <root>/src/saw/store.py), else fall back to ./data.
-    env = os.environ.get("ODYSSEUS_DATA_DIR")
-    if env:
-        return Path(env)
-    root = Path(__file__).resolve().parents[2]
-    cand = root / "data"
-    return cand if cand.exists() else Path("data")
+    """Where saw.db lives. Always the shared data dir — never next to the code.
+
+    This used to derive the path from __file__ (<root>/src/saw/store.py ->
+    <root>/data). In a frozen macOS .app that resolves INSIDE the bundle, to
+    Contents/Frameworks/data/saw.db, and writing there is not merely untidy:
+    it breaks the code signature seal permanently. macOS TCC keys permissions
+    to the signing identity, so a broken seal on an ad-hoc-signed build makes
+    every rebuild read as a different app and silently drops previously granted
+    Contacts and Automation permissions.
+
+    src.constants.DATA_DIR is the single source of truth: it honours
+    ODYSSEUS_DATA_DIR and resolves to ~/.odysseus/data when frozen. Being
+    "deliberately standalone" about the schema was right; being standalone
+    about the PATH is what let this drift out of step.
+    """
+    from src.constants import DATA_DIR
+    return Path(DATA_DIR)
 
 
 def _db_path() -> str:

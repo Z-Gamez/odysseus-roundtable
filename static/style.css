@@ -41947,3 +41947,32 @@ body.native-app.hamburger-right .hamburger-btn {
     letter-spacing: 0;
   }
 }
+
+/* ── Mobile + 1.25x text size: keep every control reachable ──────────────────
+   The desktop compensation above caps #theme-popup's height at 1.25x, and its
+   comment reasons that mobile needs none because the full-sheet rules are
+   top-anchored so "their headers are already visible". The header is — but
+   the controls BELOW it are not. "Text size" sits partway down the sheet, so
+   at 1.25x the content grows past the shrunken viewport and the very control
+   that sets the scale becomes unreachable: you can turn text size up and then
+   cannot turn it back down.
+
+   Bounding the sheet and letting it scroll fixes it for every control in the
+   panel rather than just the one that was reported.
+   ------------------------------------------------------------------------ */
+@media (max-width: 768px) {
+  :root.ui-scale-125 #theme-popup {
+    /* Divide by the zoom factor so the rendered sheet matches the real
+       viewport, as the desktop rules do. */
+    max-height: calc(92dvh / 1.25) !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* Same trap in the settings sheet — it also holds appearance controls and is
+     taller than the themes popup. */
+  :root.ui-scale-125 .settings-modal-content,
+  :root.ui-scale-125 .modal-content {
+    max-height: calc(92dvh / 1.25) !important;
+    overflow-y: auto !important;
+  }
+}

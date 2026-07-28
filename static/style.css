@@ -41873,3 +41873,47 @@ body.native-app .icon-rail.right-side {
   margin-bottom: 0;
   padding-bottom: 0;
 }
+
+/* ── iOS safe area: the top ──────────────────────────────────────────────────
+   viewport-fit=cover is set, so the page draws underneath the Dynamic Island
+   and notch. Six rules already pad safe-area-inset-BOTTOM for the home
+   indicator, but the top inset was never used anywhere — so on an iPhone 14
+   Pro Max the fixed hamburger (top: 12px) and the chat top bar both render
+   under the island and get clipped.
+
+   env() resolves to 0px on every device without an inset, so these are inert
+   on desktop and on older phones; the fallback keeps them valid where env()
+   is unsupported. Placed at the end of the file so they win over the
+   .hamburger-btn / body.native-app / body.hamburger-right variants above
+   without needing !important.
+   ------------------------------------------------------------------------ */
+.hamburger-btn,
+body.hamburger-right .hamburger-btn,
+body.native-app .hamburger-btn,
+body.native-app.hamburger-right .hamburger-btn {
+  top: calc(12px + env(safe-area-inset-top, 0px));
+}
+
+.chat-top-bar {
+  padding-top: calc(5px + env(safe-area-inset-top, 0px));
+}
+
+/* The sidebar is full-height and fixed, so its own contents need the inset
+   too — otherwise the first item sits under the island once it slides open. */
+.sidebar,
+#sidebar {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* Landscape: the island moves to a side, so the top inset collapses and the
+   LEFT/RIGHT ones become the ones that matter. Without this the hamburger
+   tucks under the island when the phone is turned. */
+@media (orientation: landscape) {
+  .hamburger-btn {
+    left: calc(9px + env(safe-area-inset-left, 0px));
+  }
+  body.hamburger-right .hamburger-btn {
+    left: auto;
+    right: calc(9px + env(safe-area-inset-right, 0px));
+  }
+}

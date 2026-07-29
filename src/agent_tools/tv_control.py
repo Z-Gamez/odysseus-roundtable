@@ -148,6 +148,89 @@ def set_input(name: str) -> Dict[str, Any]:
     return _result(out, f"input -> {name}")
 
 
+# Vizio app launch descriptors, VERIFIED on a V4K65C by launching each app and
+# reading the id back from /app/current. Not taken from published tables — the
+# published value for Prime (NAME_SPACE 2, APP_ID "4") launches nothing on this
+# model, and the first version of this table was written from memory, which is
+# how "open netflix" ended up starting Prime Video.
+#
+# Netflix and Prime differ ONLY in APP_ID within NAME_SPACE 3, so a single
+# wrong digit silently opens the wrong app.
+#
+# Correctable without a rebuild: drop a tv_apps.json in the data dir. Use
+# action=current_app with an app open to read its real descriptor.
+_DEFAULT_APPS = {
+    "netflix": {"APP_ID": "1", "NAME_SPACE": 3, "MESSAGE": None},   # verified
+    "prime":   {"APP_ID": "4", "NAME_SPACE": 3, "MESSAGE": None},   # verified
+    "youtube": {"APP_ID": "1", "NAME_SPACE": 5, "MESSAGE": None},   # verified
+    "disney":  {"APP_ID": "75", "NAME_SPACE": 4, "MESSAGE": None},  # verified
+    "max":     {"APP_ID": "34", "NAME_SPACE": 4, "MESSAGE": None},  # verified
+    "hbo":     {"APP_ID": "34", "NAME_SPACE": 4, "MESSAGE": None},  # alias of max
+    "hulu":    {"APP_ID": "3", "NAME_SPACE": 4, "MESSAGE": None},   # accepted, not visually confirmed
+}
+
+
+# The TV normalises NAME_SPACE 2 to 4 on readback, so a launch sent as 2 reads
+# back as 4. Treating that as a mismatch would report failure on a launch that
+# actually worked.
+_EQUIVALENT_NAMESPACES = ({2, 4},)
+
+
+def _ns_equal(a, b) -> bool:
+    try:
+        a, b = int(a), int(b)
+    except (TypeError, ValueError):
+        return False
+    if a == b:
+        return True
+    return any(a in grp and b in grp for grp in _EQUIVALENT_NAMESPACES)
+
+
+def _app_table() -> dict:
+    """Built-in descriptors, overlaid with data/tv_apps.json if present.
+
+    An override file means a wrong id is a one-line JSON edit rather than a
+    rebuild — which matters because these cannot be verified without the TV in
+    front of you.
+    """
+    table = {k: dict(v) for k, v in _DEFAULT_APPS.items()}
+    try:
+        from src.constants import DATA_DIR
+        with open(os.path.join(DATA_DIR, "tv_apps.json"), "r", encoding="utf-8") as fh:
+            for name, cfg in (json.load(fh) or {}).items():
+                if isinstance(cfg, dict) and "APP_ID" in cfg:
+                    cfg.setdefault("MESSAGE", None)
+                    table[str(name).strip().lower()] = cfg
+    except Exception:
+        pass
+    return table
+
+
+def current_app() -> Dict[str, Any]:
+    """What the TV is running right now, with its raw descriptor.
+
+    This is how an id gets corrected: open the app with the remote, run this,
+    and copy the reported NAME_SPACE/APP_ID into data/tv_apps.json.
+    """
+    r = _resolve()
+    if r.get("error"):
+        return {"error": r["error"], "exit_code": 1}
+    out = _request(r["ip"], r["port"], "/app/current", token=r["token"])
+    if out.get("_error") or out.get("_http_error"):
+        return _result(out, "read current app")
+    val = (out.get("ITEM") or {}).get("VALUE") or out.get("VALUE") or out
+    known = {(str(v.get("APP_ID")), int(v.get("NAME_SPACE", -1))): k
+             for k, v in _app_table().items()}
+    name = known.get((str(val.get("APP_ID")), int(val.get("NAME_SPACE", -1))))
+    return {"output": json.dumps({
+        "running": name or "unknown",
+        "descriptor": val,
+        "hint": ("matches a known app" if name else
+                 "not in the app table — copy this descriptor into "
+                 "data/tv_apps.json under the app's name to fix it"),
+    }), "exit_code": 0}
+
+
 def launch_app(app: str, video_id: str = "") -> Dict[str, Any]:
     """Open an app, optionally deep-linking a YouTube video id.
 
@@ -157,22 +240,38 @@ def launch_app(app: str, video_id: str = "") -> Dict[str, Any]:
     r = _resolve()
     if r.get("error"):
         return {"error": r["error"], "exit_code": 1}
-    known = {
-        "youtube":  {"APP_ID": "1", "NAME_SPACE": 5, "MESSAGE": video_id or None},
-        "netflix":  {"APP_ID": "3", "NAME_SPACE": 3, "MESSAGE": None},
-        "prime":    {"APP_ID": "4", "NAME_SPACE": 3, "MESSAGE": None},
-        "hulu":     {"APP_ID": "8", "NAME_SPACE": 2, "MESSAGE": None},
-        "disney":   {"APP_ID": "75", "NAME_SPACE": 4, "MESSAGE": None},
-    }
+    known = _app_table()
     cfg = known.get((app or "").strip().lower())
     if not cfg:
         return {"error": f"unknown app {app!r}. Known: {', '.join(sorted(known))}",
                 "exit_code": 1}
     out = _request(r["ip"], r["port"], "/app/launch", method="PUT", token=r["token"],
                    body={"VALUE": cfg, "REQUEST": "MODIFY"})
+    res = _result(out, f"launch {app}")
+    if res.get("exit_code"):
+        return res
+
+    # /app/launch answers STATUS SUCCESS even when nothing launches — a wrong
+    # or uninstalled app id looks identical to a working one. That is exactly
+    # how the wrong Netflix id shipped. The only honest check is to read back
+    # what is actually running.
+    import time as _time
+    _time.sleep(2.0)
+    back = _request(r["ip"], r["port"], "/app/current", token=r["token"])
+    val = (back.get("ITEM") or {}).get("VALUE") or back.get("VALUE") or {}
+    got_id, got_ns = str(val.get("APP_ID")), val.get("NAME_SPACE")
+    if got_id and got_id != "None":
+        if got_id != str(cfg["APP_ID"]) or not _ns_equal(got_ns, cfg["NAME_SPACE"]):
+            return {"error": (
+                f"asked for {app} ({cfg['NAME_SPACE']}/{cfg['APP_ID']}) but the "
+                f"TV is running {got_ns}/{got_id}. The id for {app} is wrong for "
+                f"this model, or the app is not installed. Fix it by putting the "
+                f"correct descriptor in data/tv_apps.json — action=current_app "
+                f"reports what is actually running."), "exit_code": 1}
+
     note = "" if (app.lower() == "youtube" and video_id) else \
         " (opened the app; per-title playback is not exposed by this app)"
-    return _result(out, f"launch {app}{note}")
+    return {"output": f"OK — launched {app}{note}", "exit_code": 0}
 
 
 def _result(out: Dict[str, Any], what: str) -> Dict[str, Any]:
@@ -213,11 +312,14 @@ class TvControlTool:
                               int(args.get("steps") or 1))
             if action == "input":
                 return set_input(str(args.get("name") or ""))
+            if action in ("current_app", "current"):
+                return current_app()
             if action in ("launch", "app"):
                 return launch_app(str(args.get("app") or ""),
                                   str(args.get("video_id") or ""))
             return {"error": f"unknown action {action!r}. Use: info, power, "
-                             f"volume, input, launch.", "exit_code": 1}
+                             f"volume, input, launch, current_app.",
+                    "exit_code": 1}
 
         # Blocking urllib on a LAN device — keep it off the event loop.
         return await asyncio.to_thread(_run)

@@ -448,6 +448,18 @@ _DOMAIN_RULES = {
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`.
 - Do not use shell, Python, curl, requests, or scraping code for web lookup unless web tools are unavailable or already failed.
 - "Research X" means `trigger_research`, not a one-off `web_search`, unless the user explicitly asks for a quick lookup.""",
+    "media": """\
+## TV / media device rules
+- `tv_control` drives a REAL television on the local network. `ui_control` is
+  Odysseus's own interface — never use it for the TV.
+- Do not record TV requests as memories or skills. They are one-off commands.
+- Call `tv_control` with action=info first when you need the input names or
+  are unsure the TV is reachable; the input list comes from the device.
+- Launching an app works. YouTube can also start a specific video by id.
+  Netflix, Hulu, Disney and Prime open to their home screen ONLY — they do
+  not expose per-title playback. Say that plainly rather than reporting that
+  something is playing when it is not.
+- If the TV is unreachable, say so; do not retry the same call repeatedly.""",
     "documents": """\
 ## Document rules
 - For long code/content (>15 lines), use `create_document` instead of pasting into chat.
@@ -544,7 +556,15 @@ def _domain_rules_for_tools(tool_names: set) -> list[str]:
     rules = []
     for domain, domain_tools in _DOMAIN_TOOL_MAP.items():
         if names & domain_tools:
-            rules.append(_DOMAIN_RULES[domain])
+            # .get, not [domain]: this runs during prompt assembly, before
+            # any model call, so a KeyError here is an unrecoverable 500 on
+            # every request that matches the domain. A domain without a rule
+            # pack should simply contribute no extra rules. Adding 'media' to
+            # the classifier and tool map without a rules entry took down every
+            # message mentioning a TV.
+            _pack = _DOMAIN_RULES.get(domain)
+            if _pack:
+                rules.append(_pack)
     if names & {"create_session", "list_sessions", "manage_session", "manage_documents", "manage_notes", "manage_calendar", "manage_tasks", "manage_skills", "manage_research"}:
         rules.append(_LINK_RULES)
     return rules

@@ -508,6 +508,41 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "tv_control",
+            "description": (
+                "Control the user's Vizio SmartCast TV on the local network. Use this "
+                "for ANYTHING about the TV, television, or living-room screen — power, "
+                "volume, switching input, or opening a streaming app. This is a real "
+                "physical device: do NOT use ui_control (that is Odysseus's own "
+                "interface), and do NOT store TV requests as memories or skills. "
+                "Launching an app works; YouTube can also jump to a specific video by "
+                "id. Netflix and the others open to their home screen only — playing a "
+                "specific title is not something those apps expose, so say so plainly "
+                "rather than claiming it played."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "enum": ["info", "power", "volume", "input", "launch"],
+                               "description": "info = model/inputs/state; power = on/off/toggle; volume = up/down/mute; input = switch HDMI etc; launch = open a streaming app"},
+                    "state": {"type": "string", "enum": ["on", "off", "toggle"],
+                              "description": "For power"},
+                    "direction": {"type": "string", "enum": ["up", "down", "mute"],
+                                  "description": "For volume"},
+                    "steps": {"type": "integer", "description": "For volume: how many increments (default 1)"},
+                    "name": {"type": "string", "description": "For input: e.g. hdmi1, hdmi2, cast. Call action=info first if unsure which inputs exist."},
+                    "app": {"type": "string", "enum": ["youtube", "netflix", "prime", "hulu", "disney"],
+                            "description": "For launch"},
+                    "video_id": {"type": "string", "description": "For launch with youtube: the YouTube video id (the v= value), which starts playback directly. Ignored by other apps."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ui_control",
             "description": "Control the user interface. Actions: toggle (turn tools on/off), open_panel (open a modal: documents/library, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), open_email_reply (open an email reply draft document; DOES NOT send. For 'write/draft a reply saying X', include body with the drafted reply), set_mode, switch_model, set_theme (built-in presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (CREATE any custom theme with a name + colors object — pick distinctive, evocative hex colors that match the requested aesthetic, NOT generic defaults. The theme auto-applies after creation). When a user asks for ANY theme not in the built-in preset list, ALWAYS use create_theme.",
             "parameters": {
@@ -1606,6 +1641,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = action
     elif tool_type == "list_models":
         content = args.get("filter", "")
+    elif tool_type == "tv_control":
+        content = json.dumps(args)
     elif tool_type == "ui_control":
         action = args.get("action", "")
         name = args.get("name", "")

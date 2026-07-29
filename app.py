@@ -46,6 +46,39 @@ from dotenv import load_dotenv
 # utf-8-sig reads plain UTF-8 (no BOM) identically, so this is safe everywhere.
 load_dotenv(encoding="utf-8-sig")
 
+
+def _point_frozen_build_at_its_ca_bundle() -> None:
+    """Tell a frozen build where its CA certificates are.
+
+    PyInstaller bundles certifi's cacert.pem, but nothing tells Python, httpx or
+    requests where it landed — so inside the macOS .app every HTTPS request
+    failed certificate verification and web_fetch broke. Windows is unaffected
+    because its store is located a different way, which is why this only ever
+    showed up on the Mac.
+
+    Set during module import, before any HTTP client is constructed: the SSL
+    context reads these when it is built, so anything created later picks the
+    bundle up. Respects an existing value — an operator pointing at a
+    corporate bundle must win over ours.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import certifi
+        bundle = certifi.where()
+        if not os.path.exists(bundle):
+            return
+        for var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+            if not os.environ.get(var):
+                os.environ[var] = bundle
+    except Exception:
+        # Never fatal: a missing CA bundle degrades HTTPS, a raised exception
+        # here would stop the app from starting at all.
+        pass
+
+
+_point_frozen_build_at_its_ca_bundle()
+
 import asyncio
 import logging
 import secrets

@@ -44,6 +44,11 @@ bcrypt
 # install crashed all four on startup while dev machines with an older
 # wheel kept working. 1.28.0 is verified against those decorators.
 mcp==1.28.0
+# DuckDuckGo search. services/search/providers.py imports ddgs and silently
+# drops to an HTML scrape without it — and DuckDuckGo now blocks that
+# scrape, so search returned "no results" with no sign anything was wrong.
+# It was never declared, so a fresh install had search quietly degraded.
+ddgs
 pyotp
 qrcode[pil]
 croniter

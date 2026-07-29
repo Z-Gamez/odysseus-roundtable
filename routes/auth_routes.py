@@ -657,6 +657,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             "agent_max_rounds": (1, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
             "ollama_num_ctx": (0, 131072),      # 0 = no cap
+            # Same treatment as its Ollama sibling. Without an entry here the
+            # value is stored raw: a string reaches the launcher's int() and a
+            # wild number makes llama-server fail to allocate its KV cache at
+            # startup, which reads as "llama.cpp won't start" with no clue why.
+            "llamacpp_ctx": (0, 131072),        # 0 = follow ollama_num_ctx
         }
         for key in DEFAULT_SETTINGS:
             if key not in body:

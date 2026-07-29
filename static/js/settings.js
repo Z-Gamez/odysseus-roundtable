@@ -5850,6 +5850,7 @@ const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations,
   function bind() {
     var ctx = document.getElementById('set-ollamaNumCtx');
     var ka = document.getElementById('set-ollamaKeepAlive');
+      var lctx = document.getElementById('set-llamacppCtx');
     if (!ctx || ctx.dataset.bound === '1') return;
     ctx.dataset.bound = '1';
     function save(patch) {
@@ -5861,11 +5862,19 @@ const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations,
       .then(function (s) {
         if (s && typeof s.ollama_num_ctx !== 'undefined') ctx.value = s.ollama_num_ctx;
         if (ka && s && typeof s.ollama_keep_alive !== 'undefined') ka.value = s.ollama_keep_alive;
+          if (lctx && s && typeof s.llamacpp_ctx !== 'undefined') lctx.value = s.llamacpp_ctx;
       }).catch(function () {});
     ctx.addEventListener('change', function () {
       var v = parseInt(ctx.value, 10); if (isNaN(v) || v < 0) v = 0; ctx.value = v; save({ ollama_num_ctx: v });
     });
     if (ka) ka.addEventListener('change', function () { save({ ollama_keep_alive: ka.value.trim() }); });
+      // llama.cpp override. 0 = follow the shared setting above, which is
+      // exactly what the launcher already does — this exposes the existing
+      // llamacpp_ctx setting rather than adding a second source of truth.
+      if (lctx) lctx.addEventListener('change', function () {
+        var v = parseInt(lctx.value, 10); if (isNaN(v) || v < 0) v = 0; lctx.value = v;
+        save({ llamacpp_ctx: v });
+      });
   }
   if (document.readyState !== 'loading') bind();
   else document.addEventListener('DOMContentLoaded', bind);

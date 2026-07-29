@@ -1631,6 +1631,11 @@
                 <span style="font-size:11px;opacity:.55;margin-left:8px;">8192 = fastest &middot; 16384 = balanced &middot; 0 = no cap</span>
               </div>
               <div class="settings-row">
+                <label class="settings-label">Context window <span style="opacity:.5;font-weight:normal">(llama.cpp)</span></label>
+                <input type="number" id="set-llamacppCtx" min="0" step="1024" style="width:110px;box-sizing:border-box;background:var(--input-bg,#1a1a1a);color:var(--fg);border:1px solid var(--border,#333);border-radius:6px;padding:4px 8px;">
+                <span style="font-size:11px;opacity:.55;margin-left:8px;">0 = follow the setting above &middot; llama.cpp fixes this at launch, so changing it restarts the server</span>
+              </div>
+              <div class="settings-row">
                 <label class="settings-label">Keep loaded <span style="opacity:.5;font-weight:normal">(Ollama)</span></label>
                 <input type="text" id="set-ollamaKeepAlive" placeholder="30m" style="width:110px;box-sizing:border-box;background:var(--input-bg,rgba(127,127,127,.08));color:inherit;border:1px solid var(--input-border,rgba(127,127,127,.3));border-radius:8px;padding:6px 9px;font:inherit;">
                 <span style="font-size:11px;opacity:.55;margin-left:8px;">e.g. 30m, 1h, -1 (forever)</span>

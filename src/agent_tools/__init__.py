@@ -23,6 +23,7 @@ from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
 from .browser_tools import BrowserTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .tv_control import TvControlTool
 from .coding_tools import TodoWriteTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
@@ -52,6 +53,7 @@ TOOL_HANDLERS = {
     "ls": LsTool().execute,
     "glob": GlobTool().execute,
     "grep": GrepTool().execute,
+    "tv_control": TvControlTool().execute,
     "create_document": CreateDocumentTool().execute,
     "update_document": UpdateDocumentTool().execute,
     "edit_document": EditDocumentTool().execute,
@@ -86,7 +88,7 @@ PYTHON_TIMEOUT = 30
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "browser", "read_file", "write_file", "edit_file",
              "apply_patch", "todowrite",
-             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
+             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs", "tv_control",
              "create_document", "update_document", "edit_document",
              "search_chats",
              "chat_with_model", "create_session", "list_sessions",

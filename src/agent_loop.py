@@ -514,6 +514,11 @@ _DOMAIN_RULES = {
 }
 
 _DOMAIN_TOOL_MAP = {
+    # The built-in TV tool. Tools from user-registered MCP servers
+    # (tv_status, tv_power, ...) come from the tool index, which already
+    # indexes external servers -- this only guarantees the domain is never
+    # empty when no MCP server is registered.
+    "media": {"tv_control"},
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "approve_pending_email", "cancel_pending_email", "resolve_contact", "manage_contact"},
@@ -1420,6 +1425,18 @@ def _classify_agent_request(messages: List[Dict], last_user: str,
     # phone number — a common "text 5551234567 ..." shape (#imsg-routing).
     if has(r"\b(imessage|i-?messages?|texts?|txt|sms|send_imessage)\b", r"\btext\s+\w", r"\b\d{10,}\b"):
         domains.add("messaging")
+    # Physical media devices (TV, streaming boxes). Without this, "open
+    # Netflix" and "switch to hdmi2" read as UI-panel requests and
+    # ui_control gets selected -- the same misroute that previously
+    # swallowed send_imessage and the browser tool. Measured before the
+    # fix: "open netflix on the tv" classified as {ui}, and "switch to
+    # hdmi2" matched no domain at all.
+    if has(r"\b(tv|television|smartcast|vizio|roku|chromecast|airplay)\b",
+           r"\bliving\s*room\b",
+           r"\b(netflix|youtube|hulu|disney|prime video|apple tv)\b",
+           r"\bhdmi\s*\d\b",
+           r"\b(volume|mute|unmute)\b"):
+        domains.add("media")
     if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
         domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
@@ -4216,6 +4233,8 @@ async def stream_agent_loop(
     # reload and retry the round with the conversation intact.
     _crash_retries_left = 3
 
+    # Previous round's text + tool names, for the identical-round guard.
+    _IDENTICAL_ROUND: Dict[str, object] = {}
     for round_num in range(1, max_rounds + 1):
         # Re-trim EVERY round, not just at prep: each round appends tool results
         # (a written file echoes its full content back), so a long tool-heavy
@@ -4797,6 +4816,28 @@ async def stream_agent_loop(
         # on reload (#3222 follow-up).
         cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
         round_texts.append(cleaned_round)
+        # Stop a round that is reproducing itself exactly. Observed with a
+        # missing tool: the model wanted tv_* tools it had never been shown,
+        # fell back to manage_skills, got exit_code=n/a, and emitted a
+        # byte-identical round 5+ times until the user killed it. The
+        # runaway detector counts CALL frequency, so it never fires when
+        # the loop produces no successful call to count.
+        #
+        # Two consecutive rounds with identical text AND the same tool names
+        # means nothing changed and nothing will: another identical round
+        # cannot reach a different state.
+        _this_round = (cleaned_round or "").strip()
+        _this_calls = tuple(sorted(_tool_names_sent or []))
+        if (_this_round and _this_round == _IDENTICAL_ROUND.get("text")
+                and _this_calls == _IDENTICAL_ROUND.get("calls")):
+            logger.warning(
+                "[agent] round %s repeated the previous round byte-for-byte "
+                "with the same tools (%s) — breaking the loop instead of "
+                "spinning. Usually means a tool the model wants is not being "
+                "offered to it.", round_num, ", ".join(_this_calls) or "none")
+            break
+        _IDENTICAL_ROUND["text"] = _this_round
+        _IDENTICAL_ROUND["calls"] = _this_calls
         if _ody_qwen_finetune_model and not tool_blocks and cleaned_round:
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 

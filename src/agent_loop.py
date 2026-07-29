@@ -4828,7 +4828,13 @@ async def stream_agent_loop(
         # cannot reach a different state.
         _this_round = (cleaned_round or "").strip()
         _this_calls = tuple(sorted(_tool_names_sent or []))
-        if (_this_round and _this_round == _IDENTICAL_ROUND.get("text")
+        # Requires a non-empty tool set: a repeated round that called a tool is
+        # the stuck case (manage_skills re-invoked with the same args, same
+        # result). A repeated round with NO tool calls is a different situation
+        # and belongs to the round-cap/nudge path, which must still be allowed
+        # to exhaust and emit its own message.
+        if (_this_round and _this_calls
+                and _this_round == _IDENTICAL_ROUND.get("text")
                 and _this_calls == _IDENTICAL_ROUND.get("calls")):
             logger.warning(
                 "[agent] round %s repeated the previous round byte-for-byte "

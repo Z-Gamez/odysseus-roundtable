@@ -27,13 +27,22 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 _PORTS = (7345, 9000)
-# Connect and handshake are timed separately on purpose. In standby the TV's
-# network card accepts a TCP connection (that is what an always-on card / Alexa
-# integration buys you) but the SmartCast service is NOT running, so TLS never
-# completes. Measured on a V4K65C in standby: TCP open in 2.4s, handshake dead
-# after 4s. One combined timeout reports that as an opaque "SSL handshake
-# timeout" when the real answer is "the TV is asleep".
+# Measured on a V4K65C, because the difference is the whole diagnosis:
+#   awake   — TCP 0.22s, TLS 0.51s, request 0.1-1.1s
+#   standby — TCP 2.4s (the always-on card answers), TLS never completes
+# So a timeout alone says nothing about which state the TV is in. It is also
+# what a wrong IP or a dropped Wi-Fi link looks like. Guessing "standby" from
+# the exception type reported a powered-on TV as asleep; _diagnose() measures
+# the two layers instead of inferring.
 _TIMEOUT = 8.0
+# The TCP probe decides standby-vs-unreachable, and a standby connect is slow
+# (2.4s measured) because the card is only half awake. Too tight a budget here
+# reads "asleep" as "gone" and skips the wake that would have fixed it, so this
+# is deliberately well clear of that figure. TLS gets less: awake it completes
+# in 0.5s, and in standby it never completes at all, so waiting longer only
+# delays the answer.
+_PROBE_TIMEOUT = 6.0
+_TLS_PROBE_TIMEOUT = 4.0
 _WAKE_SETTLE_SECONDS = 6.0
 _WAKE_ATTEMPTS = 4
 
@@ -76,17 +85,55 @@ def _request(ip: str, port: int, path: str, *, method: str = "GET",
         return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
         return {"_http_error": e.code, "_detail": e.read().decode("utf-8", "replace")[:300]}
-    except TimeoutError:
-        # Distinct from a refused port: something IS listening, it just never
-        # spoke TLS. That means standby, not "wrong address".
-        return {"_standby": True,
-                "_error": "TLS handshake timed out — the network card "
-                          "answered but the SmartCast API did not"}
-    except Exception as e:
-        msg = str(e)
-        if "handshake" in msg.lower() or "timed out" in msg.lower():
-            return {"_standby": True, "_error": msg}
-        return {"_error": msg}
+    except (TimeoutError, OSError, ssl.SSLError) as e:
+        return _classify_failure(ip, port, e)
+
+
+def _tcp_ok(ip: str, port: int) -> bool:
+    import socket
+    try:
+        socket.create_connection((ip, port), timeout=_PROBE_TIMEOUT).close()
+        return True
+    except Exception:
+        return False
+
+
+def _tls_ok(ip: str, port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection((ip, port),
+                                      timeout=_TLS_PROBE_TIMEOUT) as sk:
+            with _ctx().wrap_socket(sk, server_hostname=ip):
+                return True
+    except Exception:
+        return False
+
+
+def diagnose(ip: str, port: int) -> str:
+    """Which layer is answering: "awake", "standby", or "unreachable".
+
+    Determined, not guessed. A TV in standby completes the TCP handshake and
+    then never speaks TLS, because the network card is up while the SmartCast
+    service is not. Nothing at the address fails at TCP instead. Those need
+    different advice, and a timeout on its own cannot tell them apart.
+    """
+    if _tls_ok(ip, port):
+        return "awake"
+    if _tcp_ok(ip, port):
+        return "standby"
+    return "unreachable"
+
+
+def _classify_failure(ip: str, port: int, exc: Exception) -> Dict[str, Any]:
+    state = diagnose(ip, port)
+    if state == "standby":
+        return {"_standby": True, "_ip": ip,
+                "_error": "the TV answers at the network level but its "
+                          "SmartCast API never completed a TLS handshake"}
+    if state == "unreachable":
+        return {"_unreachable": True, "_ip": ip, "_error": str(exc)}
+    # TLS works right now, so the TV is on and the failure was transient.
+    return {"_transient": True, "_ip": ip, "_error": str(exc)}
 
 
 def _resolve() -> Dict[str, Any]:
@@ -113,15 +160,56 @@ def _tv_mac() -> str:
     ip = str(_load_creds().get("ip") or "").strip()
     if not ip:
         return ""
+    mac = _arp_mac(ip)
+    if mac:
+        # Persist it. The ARP entry expires, and once the TV has been off long
+        # enough for that to happen there is no way left to learn the address —
+        # which is precisely when a wake is needed.
+        _remember_mac(mac)
+    return mac
+
+
+def _arp_mac(ip: str) -> str:
+    """Look up a MAC in the ARP cache, on any platform.
+
+    `arp -a <ip>` is Windows syntax. On macOS and the BSDs, -a and a host
+    argument are mutually exclusive, so that form silently yields nothing —
+    which is why the MAC came back missing there. Dumping the whole table and
+    matching the line for this IP avoids the syntax difference entirely.
+    """
     import re
     import subprocess
+    ip_re = re.escape(ip)
+    for args in (["arp", "-a"], ["arp", "-n", ip], ["ip", "neigh", "show", ip]):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=6)
+        except Exception:
+            continue
+        for line in (r.stdout or "").splitlines():
+            # The IP must be on the same line as the MAC, or a busy table hands
+            # back some other device's address.
+            if not re.search(rf"(?<![\d.]){ip_re}(?![\d.])", line):
+                continue
+            m = re.search(r"((?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})", line)
+            if m:
+                return m.group(1)
+    return ""
+
+
+def _remember_mac(mac: str) -> None:
+    """Merge the MAC into the creds file, leaving the token untouched."""
     try:
-        out = subprocess.run(["arp", "-a", ip], capture_output=True, text=True,
-                             timeout=6).stdout
-        m = re.search(r"((?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})", out)
-        return m.group(1) if m else ""
+        path = _token_path()
+        data = _load_creds()
+        if not data or str(data.get("mac") or "").strip().lower() == mac.lower():
+            return
+        data["mac"] = mac
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp, path)
     except Exception:
-        return ""
+        pass
 
 
 def wake() -> Dict[str, Any]:
@@ -197,6 +285,10 @@ def power(state: str) -> Dict[str, Any]:
                                            "ACTION": "KEYPRESS"}]})
 
     out = _press()
+    # Retry a transient failure in place. Waking a TV that is already on would
+    # be wrong, and reporting it as asleep is what made this confusing.
+    if out.get("_transient"):
+        out = _press()
     # Standby: the API is not up, so the keypress cannot land. Wake with a magic
     # packet, then retry — the service takes several seconds to start listening.
     if out.get("_standby") and want in ("on", "toggle"):
@@ -381,12 +473,25 @@ def launch_app(app: str, video_id: str = "") -> Dict[str, Any]:
 def _result(out: Dict[str, Any], what: str) -> Dict[str, Any]:
     if out.get("_standby"):
         return {"error": (
-            f"{what} failed: the TV answered at the network level but its "
-            f"SmartCast API did not complete a TLS handshake. Almost always this "
-            f"means the TV is in standby — the always-on network card replies "
-            f"while the API is not running. Use action=power state=on (it sends "
-            f"Wake-on-LAN first) and give it a few seconds."),
-            "exit_code": 1}
+            f"{what} failed: the TV at {out.get('_ip', 'its address')} is in "
+            f"standby — verified, not assumed: it completes a TCP connection but "
+            f"never a TLS handshake, so the network card is up while SmartCast is "
+            f"not running. Use action=power state=on (it sends Wake-on-LAN first) "
+            f"and give it a few seconds."), "exit_code": 1}
+    if out.get("_unreachable"):
+        where = out.get("_ip") or "the stored address"
+        return {"error": (
+            f"{what} failed: nothing is answering at {where} at all — not even a "
+            f"TCP connection, so this is NOT standby and a wake will not help. "
+            f"Either the stored address is stale (check \"ip\" in tv_token.json "
+            f"against the TV's current address) or the TV is off this network. "
+            f"Underlying error: {out.get('_error')}"), "exit_code": 1}
+    if out.get("_transient"):
+        return {"error": (
+            f"{what} failed, but the TV at {out.get('_ip', 'its address')} is "
+            f"powered on and its API is responding now — this was a transient "
+            f"network failure, NOT standby. Do not send a wake; just retry. "
+            f"Underlying error: {out.get('_error')}"), "exit_code": 1}
     if out.get("_error"):
         return {"error": f"{what} failed: {out['_error']}", "exit_code": 1}
     if out.get("_http_error"):

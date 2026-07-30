@@ -59,41 +59,86 @@ def sent(monkeypatch):
 # ── standby classification ────────────────────────────────────────────────
 
 
-def test_handshake_timeout_is_reported_as_standby(monkeypatch, creds):
-    """A stalled handshake must be distinguishable from a bad address."""
-    creds()
+@pytest.fixture
+def layers(monkeypatch):
+    """Drive the TCP/TLS probes that _classify_failure measures."""
 
-    def boom(*a, **k):
-        raise TimeoutError("timed out")
+    def _set(tcp, tls):
+        monkeypatch.setattr(T, "_tcp_ok", lambda *a: tcp)
+        monkeypatch.setattr(T, "_tls_ok", lambda *a: tls)
 
-    monkeypatch.setattr(T, "urlopen", boom, raising=False)
-    monkeypatch.setattr("urllib.request.urlopen", boom)
+    return _set
 
-    out = T._request(IP, 7345, "/state/device/deviceinfo")
+
+def test_timeout_with_tcp_but_no_tls_is_standby(layers):
+    """The standby signature: the card answers, the API never speaks TLS."""
+    layers(tcp=True, tls=False)
+    out = T._classify_failure(IP, 7345, TimeoutError("timed out"))
     assert out.get("_standby") is True
+    assert out.get("_ip") == IP
 
 
-def test_connection_refused_is_not_standby(monkeypatch, creds):
-    """A refused port means nothing is listening at all — not a sleeping TV."""
-    creds()
-
-    def boom(*a, **k):
-        raise ConnectionRefusedError("refused")
-
-    monkeypatch.setattr("urllib.request.urlopen", boom)
-    out = T._request(IP, 9000, "/state/device/deviceinfo")
+def test_timeout_with_nothing_listening_is_unreachable(layers):
+    """No TCP either — a stale IP, not a sleeping TV. A wake cannot help."""
+    layers(tcp=False, tls=False)
+    out = T._classify_failure(IP, 7345, TimeoutError("timed out"))
+    assert out.get("_unreachable") is True
     assert not out.get("_standby")
-    assert out.get("_error")
+
+
+def test_timeout_on_a_responsive_tv_is_transient_not_standby(layers):
+    """The reported bug: a powered-on TV must never be called asleep.
+
+    A timeout used to be classified as standby purely from the exception type,
+    so any transient blip on a TV that was plainly switched on produced "the TV
+    is in standby" — and then a pointless wake.
+    """
+    layers(tcp=True, tls=True)
+    out = T._classify_failure(IP, 7345, TimeoutError("timed out"))
+    assert out.get("_transient") is True
+    assert not out.get("_standby")
+
+
+def test_diagnose_maps_each_layer_combination(layers):
+    layers(tcp=True, tls=True)
+    assert T.diagnose(IP, 7345) == "awake"
+    layers(tcp=True, tls=False)
+    assert T.diagnose(IP, 7345) == "standby"
+    layers(tcp=False, tls=False)
+    assert T.diagnose(IP, 7345) == "unreachable"
+
+
+def test_tcp_probe_outlasts_a_slow_standby_connect():
+    """A standby connect took 2.4s. If the probe gives up first, standby is
+    misread as unreachable and the wake that would fix it never fires."""
+    assert T._PROBE_TIMEOUT >= 5.0
 
 
 def test_standby_error_message_points_at_the_fix():
     """The message has to name the action that recovers, not just the symptom."""
-    res = T._result({"_standby": True, "_error": "timed out"}, "read info")
+    res = T._result({"_standby": True, "_ip": IP, "_error": "timed out"},
+                    "read info")
     assert res["exit_code"] == 1
     low = res["error"].lower()
     assert "standby" in low
     assert "wake-on-lan" in low
-    assert "power" in low
+
+
+def test_unreachable_message_says_a_wake_will_not_help():
+    res = T._result({"_unreachable": True, "_ip": IP, "_error": "timed out"},
+                    "read info")
+    low = res["error"].lower()
+    assert "not standby" in low
+    assert "tv_token.json" in low
+
+
+def test_transient_message_does_not_claim_standby():
+    """Whatever else it says, it must not tell the user the TV is asleep."""
+    res = T._result({"_transient": True, "_ip": IP, "_error": "timed out"},
+                    "read info")
+    low = res["error"].lower()
+    assert "powered on" in low
+    assert "not standby" in low
 
 
 # ── wake ──────────────────────────────────────────────────────────────────
@@ -154,6 +199,105 @@ def test_explicit_mac_beats_the_arp_lookup(monkeypatch, creds):
 
     monkeypatch.setattr("subprocess.run", fail)
     assert T._tv_mac() == MAC
+
+
+# ── ARP lookup ────────────────────────────────────────────────────────────
+#
+# `arp -a <ip>` is Windows syntax. On macOS and the BSDs, -a and a host
+# argument are mutually exclusive, so that invocation yielded nothing and the
+# tool reported the MAC as missing — on the machine that actually runs it.
+
+
+def _fake_arp(monkeypatch, stdout):
+    import subprocess
+
+    class R:
+        pass
+
+    def run(args, **k):
+        r = R()
+        # Only the bare table dump returns anything, mimicking a platform where
+        # the host-argument forms are rejected.
+        r.stdout = stdout if args[:2] == ["arp", "-a"] else ""
+        return r
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_parses_macos_arp_output(monkeypatch):
+    _fake_arp(monkeypatch,
+              "? (10.0.0.1) at 11:22:33:44:55:66 on en0 ifscope [ethernet]\n"
+              f"? ({IP}) at {MAC} on en0 ifscope [ethernet]\n")
+    assert T._arp_mac(IP) == MAC
+
+
+def test_parses_windows_arp_output(monkeypatch):
+    _fake_arp(monkeypatch,
+              "Interface: 10.0.0.2 --- 0x5\n"
+              "  Internet Address      Physical Address      Type\n"
+              "  10.0.0.1              11-22-33-44-55-66     dynamic\n"
+              f"  {IP}              {MAC.replace(':', '-')}     dynamic\n")
+    assert T._arp_mac(IP).lower() == MAC.replace(":", "-")
+
+
+def test_parses_ip_neigh_output(monkeypatch):
+    import subprocess
+
+    class R:
+        pass
+
+    def run(args, **k):
+        r = R()
+        r.stdout = (f"{IP} dev eth0 lladdr {MAC} REACHABLE\n"
+                    if args[0] == "ip" else "")
+        return r
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert T._arp_mac(IP) == MAC
+
+
+def test_arp_does_not_return_a_neighbours_mac(monkeypatch):
+    """The MAC must come off the line matching this IP, not any line."""
+    _fake_arp(monkeypatch,
+              f"? (10.0.0.1) at 11:22:33:44:55:66 on en0\n"
+              f"? (10.0.0.99) at 99:99:99:99:99:99 on en0\n")
+    assert T._arp_mac(IP) == ""
+
+
+def test_arp_ip_match_is_not_a_prefix_match(monkeypatch):
+    """10.0.0.5 must not match the 10.0.0.55 line."""
+    _fake_arp(monkeypatch, f"? (10.0.0.55) at 99:99:99:99:99:99 on en0\n")
+    assert T._arp_mac("10.0.0.5") == ""
+
+
+def test_arp_survives_a_missing_arp_binary(monkeypatch):
+    import subprocess
+
+    def boom(*a, **k):
+        raise FileNotFoundError("no arp here")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert T._arp_mac(IP) == ""
+
+
+# ── persistence ───────────────────────────────────────────────────────────
+
+
+def test_discovered_mac_is_written_back(monkeypatch, tmp_path):
+    """Once the ARP entry expires there is no way left to learn the address —
+    which is exactly when a wake is needed, so it has to be persisted."""
+    path = tmp_path / "tv_token.json"
+    path.write_text('{"ip": "%s", "token": "secret"}' % IP, encoding="utf-8")
+    monkeypatch.setattr(T, "_token_path", lambda: str(path))
+    monkeypatch.setattr(T, "_arp_mac", lambda ip: MAC)
+
+    assert T._tv_mac() == MAC
+
+    import json as _json
+    saved = _json.loads(path.read_text(encoding="utf-8"))
+    assert saved["mac"] == MAC
+    assert saved["token"] == "secret", "writing the MAC must not lose the token"
+    assert saved["ip"] == IP
 
 
 # ── power-on through standby ──────────────────────────────────────────────

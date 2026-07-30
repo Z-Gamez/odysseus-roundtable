@@ -52,6 +52,16 @@ _PROBE_TIMEOUT = 6.0
 _TLS_PROBE_TIMEOUT = 4.0
 _WAKE_SETTLE_SECONDS = 6.0
 _WAKE_ATTEMPTS = 4
+# A cold SmartCast boot is far slower than a wake from standby, and it is the
+# case that kept "failing no matter how long": the old confirm loop gave up
+# after ~24s and judged success on an AUTHENTICATED keypress, which cannot land
+# until the service is fully up. Power state is readable WITHOUT a token
+# (/state/device/power_mode returns 200 unauthenticated), so confirmation now
+# uses that and waits long enough for a real boot.
+# Bounded at a minute: long enough for a real cold boot, short enough that
+# a blocking tool call does not outlive the agent's own patience.
+_BOOT_WAIT_SECONDS = 60.0
+_BOOT_POLL_SECONDS = 3.0
 
 
 def _token_path() -> str:
@@ -116,7 +126,8 @@ def _nudge(ip: str, port: int, token: str) -> bool:
 
 def _request(ip: str, port: int, path: str, *, method: str = "GET",
              body: Optional[dict] = None, token: str = "",
-             allow_nudge: bool = True) -> Dict[str, Any]:
+             allow_nudge: bool = True,
+             retry_other_port: bool = True) -> Dict[str, Any]:
     """Request with backoff, a nudge, and a diagnosis that names the fault.
 
     Worst case is a little longer than the single long timeout it replaces, but
@@ -156,6 +167,16 @@ def _request(ip: str, port: int, path: str, *, method: str = "GET",
         if allow_nudge and not nudged and i == attempts - 2:
             nudged = True
             nudge_ok = _nudge(ip, port, token)
+
+    # Before reporting a fault, check whether the API simply moved ports. A
+    # stored port that stopped answering otherwise fails every command forever.
+    if retry_other_port:
+        other = _find_api_port(ip, skip=port)
+        if other:
+            _remember(port=other)
+            return _request(ip, other, path, method=method, body=body,
+                            token=token, allow_nudge=allow_nudge,
+                            retry_other_port=False)
 
     return _classify_failure(ip, port, last_exc, attempts=made,
                              nudged=nudged, nudge_ok=nudge_ok,
@@ -275,20 +296,71 @@ def _arp_mac(ip: str) -> str:
     return ""
 
 
-def _remember_mac(mac: str) -> None:
-    """Merge the MAC into the creds file, leaving the token untouched."""
+def _remember(**fields: Any) -> None:
+    """Merge fields into the creds file, leaving the token untouched."""
     try:
         path = _token_path()
         data = _load_creds()
-        if not data or str(data.get("mac") or "").strip().lower() == mac.lower():
+        if not data:
             return
-        data["mac"] = mac
+        if all(data.get(k) == v for k, v in fields.items()):
+            return
+        data.update(fields)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2)
         os.replace(tmp, path)
     except Exception:
         pass
+
+
+def _remember_mac(mac: str) -> None:
+    cur = str(_load_creds().get("mac") or "").strip()
+    if cur.lower() != mac.lower():
+        _remember(mac=mac)
+
+
+def _unauth_read(ip: str, port: int, path: str,
+                 timeout: float = 3.0) -> Optional[dict]:
+    """One tokenless GET. Returns the parsed body, or None if it did not answer.
+
+    Reads do not need pairing, which makes this the only check that works while
+    a token is missing, stale, or the service is too early in its boot to accept
+    a command.
+    """
+    kind, payload = _attempt(ip, port, path, "GET", None, "", timeout)
+    return payload if kind == "ok" else None
+
+
+def power_state(ip: str, port: int) -> Optional[int]:
+    """The TV's own view of its power: 1 = on, 0 = off, None = no answer.
+
+    Verified to return HTTP 200 with no AUTH header, so this reports the truth
+    regardless of pairing state. The off value has not been observed directly,
+    so only a positive reading is treated as meaningful.
+    """
+    body = _unauth_read(ip, port, "/state/device/power_mode")
+    if not body:
+        return None
+    try:
+        return int((body.get("ITEMS") or [{}])[0].get("VALUE"))
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def _find_api_port(ip: str, skip: int = 0) -> int:
+    """Which port is actually serving the API, 0 if none.
+
+    Only device_info ever probed both ports; every command pinned the stored
+    one. If the API comes up elsewhere after a reboot, those commands fail
+    forever rather than for a moment — "no matter how long".
+    """
+    for cand in _PORTS:
+        if cand == skip:
+            continue
+        if _unauth_read(ip, cand, "/state/device/power_mode", 2.5) is not None:
+            return cand
+    return 0
 
 
 def wake() -> Dict[str, Any]:
@@ -381,16 +453,25 @@ def power(state: str) -> Dict[str, Any]:
             return {"error": (f"The TV's API did not respond and nothing landed, "
                               f"so it may be asleep — but the wake could not be "
                               f"sent: {w['error']}"), "exit_code": 1}
-        for _ in range(_WAKE_ATTEMPTS):
-            _t.sleep(_WAKE_SETTLE_SECONDS)
-            out = _press()
-            if not out.get("_stalled") and not out.get("_error"):
-                return {"output": f"OK — woke the TV, then power {state}",
+        # Poll the tokenless power read. An authenticated keypress cannot land
+        # until the service is fully up, so using it to confirm a boot reports
+        # failure on a TV that is already coming on — for as long as you retry.
+        deadline = _t.monotonic() + _BOOT_WAIT_SECONDS
+        while _t.monotonic() < deadline:
+            _t.sleep(_BOOT_POLL_SECONDS)
+            if power_state(r["ip"], r["port"]) == 1:
+                # The TV is on and its API answers. Send the keypress so an
+                # explicit "on" is honoured, but the state is already correct.
+                _press()
+                waited = int(_BOOT_WAIT_SECONDS - (deadline - _t.monotonic()))
+                return {"output": (f"OK — the TV is on. Wake-on-LAN worked and "
+                                   f"SmartCast answered after about {waited}s."),
                         "exit_code": 0}
-        return {"output": "Wake-on-LAN sent. The TV's network card answered but "
-                          "SmartCast did not come up in time to confirm — it may "
-                          "still be turning on. Try again in a moment.",
-                "exit_code": 0}
+        return {"output": (
+            f"Wake-on-LAN was sent and the TV's network card answered, but its "
+            f"API did not respond within {int(_BOOT_WAIT_SECONDS)}s. If the "
+            f"screen is on, the SmartCast service is still starting or has "
+            f"stalled — run action=diagnose to see which."), "exit_code": 0}
     return _result(out, f"power {state}")
 
 
@@ -554,6 +635,64 @@ def launch_app(app: str, video_id: str = "") -> Dict[str, Any]:
     return {"output": f"OK — launched {app}{note}", "exit_code": 0}
 
 
+def diagnostics() -> Dict[str, Any]:
+    """Measure every layer and report it. No inference, no retries.
+
+    Exists because the failure modes here are indistinguishable from each other
+    in a single error string: reachable-but-stalled, booting, wrong port, stale
+    address and unpaired all surface as "it did not work".
+    """
+    import time as _t
+
+    c = _load_creds()
+    ip = str(c.get("ip") or "").strip()
+    if not ip:
+        return {"error": "No TV configured — tv_token.json has no \"ip\".",
+                "exit_code": 1}
+
+    report: Dict[str, Any] = {
+        "ip": ip,
+        "stored_port": c.get("port"),
+        "has_token": bool(c.get("token")),
+        "has_mac": bool(c.get("mac")),
+        "ports": {},
+    }
+    for cand in _PORTS:
+        s = _t.time()
+        tcp = _tcp_ok(ip, cand)
+        t_tcp = round(_t.time() - s, 2)
+        s = _t.time()
+        tls = _tls_ok(ip, cand) if tcp else False
+        t_tls = round(_t.time() - s, 2)
+        info = _unauth_read(ip, cand, "/state/device/deviceinfo", 4.0) if tls else None
+        v = ((info or {}).get("ITEMS") or [{}])[0].get("VALUE")
+        # VALUE is a dict for deviceinfo but a scalar on other endpoints, and a
+        # diagnostic that crashes is worse than useless.
+        v = v if isinstance(v, dict) else {}
+        report["ports"][cand] = {
+            "tcp": tcp, "tcp_seconds": t_tcp,
+            "tls": tls, "tls_seconds": t_tls,
+            "api_answers": info is not None,
+            "model": v.get("MODEL_NAME"),
+            "power_mode": power_state(ip, cand) if tls else None,
+        }
+
+    live = [p for p, d in report["ports"].items() if d["api_answers"]]
+    if not live:
+        any_tcp = any(d["tcp"] for d in report["ports"].values())
+        report["verdict"] = ("TCP answers but no API on any known port — the "
+                            "service is stalled, still booting, or the TV is "
+                            "asleep" if any_tcp else
+                            "nothing answers at this address at all")
+    else:
+        report["verdict"] = f"API is up on port {live[0]}"
+        if report["stored_port"] not in live:
+            report["verdict"] += (f" but tv_token.json stores "
+                                  f"{report['stored_port']} — commands pinned to "
+                                  f"the stored port would all fail")
+    return {"output": json.dumps(report, indent=2), "exit_code": 0}
+
+
 def _result(out: Dict[str, Any], what: str) -> Dict[str, Any]:
     if out.get("_stalled"):
         n = out.get("_attempts", 1)
@@ -565,7 +704,8 @@ def _result(out: Dict[str, Any], what: str) -> Dict[str, Any]:
             why = ("It accepted a TCP connection but answered nothing, so either "
                    "the service is stalled or the TV is asleep. This is a known "
                    "intermittent SmartCast fault and usually clears within a "
-                   "minute; retry before assuming anything about power state.")
+                   "minute; retry before assuming anything about power state. "
+                   "action=diagnose reports which it is.")
         return {"error": (
             f"{what} failed: the TV at {out.get('_ip', 'its address')} is not "
             f"responding after {n} attempts. {why}"), "exit_code": 1}
@@ -617,6 +757,8 @@ class TvControlTool:
                 return set_input(str(args.get("name") or ""))
             if action == "wake":
                 return wake()
+            if action in ("diagnose", "diagnostics"):
+                return diagnostics()
             if action in ("current_app", "current"):
                 return current_app()
             if action in ("launch", "app"):

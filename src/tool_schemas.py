@@ -531,8 +531,8 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "action": {"type": "string",
-                               "enum": ["info", "power", "volume", "input", "launch", "current_app", "wake"],
-                               "description": "info = model/inputs/state; power = on/off/toggle (on wakes the TV from standby first); volume = up/down/mute; input = switch HDMI etc; launch = open a streaming app; current_app = read back what is actually running; wake = Wake-on-LAN only, without pressing power"},
+                               "enum": ["info", "power", "volume", "input", "launch", "current_app", "wake", "diagnose"],
+                               "description": "info = model/inputs/state; power = on/off/toggle (on wakes the TV from standby first); volume = up/down/mute; input = switch HDMI etc; launch = open a streaming app; current_app = read back what is actually running; wake = Wake-on-LAN only, without pressing power; diagnose = report every layer (ports, TCP/TLS, power state) when something fails and you need to know why"},
                     "state": {"type": "string", "enum": ["on", "off", "toggle"],
                               "description": "For power"},
                     "direction": {"type": "string", "enum": ["up", "down", "mute"],

@@ -182,6 +182,7 @@ def test_a_stall_that_clears_succeeds_instead_of_failing(monkeypatch, no_sleep):
     monkeypatch.setattr(T, "_attempt", attempt)
     # TCP is up during a stall — that is the whole point of the signature.
     monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    monkeypatch.setattr(T, "_find_api_port", lambda *a, **k: 0)
     out = T._request(IP, 7345, "/app/launch", method="PUT", body={})
     assert out == {"STATUS": {"RESULT": "SUCCESS"}}
     assert len(calls) == 2
@@ -196,6 +197,7 @@ def test_retries_are_bounded(monkeypatch, no_sleep):
 
     monkeypatch.setattr(T, "_attempt", attempt)
     monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    monkeypatch.setattr(T, "_find_api_port", lambda *a, **k: 0)
     out = T._request(IP, 7345, "/app/current")
     expected = 1 + len(T._RETRY_DELAYS)
     # The nudge rides on the same hook, so allow for one extra call.
@@ -216,6 +218,7 @@ def test_a_dead_address_is_not_retried(monkeypatch, no_sleep):
 
     monkeypatch.setattr(T, "_attempt", attempt)
     monkeypatch.setattr(T, "_tcp_ok", lambda *a: False)
+    monkeypatch.setattr(T, "_find_api_port", lambda *a, **k: 0)
     out = T._request(IP, 7345, "/app/current")
     assert len(calls) == 1, "a dead address must not be retried"
     assert out.get("_unreachable") is True
@@ -245,6 +248,7 @@ def test_a_nudge_is_sent_before_the_last_attempt(monkeypatch, no_sleep):
 
     monkeypatch.setattr(T, "_attempt", attempt)
     monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    monkeypatch.setattr(T, "_find_api_port", lambda *a, **k: 0)
     T._request(IP, 7345, "/app/current")
     nudges = [b for p, b in seen if p == "/key_command/"]
     assert nudges, "no nudge was attempted"
@@ -260,6 +264,7 @@ def test_nudge_can_be_suppressed(monkeypatch, no_sleep):
 
     monkeypatch.setattr(T, "_attempt", attempt)
     monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    monkeypatch.setattr(T, "_find_api_port", lambda *a, **k: 0)
     T._request(IP, 7345, "/app/current", allow_nudge=False)
     assert "/key_command/" not in seen
 
@@ -443,8 +448,9 @@ def test_power_on_only_wakes_when_nothing_landed(monkeypatch, creds, no_sleep):
     monkeypatch.setattr(T, "wake",
                         lambda: woke.append(1) or {"output": "sent",
                                                    "exit_code": 0})
-    monkeypatch.setattr(T, "_WAKE_SETTLE_SECONDS", 0)
-    monkeypatch.setattr(T, "_WAKE_ATTEMPTS", 1)
+    monkeypatch.setattr(T, "power_state", lambda *a: None)
+    monkeypatch.setattr(T, "_BOOT_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(T, "_BOOT_POLL_SECONDS", 0)
     T.power("on")
     assert woke, "a wake is still the right last resort when nothing lands"
 
@@ -461,6 +467,7 @@ def test_power_off_is_never_nudged(monkeypatch, no_sleep, creds):
 
     monkeypatch.setattr(T, "_attempt", attempt)
     monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    monkeypatch.setattr(T, "_find_api_port", lambda *a, **k: 0)
     monkeypatch.setattr(T, "wake", lambda: pytest.fail("must not wake on off"))
     T.power("off")
     assert T._NUDGE_BODY not in seen
@@ -487,11 +494,13 @@ def test_power_on_reports_honestly_when_wake_is_unconfirmed(monkeypatch, creds,
         "_stalled": True, "_ip": IP, "_service_alive": False, "_attempts": 3,
         "_error": "timed out"})
     monkeypatch.setattr(T, "wake", lambda: {"output": "sent", "exit_code": 0})
-    monkeypatch.setattr(T, "_WAKE_SETTLE_SECONDS", 0)
-    monkeypatch.setattr(T, "_WAKE_ATTEMPTS", 2)
+    monkeypatch.setattr(T, "power_state", lambda *a: None)
+    monkeypatch.setattr(T, "_BOOT_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(T, "_BOOT_POLL_SECONDS", 0)
     res = T.power("on")
     low = res["output"].lower()
-    assert "did not come up" in low or "still be turning on" in low
+    assert "did not respond" in low
+    assert "stalled" in low or "starting" in low
 
 
 def test_power_on_surfaces_a_wake_failure(monkeypatch, creds, no_sleep):
@@ -504,6 +513,177 @@ def test_power_on_surfaces_a_wake_failure(monkeypatch, creds, no_sleep):
     res = T.power("on")
     assert res["exit_code"] == 1
     assert "mac unknown" in res["error"]
+
+
+# ── coming back from a cold boot ──────────────────────────────────────────
+#
+# The case that "failed no matter how long". A cold SmartCast boot takes far
+# longer than a wake from standby, and the old confirm loop judged success on an
+# AUTHENTICATED keypress — which cannot land until the service is fully up. So
+# it reported failure on a TV that was already coming on, indefinitely.
+
+
+def test_power_state_reads_without_a_token(monkeypatch):
+    """Verified to answer HTTP 200 with no AUTH header, which is what makes it
+    usable while a token is missing, stale, or the service is still booting."""
+    seen = {}
+
+    def attempt(ip, port, path, method, body, token, timeout):
+        seen["token"] = token
+        seen["path"] = path
+        return "ok", {"ITEMS": [{"VALUE": 1}]}
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    assert T.power_state(IP, 7345) == 1
+    assert seen["token"] == "", "the power read must not depend on pairing"
+    assert seen["path"] == "/state/device/power_mode"
+
+
+def test_power_state_is_none_when_nothing_answers(monkeypatch):
+    monkeypatch.setattr(T, "_attempt",
+                        lambda *a, **k: ("fail", TimeoutError()))
+    assert T.power_state(IP, 7345) is None
+
+
+def test_boot_is_confirmed_by_the_power_read_not_a_keypress(monkeypatch, creds,
+                                                            no_sleep):
+    """The keypress may keep failing while the service starts; the tokenless
+    read is what tells us the TV is actually on."""
+    creds(mac=MAC)
+    monkeypatch.setattr(T, "_request", lambda *a, **k: {
+        "_stalled": True, "_ip": IP, "_service_alive": False, "_attempts": 3,
+        "_error": "timed out"})
+    monkeypatch.setattr(T, "wake", lambda: {"output": "sent", "exit_code": 0})
+
+    states = [None, None, 1]
+    monkeypatch.setattr(T, "power_state", lambda *a: states.pop(0))
+    monkeypatch.setattr(T, "_BOOT_POLL_SECONDS", 0)
+
+    res = T.power("on")
+    assert res["exit_code"] == 0
+    assert "the tv is on" in res["output"].lower()
+
+
+def test_boot_wait_is_long_enough_for_a_cold_start():
+    """~24s was the old budget and it expired mid-boot."""
+    assert T._BOOT_WAIT_SECONDS >= 60
+
+
+def test_boot_timeout_points_at_the_diagnose_action(monkeypatch, creds,
+                                                    no_sleep):
+    creds(mac=MAC)
+    monkeypatch.setattr(T, "_request", lambda *a, **k: {
+        "_stalled": True, "_ip": IP, "_service_alive": False, "_attempts": 3,
+        "_error": "timed out"})
+    monkeypatch.setattr(T, "wake", lambda: {"output": "sent", "exit_code": 0})
+    monkeypatch.setattr(T, "power_state", lambda *a: None)
+    monkeypatch.setattr(T, "_BOOT_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(T, "_BOOT_POLL_SECONDS", 0)
+    res = T.power("on")
+    assert "diagnose" in res["output"].lower()
+
+
+# ── the API moving ports ──────────────────────────────────────────────────
+
+
+def test_find_api_port_skips_the_named_port(monkeypatch):
+    tried = []
+
+    def read(ip, port, path, timeout=3.0):
+        tried.append(port)
+        return {"ITEMS": [{"VALUE": 1}]} if port == 9000 else None
+
+    monkeypatch.setattr(T, "_unauth_read", read)
+    assert T._find_api_port(IP, skip=7345) == 9000
+    assert 7345 not in tried
+
+
+def test_a_moved_port_is_retried_and_remembered(monkeypatch, no_sleep):
+    """Only device_info ever probed both ports; commands pinned the stored one,
+    so an API that came up elsewhere failed every command indefinitely."""
+    saved = {}
+    monkeypatch.setattr(T, "_remember", lambda **kw: saved.update(kw))
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    monkeypatch.setattr(T, "_find_api_port", lambda ip, skip=0: 9000)
+
+    def attempt(ip, port, path, method, body, token, timeout):
+        if port == 9000:
+            return "ok", {"STATUS": {"RESULT": "SUCCESS"}}
+        return "fail", TimeoutError("timed out")
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    out = T._request(IP, 7345, "/app/current")
+    assert out == {"STATUS": {"RESULT": "SUCCESS"}}
+    assert saved.get("port") == 9000, "the working port must be persisted"
+
+
+def test_port_self_heal_does_not_recurse(monkeypatch, no_sleep):
+    """If neither port works, the retry must not loop forever."""
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    monkeypatch.setattr(T, "_remember", lambda **kw: None)
+    monkeypatch.setattr(T, "_find_api_port", lambda ip, skip=0: 9000)
+    monkeypatch.setattr(T, "_attempt",
+                        lambda *a, **k: ("fail", TimeoutError("timed out")))
+    out = T._request(IP, 7345, "/app/current")
+    assert out.get("_stalled") is True
+
+
+def test_remember_preserves_the_token(monkeypatch, tmp_path):
+    path = tmp_path / "tv_token.json"
+    path.write_text('{"ip": "%s", "token": "secret", "port": 7345}' % IP,
+                    encoding="utf-8")
+    monkeypatch.setattr(T, "_token_path", lambda: str(path))
+    T._remember(port=9000)
+
+    import json as _json
+    saved = _json.loads(path.read_text(encoding="utf-8"))
+    assert saved["port"] == 9000
+    assert saved["token"] == "secret"
+
+
+# ── diagnose ──────────────────────────────────────────────────────────────
+
+
+def test_diagnose_flags_a_stored_port_that_is_wrong(monkeypatch, creds):
+    creds(port=7345)
+    monkeypatch.setattr(T, "_tcp_ok", lambda ip, port: True)
+    monkeypatch.setattr(T, "_tls_ok", lambda ip, port: port == 9000)
+    monkeypatch.setattr(T, "_unauth_read",
+                        lambda ip, port, path, timeout=3.0:
+                        {"ITEMS": [{"VALUE": {"MODEL_NAME": "V-TEST"}}]}
+                        if port == 9000 else None)
+    monkeypatch.setattr(T, "power_state", lambda ip, port: 1)
+
+    import json as _json
+    rep = _json.loads(T.diagnostics()["output"])
+    assert "9000" in rep["verdict"]
+    assert "stored" in rep["verdict"].lower()
+
+
+def test_diagnose_distinguishes_dead_from_stalled(monkeypatch, creds):
+    creds()
+    monkeypatch.setattr(T, "_tls_ok", lambda *a: False)
+    monkeypatch.setattr(T, "_unauth_read", lambda *a, **k: None)
+
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    import json as _json
+    stalled = _json.loads(T.diagnostics()["output"])["verdict"]
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: False)
+    dead = _json.loads(T.diagnostics()["output"])["verdict"]
+
+    assert "stalled" in stalled or "booting" in stalled
+    assert "nothing answers" in dead
+
+
+def test_diagnose_never_leaks_the_token(monkeypatch, creds):
+    """It reports whether a token exists, never its value."""
+    creds(token="super-secret-token")
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: False)
+    monkeypatch.setattr(T, "_tls_ok", lambda *a: False)
+    monkeypatch.setattr(T, "_unauth_read", lambda *a, **k: None)
+    out = T.diagnostics()["output"]
+    assert "super-secret-token" not in out
+    assert '"has_token": true' in out
 
 
 # ── launch readback ───────────────────────────────────────────────────────
@@ -570,7 +750,7 @@ def _tv_schema():
 # them — including the one action documented as the way to correct a wrong app
 # id. An explicit list here means adding an action without advertising it fails.
 EXPECTED_ACTIONS = {"info", "power", "volume", "input", "launch",
-                    "current_app", "wake"}
+                    "current_app", "wake", "diagnose"}
 EXPECTED_APPS = {"youtube", "netflix", "prime", "hulu", "disney", "max", "hbo"}
 
 

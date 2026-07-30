@@ -22,25 +22,32 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional
 
 _PORTS = (7345, 9000)
-# Measured on a V4K65C, because the difference is the whole diagnosis:
+# Measured on a V4K65C, because the timings are the whole diagnosis:
 #   awake   — TCP 0.22s, TLS 0.51s, request 0.1-1.1s
 #   standby — TCP 2.4s (the always-on card answers), TLS never completes
-# So a timeout alone says nothing about which state the TV is in. It is also
-# what a wrong IP or a dropped Wi-Fi link looks like. Guessing "standby" from
-# the exception type reported a powered-on TV as asleep; _diagnose() measures
-# the two layers instead of inferring.
-_TIMEOUT = 8.0
-# The TCP probe decides standby-vs-unreachable, and a standby connect is slow
-# (2.4s measured) because the card is only half awake. Too tight a budget here
-# reads "asleep" as "gone" and skips the wake that would have fixed it, so this
-# is deliberately well clear of that figure. TLS gets less: awake it completes
-# in 0.5s, and in standby it never completes at all, so waiting longer only
-# delays the answer.
+#
+# A SmartCast TV also stalls its HTTP service intermittently while still completing
+# TCP handshakes. Observed on a powered-on set: ping up but jittery (6-913ms),
+# TCP connect to :7345 fine, yet every HTTPS request hung past 30s — while a
+# small PUT /key_command/ went through in 0.173s in the same window. Minutes
+# later, 10/10 reads returned 200 in ~0.11s.
+#
+# Two consequences shape everything below:
+#   * A timeout is not a verdict. It is a stall that usually clears, so the
+#     tool retries instead of failing, and one attempt gets a short budget
+#     rather than one long stretch of dead air.
+#   * TCP-up/TLS-down does NOT mean standby. A stalled service looks identical
+#     from the outside, which is why claiming standby kept waking a TV that was
+#     already on. Only a failed nudge is evidence the service is really gone.
+_TIMEOUT = 4.0
+_RETRY_DELAYS = (1.0, 2.0)   # three attempts in total
+_NUDGE_TIMEOUT = 2.5
 _PROBE_TIMEOUT = 6.0
 _TLS_PROBE_TIMEOUT = 4.0
 _WAKE_SETTLE_SECONDS = 6.0
@@ -71,8 +78,12 @@ def _ctx() -> ssl.SSLContext:
     return c
 
 
-def _request(ip: str, port: int, path: str, *, method: str = "GET",
-             body: Optional[dict] = None, token: str = "") -> Dict[str, Any]:
+_NUDGE_BODY = {"KEYLIST": [{"CODESET": 11, "CODE": 1, "ACTION": "KEYPRESS"}]}
+
+
+def _attempt(ip: str, port: int, path: str, method: str,
+             body: Optional[dict], token: str, timeout: float):
+    """One request. Returns ("ok"|"http"|"fail", payload)."""
     url = f"https://{ip}:{port}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
@@ -80,13 +91,75 @@ def _request(ip: str, port: int, path: str, *, method: str = "GET",
     if token:
         req.add_header("AUTH", token)
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT, context=_ctx()) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as r:
             raw = r.read().decode("utf-8", "replace")
-        return json.loads(raw) if raw.strip() else {}
+        return "ok", (json.loads(raw) if raw.strip() else {})
     except urllib.error.HTTPError as e:
-        return {"_http_error": e.code, "_detail": e.read().decode("utf-8", "replace")[:300]}
+        return "http", {"_http_error": e.code,
+                        "_detail": e.read().decode("utf-8", "replace")[:300]}
     except (TimeoutError, OSError, ssl.SSLError) as e:
-        return _classify_failure(ip, port, e)
+        return "fail", e
+
+
+def _nudge(ip: str, port: int, token: str) -> bool:
+    """Poke the TV with a harmless key command to shake a stalled service.
+
+    A power-on keypress is idempotent on a TV that is already on, and it is the
+    one call observed to succeed (0.173s) while every other request was hanging.
+    It doubles as the only real evidence that the service is alive at all: if
+    this lands, the TV is not asleep, whatever the reads are doing.
+    """
+    kind, _ = _attempt(ip, port, "/key_command/", "PUT", _NUDGE_BODY, token,
+                       _NUDGE_TIMEOUT)
+    return kind == "ok"
+
+
+def _request(ip: str, port: int, path: str, *, method: str = "GET",
+             body: Optional[dict] = None, token: str = "",
+             allow_nudge: bool = True) -> Dict[str, Any]:
+    """Request with backoff, a nudge, and a diagnosis that names the fault.
+
+    Worst case is a little longer than the single long timeout it replaces, but
+    a stall that clears in a second now succeeds instead of failing the tool,
+    and the common path is unchanged at ~0.1-1.1s.
+    """
+    attempts = 1 + len(_RETRY_DELAYS)
+    last_exc: Optional[Exception] = None
+    nudged = False
+    nudge_ok = False
+    tcp_alive: Optional[bool] = None
+
+    made = 0
+    for i in range(attempts):
+        made += 1
+        kind, payload = _attempt(ip, port, path, method, body, token, _TIMEOUT)
+        if kind == "ok":
+            return payload
+        if kind == "http":
+            # A real HTTP answer is not a stall — retrying will not change it.
+            return payload
+        last_exc = payload
+
+        # Probe once, after the first failure. Retrying an address with no TCP
+        # at all only burns the full budget to reach the same answer, and that
+        # made the dead-address case slower than the single timeout it replaced.
+        if tcp_alive is None:
+            tcp_alive = _tcp_ok(ip, port)
+            if not tcp_alive:
+                break
+
+        if i == attempts - 1:
+            break
+        time.sleep(_RETRY_DELAYS[i])
+        # Before the final attempt, try to shake the service loose. Skipped when
+        # the caller cannot tolerate a stray power-on keypress.
+        if allow_nudge and not nudged and i == attempts - 2:
+            nudged = True
+            nudge_ok = _nudge(ip, port, token)
+
+    return _classify_failure(ip, port, last_exc, attempts=made,
+                             nudged=nudged, nudge_ok=nudge_ok,
+                             tcp_alive=tcp_alive)
 
 
 def _tcp_ok(ip: str, port: int) -> bool:
@@ -110,30 +183,36 @@ def _tls_ok(ip: str, port: int) -> bool:
 
 
 def diagnose(ip: str, port: int) -> str:
-    """Which layer is answering: "awake", "standby", or "unreachable".
+    """Which layer answers: "awake", "not_responding", or "unreachable".
 
-    Determined, not guessed. A TV in standby completes the TCP handshake and
-    then never speaks TLS, because the network card is up while the SmartCast
-    service is not. Nothing at the address fails at TCP instead. Those need
-    different advice, and a timeout on its own cannot tell them apart.
+    Deliberately NOT "standby" for the middle case. A TV asleep and a TV whose
+    SmartCast service has stalled both complete TCP and both refuse TLS; the
+    handshake cannot tell them apart, and treating that as standby is what kept
+    sending a wake to a TV that was already on. Only the key-command nudge
+    distinguishes them, so that call is the one that decides.
     """
     if _tls_ok(ip, port):
         return "awake"
     if _tcp_ok(ip, port):
-        return "standby"
+        return "not_responding"
     return "unreachable"
 
 
-def _classify_failure(ip: str, port: int, exc: Exception) -> Dict[str, Any]:
-    state = diagnose(ip, port)
-    if state == "standby":
-        return {"_standby": True, "_ip": ip,
-                "_error": "the TV answers at the network level but its "
-                          "SmartCast API never completed a TLS handshake"}
-    if state == "unreachable":
-        return {"_unreachable": True, "_ip": ip, "_error": str(exc)}
-    # TLS works right now, so the TV is on and the failure was transient.
-    return {"_transient": True, "_ip": ip, "_error": str(exc)}
+def _classify_failure(ip: str, port: int, exc: Optional[Exception], *,
+                      attempts: int = 1, nudged: bool = False,
+                      nudge_ok: bool = False,
+                      tcp_alive: Optional[bool] = None) -> Dict[str, Any]:
+    # Reuse the caller's probe result when it already has one; re-measuring adds
+    # a whole probe timeout to a path that has spent long enough already.
+    if tcp_alive is None:
+        tcp_alive = _tcp_ok(ip, port)
+    if not tcp_alive:
+        return {"_unreachable": True, "_ip": ip, "_error": str(exc),
+                "_attempts": attempts}
+    return {"_stalled": True, "_ip": ip, "_error": str(exc),
+            "_attempts": attempts, "_nudged": nudged, "_nudge_ok": nudge_ok,
+            # A landed nudge proves the service is up, so "asleep" is ruled out.
+            "_service_alive": nudge_ok}
 
 
 def _resolve() -> Dict[str, Any]:
@@ -279,28 +358,33 @@ def power(state: str) -> Dict[str, Any]:
     key = {"on": 1, "off": 0, "toggle": 2}.get(want, 2)
 
     def _press():
+        # Never nudge while trying to turn the TV OFF: the nudge is a power-on
+        # keypress and would switch it back on.
         return _request(r["ip"], r["port"], "/key_command/", method="PUT",
-                        token=r["token"],
+                        token=r["token"], allow_nudge=(want != "off"),
                         body={"KEYLIST": [{"CODESET": 11, "CODE": key,
                                            "ACTION": "KEYPRESS"}]})
 
     out = _press()
-    # Retry a transient failure in place. Waking a TV that is already on would
-    # be wrong, and reporting it as asleep is what made this confusing.
-    if out.get("_transient"):
-        out = _press()
-    # Standby: the API is not up, so the keypress cannot land. Wake with a magic
-    # packet, then retry — the service takes several seconds to start listening.
-    if out.get("_standby") and want in ("on", "toggle"):
+    # A landed nudge is itself a power-on keypress, so for "on" the work is
+    # already done — reporting failure here would be wrong.
+    if out.get("_stalled") and out.get("_nudge_ok") and want in ("on", "toggle"):
+        return {"output": ("OK — power on. The TV's API was stalled, but the key "
+                           "command landed on retry."), "exit_code": 0}
+    # Nothing landed at all. Now, and only now, is it worth assuming the TV may
+    # actually be asleep and sending a magic packet.
+    if out.get("_stalled") and not out.get("_service_alive") \
+            and want in ("on", "toggle"):
         import time as _t
         w = wake()
         if w.get("exit_code"):
-            return {"error": f"TV is in standby and waking failed: {w['error']}",
-                    "exit_code": 1}
+            return {"error": (f"The TV's API did not respond and nothing landed, "
+                              f"so it may be asleep — but the wake could not be "
+                              f"sent: {w['error']}"), "exit_code": 1}
         for _ in range(_WAKE_ATTEMPTS):
             _t.sleep(_WAKE_SETTLE_SECONDS)
             out = _press()
-            if not out.get("_standby") and not out.get("_error"):
+            if not out.get("_stalled") and not out.get("_error"):
                 return {"output": f"OK — woke the TV, then power {state}",
                         "exit_code": 0}
         return {"output": "Wake-on-LAN sent. The TV's network card answered but "
@@ -471,13 +555,20 @@ def launch_app(app: str, video_id: str = "") -> Dict[str, Any]:
 
 
 def _result(out: Dict[str, Any], what: str) -> Dict[str, Any]:
-    if out.get("_standby"):
+    if out.get("_stalled"):
+        n = out.get("_attempts", 1)
+        if out.get("_service_alive"):
+            why = ("Its service IS alive — a key command landed while the reads "
+                   "were hanging — so the TV is on and this is a stall, not "
+                   "standby. Do NOT send a wake. Retry shortly.")
+        else:
+            why = ("It accepted a TCP connection but answered nothing, so either "
+                   "the service is stalled or the TV is asleep. This is a known "
+                   "intermittent SmartCast fault and usually clears within a "
+                   "minute; retry before assuming anything about power state.")
         return {"error": (
-            f"{what} failed: the TV at {out.get('_ip', 'its address')} is in "
-            f"standby — verified, not assumed: it completes a TCP connection but "
-            f"never a TLS handshake, so the network card is up while SmartCast is "
-            f"not running. Use action=power state=on (it sends Wake-on-LAN first) "
-            f"and give it a few seconds."), "exit_code": 1}
+            f"{what} failed: the TV at {out.get('_ip', 'its address')} is not "
+            f"responding after {n} attempts. {why}"), "exit_code": 1}
     if out.get("_unreachable"):
         where = out.get("_ip") or "the stored address"
         return {"error": (
@@ -486,12 +577,7 @@ def _result(out: Dict[str, Any], what: str) -> Dict[str, Any]:
             f"Either the stored address is stale (check \"ip\" in tv_token.json "
             f"against the TV's current address) or the TV is off this network. "
             f"Underlying error: {out.get('_error')}"), "exit_code": 1}
-    if out.get("_transient"):
-        return {"error": (
-            f"{what} failed, but the TV at {out.get('_ip', 'its address')} is "
-            f"powered on and its API is responding now — this was a transient "
-            f"network failure, NOT standby. Do not send a wake; just retry. "
-            f"Underlying error: {out.get('_error')}"), "exit_code": 1}
+
     if out.get("_error"):
         return {"error": f"{what} failed: {out['_error']}", "exit_code": 1}
     if out.get("_http_error"):

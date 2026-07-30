@@ -1,14 +1,20 @@
-"""Standby detection and Wake-on-LAN for the TV control tool.
+"""Resilience of the TV control tool against a stalling SmartCast service.
 
-A TV in standby keeps its network card alive but stops running the SmartCast
-API, so a TCP connection succeeds and the TLS handshake then hangs. Reported
-raw, that surfaces as "SSL handshake timeout", which reads like a broken
-address rather than a sleeping TV. These tests pin the two behaviours that fix
-it: the stall is classified as standby, and power-on sends a magic packet
-before giving up.
+A SmartCast TV intermittently stops answering HTTP while still completing TCP
+handshakes. Observed on a powered-on set: ping up but jittery (6-913ms), TCP
+connect to :7345 fine, every HTTPS request hung past 30s — and yet a small
+PUT /key_command/ went through in 0.173s in that same window. Minutes later,
+10/10 reads returned 200 in ~0.11s.
 
-Addresses here are deliberately generic — the real TV's IP and MAC stay out of
-the repo.
+Two things follow, and both are pinned here:
+
+  * A timeout is not a verdict. It is a stall that usually clears, so the tool
+    retries rather than failing outright.
+  * TCP-up/TLS-down does NOT mean standby. A stalled service is externally
+    identical to a sleeping one, so calling it standby sent a wake to a TV that
+    was already on. Only a landed key command is evidence either way.
+
+Addresses here are generic — the real TV's IP and MAC stay out of the repo.
 """
 
 import socket
@@ -56,12 +62,9 @@ def sent(monkeypatch):
     return packets
 
 
-# ── standby classification ────────────────────────────────────────────────
-
-
 @pytest.fixture
 def layers(monkeypatch):
-    """Drive the TCP/TLS probes that _classify_failure measures."""
+    """Drive the TCP/TLS probes that the classifier measures."""
 
     def _set(tcp, tls):
         monkeypatch.setattr(T, "_tcp_ok", lambda *a: tcp)
@@ -70,58 +73,89 @@ def layers(monkeypatch):
     return _set
 
 
-def test_timeout_with_tcp_but_no_tls_is_standby(layers):
-    """The standby signature: the card answers, the API never speaks TLS."""
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+
+# ── classifying a failure ─────────────────────────────────────────────────
+
+
+def test_tcp_up_but_no_answer_is_stalled_not_standby(layers):
+    """The reported bug. A stalled service and a sleeping TV are identical at
+    the TLS layer, so this must NOT be called standby — doing so is what kept
+    sending a wake to a TV that was plainly switched on."""
     layers(tcp=True, tls=False)
-    out = T._classify_failure(IP, 7345, TimeoutError("timed out"))
-    assert out.get("_standby") is True
+    out = T._classify_failure(IP, 7345, TimeoutError("timed out"), attempts=3)
+    assert out.get("_stalled") is True
+    assert not out.get("_standby")
+    assert out.get("_attempts") == 3
     assert out.get("_ip") == IP
 
 
-def test_timeout_with_nothing_listening_is_unreachable(layers):
-    """No TCP either — a stale IP, not a sleeping TV. A wake cannot help."""
+def test_nothing_listening_is_unreachable(layers):
+    """No TCP either — a stale address. A wake cannot help."""
     layers(tcp=False, tls=False)
     out = T._classify_failure(IP, 7345, TimeoutError("timed out"))
     assert out.get("_unreachable") is True
-    assert not out.get("_standby")
+    assert not out.get("_stalled")
 
 
-def test_timeout_on_a_responsive_tv_is_transient_not_standby(layers):
-    """The reported bug: a powered-on TV must never be called asleep.
-
-    A timeout used to be classified as standby purely from the exception type,
-    so any transient blip on a TV that was plainly switched on produced "the TV
-    is in standby" — and then a pointless wake.
-    """
-    layers(tcp=True, tls=True)
-    out = T._classify_failure(IP, 7345, TimeoutError("timed out"))
-    assert out.get("_transient") is True
-    assert not out.get("_standby")
+def test_a_landed_nudge_proves_the_service_is_alive(layers):
+    """The only evidence that separates a stall from standby."""
+    layers(tcp=True, tls=False)
+    alive = T._classify_failure(IP, 7345, TimeoutError(), nudged=True,
+                                nudge_ok=True)
+    dead = T._classify_failure(IP, 7345, TimeoutError(), nudged=True,
+                               nudge_ok=False)
+    assert alive.get("_service_alive") is True
+    assert not dead.get("_service_alive")
 
 
-def test_diagnose_maps_each_layer_combination(layers):
+def test_diagnose_never_reports_standby(layers):
+    """The middle state is "not_responding" precisely because the handshake
+    cannot tell a stalled service from a sleeping one."""
     layers(tcp=True, tls=True)
     assert T.diagnose(IP, 7345) == "awake"
     layers(tcp=True, tls=False)
-    assert T.diagnose(IP, 7345) == "standby"
+    assert T.diagnose(IP, 7345) == "not_responding"
     layers(tcp=False, tls=False)
     assert T.diagnose(IP, 7345) == "unreachable"
 
 
 def test_tcp_probe_outlasts_a_slow_standby_connect():
-    """A standby connect took 2.4s. If the probe gives up first, standby is
-    misread as unreachable and the wake that would fix it never fires."""
+    """A standby connect took 2.4s. If the probe gives up first, a reachable TV
+    is misreported as gone."""
     assert T._PROBE_TIMEOUT >= 5.0
 
 
-def test_standby_error_message_points_at_the_fix():
-    """The message has to name the action that recovers, not just the symptom."""
-    res = T._result({"_standby": True, "_ip": IP, "_error": "timed out"},
-                    "read info")
+def test_per_attempt_timeout_is_short():
+    """13s of dead air per call was the complaint; retries need a small budget
+    each so the worst case stays reasonable."""
+    assert T._TIMEOUT <= 5.0
+    assert len(T._RETRY_DELAYS) >= 2
+
+
+# ── the three distinct faults get three distinct messages ─────────────────
+
+
+def test_stalled_message_with_live_service_forbids_a_wake():
+    res = T._result({"_stalled": True, "_ip": IP, "_attempts": 3,
+                     "_service_alive": True, "_error": "timed out"}, "launch")
     assert res["exit_code"] == 1
     low = res["error"].lower()
-    assert "standby" in low
-    assert "wake-on-lan" in low
+    assert "not standby" in low
+    assert "do not send a wake" in low
+    assert "3 attempts" in low
+
+
+def test_stalled_message_without_evidence_stays_agnostic():
+    """With nothing landed we genuinely do not know, so assert neither."""
+    res = T._result({"_stalled": True, "_ip": IP, "_attempts": 3,
+                     "_service_alive": False, "_error": "timed out"}, "launch")
+    low = res["error"].lower()
+    assert "not responding" in low
+    assert "stalled or the tv is asleep" in low
 
 
 def test_unreachable_message_says_a_wake_will_not_help():
@@ -132,13 +166,102 @@ def test_unreachable_message_says_a_wake_will_not_help():
     assert "tv_token.json" in low
 
 
-def test_transient_message_does_not_claim_standby():
-    """Whatever else it says, it must not tell the user the TV is asleep."""
-    res = T._result({"_transient": True, "_ip": IP, "_error": "timed out"},
-                    "read info")
-    low = res["error"].lower()
-    assert "powered on" in low
-    assert "not standby" in low
+# ── retry and nudge orchestration ─────────────────────────────────────────
+
+
+def test_a_stall_that_clears_succeeds_instead_of_failing(monkeypatch, no_sleep):
+    """The whole point: a single timeout must not fail the tool."""
+    calls = []
+
+    def attempt(ip, port, path, method, body, token, timeout):
+        calls.append(path)
+        if len(calls) == 1:
+            return "fail", TimeoutError("timed out")
+        return "ok", {"STATUS": {"RESULT": "SUCCESS"}}
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    # TCP is up during a stall — that is the whole point of the signature.
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    out = T._request(IP, 7345, "/app/launch", method="PUT", body={})
+    assert out == {"STATUS": {"RESULT": "SUCCESS"}}
+    assert len(calls) == 2
+
+
+def test_retries_are_bounded(monkeypatch, no_sleep):
+    calls = []
+
+    def attempt(*a, **k):
+        calls.append(1)
+        return "fail", TimeoutError("timed out")
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    out = T._request(IP, 7345, "/app/current")
+    expected = 1 + len(T._RETRY_DELAYS)
+    # The nudge rides on the same hook, so allow for one extra call.
+    assert expected <= len(calls) <= expected + 1
+    assert out.get("_stalled") is True
+    assert out["_attempts"] == expected
+
+
+def test_a_dead_address_is_not_retried(monkeypatch, no_sleep):
+    """Retrying an address with no TCP at all only burns the whole budget to
+    reach the same answer — which made this path slower than the single long
+    timeout it replaced."""
+    calls = []
+
+    def attempt(*a, **k):
+        calls.append(1)
+        return "fail", TimeoutError("timed out")
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: False)
+    out = T._request(IP, 7345, "/app/current")
+    assert len(calls) == 1, "a dead address must not be retried"
+    assert out.get("_unreachable") is True
+    assert out["_attempts"] == 1
+
+
+def test_an_http_error_is_not_retried(monkeypatch, no_sleep):
+    """A real HTTP answer is not a stall; hammering it changes nothing."""
+    calls = []
+
+    def attempt(*a, **k):
+        calls.append(1)
+        return "http", {"_http_error": 403, "_detail": "denied"}
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    out = T._request(IP, 7345, "/app/launch", method="PUT", body={})
+    assert len(calls) == 1
+    assert out["_http_error"] == 403
+
+
+def test_a_nudge_is_sent_before_the_last_attempt(monkeypatch, no_sleep):
+    seen = []
+
+    def attempt(ip, port, path, method, body, token, timeout):
+        seen.append((path, body))
+        return "fail", TimeoutError("timed out")
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    T._request(IP, 7345, "/app/current")
+    nudges = [b for p, b in seen if p == "/key_command/"]
+    assert nudges, "no nudge was attempted"
+    assert nudges[0] == T._NUDGE_BODY
+
+
+def test_nudge_can_be_suppressed(monkeypatch, no_sleep):
+    seen = []
+
+    def attempt(ip, port, path, method, body, token, timeout):
+        seen.append(path)
+        return "fail", TimeoutError("timed out")
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    T._request(IP, 7345, "/app/current", allow_nudge=False)
+    assert "/key_command/" not in seen
 
 
 # ── wake ──────────────────────────────────────────────────────────────────
@@ -154,7 +277,6 @@ def test_wake_sends_a_valid_magic_packet(creds, sent):
     # 6 sync bytes then the MAC 16 times.
     assert len(data) == 102
     assert data[:6] == b"\xff" * 6
-    assert data[6:12] == bytes.fromhex(MAC.replace(":", ""))
     assert data[6:] == bytes.fromhex(MAC.replace(":", "")) * 16
 
 
@@ -185,8 +307,7 @@ def test_wake_without_a_mac_explains_how_to_supply_one(monkeypatch, creds, sent)
 
 def test_wake_rejects_a_malformed_mac(creds, sent):
     creds(mac="aa:bb:cc")
-    res = T.wake()
-    assert res["exit_code"] == 1
+    assert T.wake()["exit_code"] == 1
     assert not sent
 
 
@@ -259,14 +380,14 @@ def test_parses_ip_neigh_output(monkeypatch):
 def test_arp_does_not_return_a_neighbours_mac(monkeypatch):
     """The MAC must come off the line matching this IP, not any line."""
     _fake_arp(monkeypatch,
-              f"? (10.0.0.1) at 11:22:33:44:55:66 on en0\n"
-              f"? (10.0.0.99) at 99:99:99:99:99:99 on en0\n")
+              "? (10.0.0.1) at 11:22:33:44:55:66 on en0\n"
+              "? (10.0.0.99) at 99:99:99:99:99:99 on en0\n")
     assert T._arp_mac(IP) == ""
 
 
 def test_arp_ip_match_is_not_a_prefix_match(monkeypatch):
     """10.0.0.5 must not match the 10.0.0.55 line."""
-    _fake_arp(monkeypatch, f"? (10.0.0.55) at 99:99:99:99:99:99 on en0\n")
+    _fake_arp(monkeypatch, "? (10.0.0.55) at 99:99:99:99:99:99 on en0\n")
     assert T._arp_mac("10.0.0.5") == ""
 
 
@@ -278,9 +399,6 @@ def test_arp_survives_a_missing_arp_binary(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", boom)
     assert T._arp_mac(IP) == ""
-
-
-# ── persistence ───────────────────────────────────────────────────────────
 
 
 def test_discovered_mac_is_written_back(monkeypatch, tmp_path):
@@ -300,67 +418,87 @@ def test_discovered_mac_is_written_back(monkeypatch, tmp_path):
     assert saved["ip"] == IP
 
 
-# ── power-on through standby ──────────────────────────────────────────────
+# ── power ─────────────────────────────────────────────────────────────────
 
 
-def test_power_on_wakes_then_retries(monkeypatch, creds):
-    """The keypress cannot land while the API is down, so wake comes first."""
+def test_power_on_reports_success_when_the_nudge_landed(monkeypatch, creds):
+    """The nudge IS a power-on keypress, so the work is already done and
+    reporting a failure would be wrong."""
     creds(mac=MAC)
-    calls = {"press": 0, "wake": 0}
-
-    def fake_request(*a, **k):
-        calls["press"] += 1
-        # Asleep for the first attempt, awake once the packet has landed.
-        if calls["press"] == 1:
-            return {"_standby": True, "_error": "timed out"}
-        return {"STATUS": {"RESULT": "SUCCESS"}}
-
-    monkeypatch.setattr(T, "_request", fake_request)
-    monkeypatch.setattr(T, "wake", lambda: calls.__setitem__("wake", 1) or
-                        {"output": "sent", "exit_code": 0})
-    monkeypatch.setattr(T, "_WAKE_SETTLE_SECONDS", 0)
-    monkeypatch.setattr("time.sleep", lambda s: None)
-
+    monkeypatch.setattr(T, "_request", lambda *a, **k: {
+        "_stalled": True, "_ip": IP, "_nudge_ok": True, "_service_alive": True,
+        "_attempts": 3, "_error": "timed out"})
+    monkeypatch.setattr(T, "wake", lambda: pytest.fail("must not wake"))
     res = T.power("on")
-    assert calls["wake"] == 1, "power on did not attempt a wake"
-    assert calls["press"] >= 2, "power on did not retry after waking"
     assert res["exit_code"] == 0
+    assert "stalled" in res["output"].lower()
 
 
-def test_power_off_does_not_wake(monkeypatch, creds):
+def test_power_on_only_wakes_when_nothing_landed(monkeypatch, creds, no_sleep):
+    creds(mac=MAC)
+    woke = []
+    monkeypatch.setattr(T, "_request", lambda *a, **k: {
+        "_stalled": True, "_ip": IP, "_nudge_ok": False,
+        "_service_alive": False, "_attempts": 3, "_error": "timed out"})
+    monkeypatch.setattr(T, "wake",
+                        lambda: woke.append(1) or {"output": "sent",
+                                                   "exit_code": 0})
+    monkeypatch.setattr(T, "_WAKE_SETTLE_SECONDS", 0)
+    monkeypatch.setattr(T, "_WAKE_ATTEMPTS", 1)
+    T.power("on")
+    assert woke, "a wake is still the right last resort when nothing lands"
+
+
+def test_power_off_is_never_nudged(monkeypatch, no_sleep, creds):
+    """The nudge is a power-on keypress; sending it while turning the TV off
+    would switch it straight back on."""
+    creds(mac=MAC)
+    seen = []
+
+    def attempt(ip, port, path, method, body, token, timeout):
+        seen.append(body)
+        return "fail", TimeoutError("timed out")
+
+    monkeypatch.setattr(T, "_attempt", attempt)
+    monkeypatch.setattr(T, "_tcp_ok", lambda *a: True)
+    monkeypatch.setattr(T, "wake", lambda: pytest.fail("must not wake on off"))
+    T.power("off")
+    assert T._NUDGE_BODY not in seen
+
+
+def test_power_off_does_not_wake(monkeypatch, creds, no_sleep):
     """Waking a TV in order to turn it off would be absurd."""
     creds(mac=MAC)
     woke = []
-
-    monkeypatch.setattr(T, "_request",
-                        lambda *a, **k: {"_standby": True, "_error": "timed out"})
+    monkeypatch.setattr(T, "_request", lambda *a, **k: {
+        "_stalled": True, "_ip": IP, "_service_alive": False, "_attempts": 3,
+        "_error": "timed out"})
     monkeypatch.setattr(T, "wake", lambda: woke.append(1) or {"exit_code": 0})
-    monkeypatch.setattr("time.sleep", lambda s: None)
-
     res = T.power("off")
     assert not woke
     assert res["exit_code"] == 1
 
 
-def test_power_on_reports_honestly_when_wake_is_unconfirmed(monkeypatch, creds):
+def test_power_on_reports_honestly_when_wake_is_unconfirmed(monkeypatch, creds,
+                                                           no_sleep):
     """If the API never comes up we say so rather than claiming success."""
     creds(mac=MAC)
-    monkeypatch.setattr(T, "_request",
-                        lambda *a, **k: {"_standby": True, "_error": "timed out"})
+    monkeypatch.setattr(T, "_request", lambda *a, **k: {
+        "_stalled": True, "_ip": IP, "_service_alive": False, "_attempts": 3,
+        "_error": "timed out"})
     monkeypatch.setattr(T, "wake", lambda: {"output": "sent", "exit_code": 0})
     monkeypatch.setattr(T, "_WAKE_SETTLE_SECONDS", 0)
     monkeypatch.setattr(T, "_WAKE_ATTEMPTS", 2)
-    monkeypatch.setattr("time.sleep", lambda s: None)
-
     res = T.power("on")
     low = res["output"].lower()
     assert "did not come up" in low or "still be turning on" in low
 
 
-def test_power_on_surfaces_a_wake_failure(monkeypatch, creds):
+def test_power_on_surfaces_a_wake_failure(monkeypatch, creds, no_sleep):
     creds()
-    monkeypatch.setattr(T, "_request",
-                        lambda *a, **k: {"_standby": True, "_error": "timed out"})
+    monkeypatch.setattr(T, "_request", lambda *a, **k: {
+        "_stalled": True, "_ip": IP, "_service_alive": False, "_attempts": 3,
+        "_error": "timed out"})
     monkeypatch.setattr(T, "wake",
                         lambda: {"error": "mac unknown", "exit_code": 1})
     res = T.power("on")
@@ -368,7 +506,54 @@ def test_power_on_surfaces_a_wake_failure(monkeypatch, creds):
     assert "mac unknown" in res["error"]
 
 
-# ── plumbing ──────────────────────────────────────────────────────────────
+# ── launch readback ───────────────────────────────────────────────────────
+
+
+def test_namespace_2_and_4_are_equivalent():
+    """The TV normalises NAME_SPACE 2 to 4 on readback, so treating that as a
+    mismatch would report failure on a launch that actually worked."""
+    assert T._ns_equal(2, 4)
+    assert T._ns_equal(4, 2)
+    assert T._ns_equal(3, 3)
+    assert not T._ns_equal(3, 5)
+
+
+def test_launch_rejects_a_mismatched_readback(monkeypatch, creds, no_sleep):
+    """/app/launch returns STATUS SUCCESS even when nothing launches, so the
+    only honest check is reading back what is actually running."""
+    creds()
+    calls = []
+
+    def fake_request(ip, port, path, **k):
+        calls.append(path)
+        if path == "/app/current":
+            # Something else entirely is on screen.
+            return {"ITEM": {"VALUE": {"APP_ID": "99", "NAME_SPACE": 3}}}
+        return {"STATUS": {"RESULT": "SUCCESS"}}
+
+    monkeypatch.setattr(T, "_request", fake_request)
+    res = T.launch_app("netflix")
+    assert res["exit_code"] == 1
+    assert "99" in res["error"]
+    assert "tv_apps.json" in res["error"]
+
+
+def test_launch_accepts_a_matching_readback(monkeypatch, creds, no_sleep):
+    creds()
+    cfg = T._app_table()["netflix"]
+
+    def fake_request(ip, port, path, **k):
+        if path == "/app/current":
+            return {"ITEM": {"VALUE": {"APP_ID": cfg["APP_ID"],
+                                       "NAME_SPACE": cfg["NAME_SPACE"]}}}
+        return {"STATUS": {"RESULT": "SUCCESS"}}
+
+    monkeypatch.setattr(T, "_request", fake_request)
+    res = T.launch_app("netflix")
+    assert res["exit_code"] == 0
+
+
+# ── schema / dispatcher parity ────────────────────────────────────────────
 
 
 def _tv_schema():

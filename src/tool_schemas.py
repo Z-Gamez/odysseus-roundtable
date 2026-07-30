@@ -518,10 +518,14 @@ FUNCTION_TOOL_SCHEMAS = [
                 "Launching an app works; YouTube can also jump to a specific video by "
                 "id. Netflix and the others open to their home screen only — playing a "
                 "specific title is not something those apps expose, so say so plainly "
-                "rather than claiming it played. If a call reports the TV is in "
-                "standby, use action=power state=on — it sends a Wake-on-LAN packet "
-                "and waits for the TV to come up. Do not retry the failed call "
-                "directly; while the TV sleeps its API is not listening at all."
+                "rather than claiming it played. This TV's API stalls intermittently "
+                "for a minute or so at a time; the tool already retries internally, "
+                "so if it still reports the TV is 'not responding', say so and "
+                "suggest trying again shortly — do NOT conclude the TV is off, and "
+                "do NOT send a wake, especially when the error says the service is "
+                "alive. Only when a call reports the TV is genuinely 'not reachable' "
+                "is the address or network at fault. action=power state=on sends "
+                "Wake-on-LAN by itself when it is actually needed."
             ),
             "parameters": {
                 "type": "object",

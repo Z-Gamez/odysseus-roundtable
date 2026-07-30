@@ -27,7 +27,15 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 _PORTS = (7345, 9000)
+# Connect and handshake are timed separately on purpose. In standby the TV's
+# network card accepts a TCP connection (that is what an always-on card / Alexa
+# integration buys you) but the SmartCast service is NOT running, so TLS never
+# completes. Measured on a V4K65C in standby: TCP open in 2.4s, handshake dead
+# after 4s. One combined timeout reports that as an opaque "SSL handshake
+# timeout" when the real answer is "the TV is asleep".
 _TIMEOUT = 8.0
+_WAKE_SETTLE_SECONDS = 6.0
+_WAKE_ATTEMPTS = 4
 
 
 def _token_path() -> str:
@@ -68,8 +76,17 @@ def _request(ip: str, port: int, path: str, *, method: str = "GET",
         return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
         return {"_http_error": e.code, "_detail": e.read().decode("utf-8", "replace")[:300]}
+    except TimeoutError:
+        # Distinct from a refused port: something IS listening, it just never
+        # spoke TLS. That means standby, not "wrong address".
+        return {"_standby": True,
+                "_error": "TLS handshake timed out — the network card "
+                          "answered but the SmartCast API did not"}
     except Exception as e:
-        return {"_error": str(e)}
+        msg = str(e)
+        if "handshake" in msg.lower() or "timed out" in msg.lower():
+            return {"_standby": True, "_error": msg}
+        return {"_error": msg}
 
 
 def _resolve() -> Dict[str, Any]:
@@ -81,6 +98,68 @@ def _resolve() -> Dict[str, Any]:
                          "stores the TV's address and auth token."}
     return {"ip": ip, "port": int(c.get("port") or _PORTS[0]),
             "token": c.get("token") or ""}
+
+
+def _tv_mac() -> str:
+    """The TV's MAC, from creds if set, else from the ARP cache.
+
+    A static DHCP reservation keeps the IP stable but WoL needs the MAC, so it
+    is resolved rather than required in config — the address is already in the
+    ARP table from any recent contact.
+    """
+    mac = str(_load_creds().get("mac") or "").strip()
+    if mac:
+        return mac
+    ip = str(_load_creds().get("ip") or "").strip()
+    if not ip:
+        return ""
+    import re
+    import subprocess
+    try:
+        out = subprocess.run(["arp", "-a", ip], capture_output=True, text=True,
+                             timeout=6).stdout
+        m = re.search(r"((?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})", out)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def wake() -> Dict[str, Any]:
+    """Send a Wake-on-LAN magic packet.
+
+    This is the ONLY way to bring the TV out of standby from the network. The
+    SmartCast HTTPS API cannot do it: in standby the API is not running, which
+    is exactly why a power-on request stalls in the TLS handshake instead of
+    failing fast.
+    """
+    import socket
+    mac = _tv_mac()
+    if not mac:
+        return {"error": "Cannot wake the TV: its MAC address is unknown. Add "
+                         '"mac": "aa:bb:cc:dd:ee:ff" to tv_token.json, or run '
+                         "any TV command while it is awake so the address is "
+                         "learned.", "exit_code": 1}
+    clean = mac.replace(":", "").replace("-", "")
+    if len(clean) != 12:
+        return {"error": f"MAC {mac!r} is not 6 bytes", "exit_code": 1}
+    packet = b"\xff" * 6 + bytes.fromhex(clean) * 16
+
+    ip = str(_load_creds().get("ip") or "")
+    bcast = ".".join(ip.split(".")[:3] + ["255"]) if ip.count(".") == 3 else "255.255.255.255"
+    sent = []
+    for target, port in ((bcast, 9), (bcast, 7), ("255.255.255.255", 9)):
+        try:
+            sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sk.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sk.sendto(packet, (target, port))
+            sk.close()
+            sent.append(f"{target}:{port}")
+        except Exception:
+            pass
+    if not sent:
+        return {"error": "could not send any wake packet", "exit_code": 1}
+    return {"output": f"Wake-on-LAN sent to {mac} via {', '.join(sent)}",
+            "exit_code": 0}
 
 
 # ── operations ──────────────────────────────────────────────────────────────
@@ -108,9 +187,34 @@ def power(state: str) -> Dict[str, Any]:
     r = _resolve()
     if r.get("error"):
         return {"error": r["error"], "exit_code": 1}
-    key = {"on": 1, "off": 0, "toggle": 2}.get((state or "toggle").lower(), 2)
-    out = _request(r["ip"], r["port"], "/key_command/", method="PUT", token=r["token"],
-                   body={"KEYLIST": [{"CODESET": 11, "CODE": key, "ACTION": "KEYPRESS"}]})
+    want = (state or "toggle").lower()
+    key = {"on": 1, "off": 0, "toggle": 2}.get(want, 2)
+
+    def _press():
+        return _request(r["ip"], r["port"], "/key_command/", method="PUT",
+                        token=r["token"],
+                        body={"KEYLIST": [{"CODESET": 11, "CODE": key,
+                                           "ACTION": "KEYPRESS"}]})
+
+    out = _press()
+    # Standby: the API is not up, so the keypress cannot land. Wake with a magic
+    # packet, then retry — the service takes several seconds to start listening.
+    if out.get("_standby") and want in ("on", "toggle"):
+        import time as _t
+        w = wake()
+        if w.get("exit_code"):
+            return {"error": f"TV is in standby and waking failed: {w['error']}",
+                    "exit_code": 1}
+        for _ in range(_WAKE_ATTEMPTS):
+            _t.sleep(_WAKE_SETTLE_SECONDS)
+            out = _press()
+            if not out.get("_standby") and not out.get("_error"):
+                return {"output": f"OK — woke the TV, then power {state}",
+                        "exit_code": 0}
+        return {"output": "Wake-on-LAN sent. The TV's network card answered but "
+                          "SmartCast did not come up in time to confirm — it may "
+                          "still be turning on. Try again in a moment.",
+                "exit_code": 0}
     return _result(out, f"power {state}")
 
 
@@ -275,6 +379,14 @@ def launch_app(app: str, video_id: str = "") -> Dict[str, Any]:
 
 
 def _result(out: Dict[str, Any], what: str) -> Dict[str, Any]:
+    if out.get("_standby"):
+        return {"error": (
+            f"{what} failed: the TV answered at the network level but its "
+            f"SmartCast API did not complete a TLS handshake. Almost always this "
+            f"means the TV is in standby — the always-on network card replies "
+            f"while the API is not running. Use action=power state=on (it sends "
+            f"Wake-on-LAN first) and give it a few seconds."),
+            "exit_code": 1}
     if out.get("_error"):
         return {"error": f"{what} failed: {out['_error']}", "exit_code": 1}
     if out.get("_http_error"):
@@ -312,6 +424,8 @@ class TvControlTool:
                               int(args.get("steps") or 1))
             if action == "input":
                 return set_input(str(args.get("name") or ""))
+            if action == "wake":
+                return wake()
             if action in ("current_app", "current"):
                 return current_app()
             if action in ("launch", "app"):

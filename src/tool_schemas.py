@@ -518,21 +518,24 @@ FUNCTION_TOOL_SCHEMAS = [
                 "Launching an app works; YouTube can also jump to a specific video by "
                 "id. Netflix and the others open to their home screen only — playing a "
                 "specific title is not something those apps expose, so say so plainly "
-                "rather than claiming it played."
+                "rather than claiming it played. If a call reports the TV is in "
+                "standby, use action=power state=on — it sends a Wake-on-LAN packet "
+                "and waits for the TV to come up. Do not retry the failed call "
+                "directly; while the TV sleeps its API is not listening at all."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string",
-                               "enum": ["info", "power", "volume", "input", "launch"],
-                               "description": "info = model/inputs/state; power = on/off/toggle; volume = up/down/mute; input = switch HDMI etc; launch = open a streaming app"},
+                               "enum": ["info", "power", "volume", "input", "launch", "current_app", "wake"],
+                               "description": "info = model/inputs/state; power = on/off/toggle (on wakes the TV from standby first); volume = up/down/mute; input = switch HDMI etc; launch = open a streaming app; current_app = read back what is actually running; wake = Wake-on-LAN only, without pressing power"},
                     "state": {"type": "string", "enum": ["on", "off", "toggle"],
                               "description": "For power"},
                     "direction": {"type": "string", "enum": ["up", "down", "mute"],
                                   "description": "For volume"},
                     "steps": {"type": "integer", "description": "For volume: how many increments (default 1)"},
                     "name": {"type": "string", "description": "For input: e.g. hdmi1, hdmi2, cast. Call action=info first if unsure which inputs exist."},
-                    "app": {"type": "string", "enum": ["youtube", "netflix", "prime", "hulu", "disney"],
+                    "app": {"type": "string", "enum": ["youtube", "netflix", "prime", "hulu", "disney", "max", "hbo"],
                             "description": "For launch"},
                     "video_id": {"type": "string", "description": "For launch with youtube: the YouTube video id (the v= value), which starts playback directly. Ignored by other apps."}
                 },

@@ -2110,14 +2110,43 @@ function initializeEventListeners() {
       menu.style.bottom = 'auto';
       menu.style.maxHeight = '';      // reset so we can measure the natural height
       menu.style.overflowY = '';
-      const avail = r.top - 16;        // room above the chevron
+
+      // The visible band is NOT 0..innerHeight once a soft keyboard is up: iOS
+      // shrinks the visual viewport and offsets it inside the layout viewport,
+      // which is what position:fixed anchors to. Measuring room above the
+      // chevron from 0 therefore placed the menu outside the visible strip —
+      // the menu "not working properly" with the keyboard up. Same fix the
+      // cookbook row menu already uses.
+      const vv = window.visualViewport;
+      const viewTop = vv ? vv.offsetTop : 0;
+      const viewBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
+      const m = 8;
+
+      const above = r.top - viewTop - m - 8;   // room between the band top and the button
+      const below = viewBottom - r.bottom - m - 8;
       const natural = menu.scrollHeight;
+
+      // Prefer opening upward (the chevron points up), but if the keyboard has
+      // eaten that space, drop below rather than render off-screen.
+      let openUp = above >= Math.min(natural, 160) || above >= below;
+      const avail = Math.max(64, openUp ? above : below);
       const h = Math.min(natural, avail);
-      if (natural > avail) {           // only cap + scroll when it doesn't fit
+      if (natural > avail) {
         menu.style.maxHeight = avail + 'px';
         menu.style.overflowY = 'auto';
       }
-      menu.style.top = (r.top - 8 - h) + 'px';
+      menu.style.transformOrigin = openUp ? 'bottom left' : 'top left';
+
+      let top = openUp ? (r.top - 8 - h) : (r.bottom + 8);
+      // Never leave the visible band, whichever way it opened.
+      top = Math.max(viewTop + m, Math.min(top, viewBottom - h - m));
+      menu.style.top = top + 'px';
+
+      // Keep it on screen horizontally too — the menu is wider than the button.
+      const vLeft = vv ? vv.offsetLeft : 0;
+      const vRight = vLeft + (vv ? vv.width : window.innerWidth);
+      const w = menu.offsetWidth || 170;
+      menu.style.left = Math.max(vLeft + m, Math.min(r.left, vRight - w - m)) + 'px';
     }
     // Tapping the chevron must NOT steal focus from the message box, or the
     // mobile keyboard collapses. preventDefault on pointerdown keeps the

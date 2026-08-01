@@ -437,6 +437,13 @@ def power(state: str) -> Dict[str, Any]:
                         body={"KEYLIST": [{"CODESET": 11, "CODE": key,
                                            "ACTION": "KEYPRESS"}]})
 
+    # Always wake FIRST when the intent is to switch the TV on. A magic packet
+    # is a no-op on a set that is already awake, and the keypress cannot arrive
+    # at all on one that is not — so ordering it first is free and removes the
+    # failure entirely. Leaving this to the caller meant it was usually skipped.
+    if want in ("on", "toggle"):
+        wake()
+
     out = _press()
     # A landed nudge is itself a power-on keypress, so for "on" the work is
     # already done — reporting failure here would be wrong.

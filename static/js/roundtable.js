@@ -321,6 +321,90 @@
       padding:7px 14px;font:inherit;background:color-mix(in srgb, var(--fg,#9cdef2) 8%, transparent);color:inherit;}
     .rt-pr-approve:disabled,.rt-pr-reject:disabled{opacity:.5;cursor:default;}
     .rt-pr-result{font-size:12px;}
+
+    /* The phone segmented control is desktop-invisible. */
+    .rt-mtabs{display:none;}
+
+    /* ── Phones ──────────────────────────────────────────────────────────
+       This panel was built as a fixed two-column layout: #rt-left is
+       240-270px and #rt-main takes the rest. On a 430px screen the overlay
+       is ~420px wide, so the log pane was left with roughly 160px — which is
+       what made Round Table unusable rather than merely cramped. There were
+       no media queries here at all.
+
+       So on a phone the two panes stop competing: the overlay goes
+       full-screen inside the safe area, and Setup / Progress become one pane
+       at a time, switched from the header. Selecting a pane is also how the
+       run view gets the whole screen once a discussion is underway. */
+    @media (max-width: 768px), (pointer: coarse) and (max-width: 900px) {
+      /* Full-bleed, but never under the Dynamic Island or the home bar. */
+      #rt-overlay, #rt-overlay.rt-fixed, #rt-overlay.rt-windowed {
+        position: fixed;
+        inset: 0;
+        margin: 0;
+        border-radius: 0;
+        border: none;
+        box-shadow: none;
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        padding-left: env(safe-area-inset-left, 0px);
+        padding-right: env(safe-area-inset-right, 0px);
+      }
+      /* Dragging a full-screen sheet around has no meaning on a phone, and it
+         only fights the browser's own gestures. */
+      #rt-head { cursor: default; flex-wrap: wrap; gap: 8px; padding: 10px 12px 6px; }
+      #rt-head .rt-title { font-size: 13px; }
+      #rt-overlay.rt-windowed .rt-tabs { display: inline-flex; }
+      #rt-chip { max-width: 100%; }
+      #rt-min { display: none; }            /* nothing to minimise into */
+
+      .rt-tabs { order: 3; width: 100%; display: flex; }
+      .rt-tab { flex: 1; padding: 9px 6px; font-size: 12.5px; }
+
+      .rt-mtabs {
+        order: 4; width: 100%; display: flex; gap: 4px;
+        background: color-mix(in srgb, var(--fg,#9cdef2) 7%, transparent);
+        border-radius: 10px; padding: 3px;
+      }
+      .rt-mtab {
+        flex: 1; cursor: pointer; border: none; background: transparent;
+        color: inherit; font: inherit; font-size: 12.5px; font-weight: 600;
+        padding: 8px 6px; border-radius: 8px;
+      }
+      .rt-mtab.active { background: ${ACCENT_SOFT}; }
+
+      /* One column. Each pane owns the full width and scrolls on its own. */
+      #rt-body { flex-direction: column; gap: 0; padding: 0 10px 10px; }
+      #rt-left, #rt-main {
+        width: 100%; min-width: 0; max-width: 100%;
+        flex: 1 1 auto; min-height: 0;
+      }
+      #rt-left { padding: 12px; overflow: auto; -webkit-overflow-scrolling: touch; }
+      #rt-main { overflow: hidden; }
+
+      /* Pane switching. Only one is in the layout at a time, so neither can
+         squeeze the other. */
+      #rt-overlay:not(.rt-m-log) #rt-main { display: none; }
+      #rt-overlay.rt-m-log #rt-left { display: none; }
+
+      /* Touch targets: 44px is the floor for anything tappable. */
+      #rt-run { padding: 14px; font-size: 14px; }
+      #rt-ws-btn { padding: 12px; }
+      #rt-x { width: 40px; height: 40px; display: inline-flex;
+              align-items: center; justify-content: center; }
+      .rt-field textarea { min-height: 84px; }
+      /* 16px stops iOS zooming the whole page in on focus. */
+      .rt-field input, .rt-field textarea, #rt-ws-path { font-size: 16px; }
+
+      /* These were sized for a 270px column and overflow a phone otherwise. */
+      .rt-step .rt-cmodel { max-width: 100%; }
+      #rt-log { padding-bottom: 12px; }
+      #rt-config, #rt-history { padding: 0 12px 12px; }
+
+      /* The floating minimised chip collides with the composer; keep it clear
+         of the home indicator. */
+      #rt-mini { right: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+    }
     `;
     var s = document.createElement("style"); s.id = "rt-styles"; s.textContent = css; document.head.appendChild(s);
   }
@@ -338,6 +422,12 @@
             <button class="rt-tab active" id="rt-tab-run">Run</button>
             <button class="rt-tab" id="rt-hist" title="Run history">History</button>
             <button class="rt-tab" id="rt-cfg" title="Per-role models">Models</button>
+          </span>
+          <!-- Phone only. The two panes cannot sit side by side on a 430px
+               screen, so they become one pane at a time and this switches. -->
+          <span class="rt-mtabs" role="tablist" aria-label="Round Table pane">
+            <button class="rt-mtab active" id="rt-m-setup" role="tab" aria-selected="true">Setup</button>
+            <button class="rt-mtab" id="rt-m-log" role="tab" aria-selected="false">Progress</button>
           </span>
           <button id="rt-min" title="Minimize — the run keeps going" aria-label="Minimize">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg>
@@ -484,8 +574,29 @@
     els.tabs.run.addEventListener("click", function () { setTab("run"); });
     els.tabs.history.addEventListener("click", function () { setTab("history"); loadRecent(); });
     els.tabs.models.addEventListener("click", function () { setTab("models"); openConfig(); });
+
+    // ---- phone pane switching --------------------------------------------------
+    // On a phone the setup form and the progress log cannot share the width, so
+    // only one is in the layout at a time (see the media query in the styles).
+    var mSetup = ov.querySelector("#rt-m-setup");
+    var mLog = ov.querySelector("#rt-m-log");
+    function setPane(which) {
+      var log = which === "log";
+      ov.classList.toggle("rt-m-log", log);
+      mSetup.classList.toggle("active", !log);
+      mLog.classList.toggle("active", log);
+      mSetup.setAttribute("aria-selected", String(!log));
+      mLog.setAttribute("aria-selected", String(log));
+    }
+    mSetup.addEventListener("click", function () { setPane("setup"); });
+    mLog.addEventListener("click", function () { setPane("log"); });
+
     els.run.addEventListener("click", function () {
-      if (els.run.dataset.mode === "stop") stopRun(); else startRun();
+      if (els.run.dataset.mode === "stop") { stopRun(); return; }
+      startRun();
+      // Starting a discussion is the moment the log becomes the thing worth
+      // looking at, and on a phone the form is covering it.
+      setPane("log");
     });
 
     // ---- workspace navigation menu (same /api/workspace/* API as the chat picker,

@@ -1,0 +1,89 @@
+/* Phone corrections, loaded after style.css.
+ *
+ * Kept in its own file on purpose: style.css is ~1.3MB with 177 media queries,
+ * and these are targeted overrides that need to be readable and easy to revert.
+ * Everything here is additive and scoped to small viewports.
+ *
+ * The recurring bug these fix: the full-height tool panels set
+ *   height: 100dvh; padding-bottom: env(safe-area-inset-bottom)
+ * with no matching TOP inset. On a notched phone — iPhone 14 Pro Max, 430x932
+ * with a 59px Dynamic Island — that puts every panel header, close button and
+ * first row underneath the island. dvh describes how tall the viewport is, not
+ * which parts of it are actually visible; only the safe-area insets do that.
+ */
+
+@media (max-width: 768px) {
+  /* One source of truth for the insets, so a panel can never pick up the
+     bottom inset while forgetting the top one. */
+  :root {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* Full-height tool panels: email, brain/memories, calendar, tasks, cookbook,
+     settings, gallery, document library. The panel background still bleeds to
+     the physical top edge — only the CONTENT is pushed clear, which is the
+     correct look on a notched phone.
+
+     These must be ID-scoped and !important: style.css already carries
+       #cookbook-modal, #calendar-modal, #email-lib-modal, #doclib-modal,
+       #gallery-modal, #tasks-modal { padding-top: 0 !important }
+     inside this same breakpoint, so a plain .modal rule loses on both
+     specificity and priority no matter how late it loads. */
+  #cookbook-modal .modal-content,
+  #tasks-modal .modal-content,
+  #calendar-modal .modal-content,
+  #gallery-modal .modal-content,
+  #memory-modal .memory-modal-content,
+  #settings-modal .settings-modal-content,
+  #email-lib-modal .modal-content,
+  #doclib-modal .doclib-modal-content {
+    padding-top: calc(6px + var(--safe-top)) !important;
+    /* 100dvh measured from the physical top overshoots by exactly the island,
+       which pushed each panel's footer under the home indicator. */
+    max-height: calc(100dvh - var(--safe-top)) !important;
+    height: calc(100dvh - var(--safe-top)) !important;
+  }
+
+  /* Sticky headers inside those panels sit at top:0 of the scroll box, which is
+     now below the inset — but any that pin to the viewport need it too. */
+  #cookbook-modal .modal-header,
+  #tasks-modal .modal-header,
+  #calendar-modal .modal-header,
+  #memory-modal .modal-header,
+  #settings-modal .modal-header,
+  #email-lib-modal .modal-header,
+  #doclib-modal .modal-header {
+    top: 0;
+  }
+
+  /* Close buttons were landing in the island's dead zone, where taps do not
+     register at all — the panel looked stuck rather than misaligned. */
+  #cookbook-modal .modal-header .close-btn,
+  #tasks-modal .modal-header .close-btn,
+  #calendar-modal .modal-header .close-btn,
+  #memory-modal .modal-header .close-btn,
+  #settings-modal .modal-header .close-btn,
+  #email-lib-modal .modal-header .close-btn,
+  #doclib-modal .modal-header .close-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Nothing inside a panel may force the page wider than the screen. A single
+     wide table or long unbroken string turns the whole app into a horizontally
+     scrolling page, which is what made several panels feel "not fitting". */
+  .modal-content,
+  .memory-modal-content,
+  .settings-modal-content,
+  .doclib-modal-content {
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+  .modal-body table,
+  .modal-body pre {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}

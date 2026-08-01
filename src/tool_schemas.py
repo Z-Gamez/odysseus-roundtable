@@ -524,8 +524,10 @@ FUNCTION_TOOL_SCHEMAS = [
                 "suggest trying again shortly — do NOT conclude the TV is off, and "
                 "do NOT send a wake, especially when the error says the service is "
                 "alive. Only when a call reports the TV is genuinely 'not reachable' "
-                "is the address or network at fault. action=power state=on sends "
-                "Wake-on-LAN by itself when it is actually needed."
+                "is the address or network at fault. To switch the TV on, just use "
+                "action=power state=on — it ALWAYS sends the Wake-on-LAN packet "
+                "itself before the power command, so never call action=wake "
+                "separately first and never skip it thinking the TV is already on."
             ),
             "parameters": {
                 "type": "object",

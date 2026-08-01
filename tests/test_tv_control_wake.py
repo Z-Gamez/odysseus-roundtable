@@ -426,17 +426,57 @@ def test_discovered_mac_is_written_back(monkeypatch, tmp_path):
 # ── power ─────────────────────────────────────────────────────────────────
 
 
+def test_power_on_always_wakes_first(monkeypatch, creds):
+    """Wake before the keypress, unconditionally.
+
+    A magic packet is a no-op on a set that is already awake, and the keypress
+    cannot arrive at all on one that is not — so ordering it first costs nothing
+    and removes the failure. Leaving the decision to the model meant it usually
+    just sent the power command and the TV stayed off.
+    """
+    creds(mac=MAC)
+    order = []
+    monkeypatch.setattr(T, "wake",
+                        lambda: order.append("wake") or {"output": "sent",
+                                                         "exit_code": 0})
+    monkeypatch.setattr(T, "_request",
+                        lambda *a, **k: order.append("press") or
+                        {"STATUS": {"RESULT": "SUCCESS"}})
+    res = T.power("on")
+    assert order[0] == "wake", f"wake must come first, got {order}"
+    assert "press" in order
+    assert res["exit_code"] == 0
+
+
+def test_power_off_still_never_wakes(monkeypatch, creds):
+    """The unconditional wake applies to switching ON, not OFF."""
+    creds(mac=MAC)
+    order = []
+    monkeypatch.setattr(T, "wake", lambda: order.append("wake") or {"exit_code": 0})
+    monkeypatch.setattr(T, "_request",
+                        lambda *a, **k: {"STATUS": {"RESULT": "SUCCESS"}})
+    T.power("off")
+    assert "wake" not in order
+
+
 def test_power_on_reports_success_when_the_nudge_landed(monkeypatch, creds):
     """The nudge IS a power-on keypress, so the work is already done and
     reporting a failure would be wrong."""
     creds(mac=MAC)
+    wakes = []
     monkeypatch.setattr(T, "_request", lambda *a, **k: {
         "_stalled": True, "_ip": IP, "_nudge_ok": True, "_service_alive": True,
         "_attempts": 3, "_error": "timed out"})
-    monkeypatch.setattr(T, "wake", lambda: pytest.fail("must not wake"))
+    monkeypatch.setattr(T, "wake",
+                        lambda: wakes.append(1) or {"output": "sent",
+                                                    "exit_code": 0})
+    monkeypatch.setattr(T, "_BOOT_POLL_SECONDS", 0)
     res = T.power("on")
     assert res["exit_code"] == 0
     assert "stalled" in res["output"].lower()
+    # Exactly the one unconditional wake up front — a landed nudge means the
+    # service is alive, so the wake-and-poll recovery path must not run.
+    assert len(wakes) == 1
 
 
 def test_power_on_only_wakes_when_nothing_landed(monkeypatch, creds, no_sleep):

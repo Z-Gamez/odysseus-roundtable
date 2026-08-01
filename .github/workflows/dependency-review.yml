@@ -16,7 +16,7 @@ name: Dependency review
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, saw-harness]
   workflow_dispatch:
 
 # Default-deny token; jobs grant only read access.

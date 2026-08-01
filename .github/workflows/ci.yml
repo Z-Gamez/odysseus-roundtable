@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, saw-harness]
   pull_request:
 
 # Least privilege: none of the jobs write to the repo.

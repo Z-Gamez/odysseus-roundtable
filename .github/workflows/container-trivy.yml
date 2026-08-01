@@ -25,7 +25,7 @@ on:
       - 'docs/**'
       - '.github/ISSUE_TEMPLATE/**'
   push:
-    branches: [main]
+    branches: [main, saw-harness]
     paths-ignore:
       - '**.md'
       - 'docs/**'

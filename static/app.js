@@ -2147,6 +2147,28 @@ function initializeEventListeners() {
       const vRight = vLeft + (vv ? vv.width : window.innerWidth);
       const w = menu.offsetWidth || 170;
       menu.style.left = Math.max(vLeft + m, Math.min(r.left, vRight - w - m)) + 'px';
+
+      // Correct against what actually rendered. Everything above works from
+      // scrollHeight, which excludes the border and knows nothing about the
+      // spring-in transform, so the box can still land a few pixels — or a
+      // whole item — past the bottom edge, clipping the last entry. Measuring
+      // the real box and nudging is the only version that cannot be wrong,
+      // whatever the predicted height missed.
+      const box = menu.getBoundingClientRect();
+      let corrected = top;
+      if (box.bottom > viewBottom - m) corrected = top - (box.bottom - (viewBottom - m));
+      if (box.top < viewTop + m) corrected = top + ((viewTop + m) - box.top);
+      if (corrected !== top) {
+        // If it cannot fit either way, pin to the top of the band and let the
+        // menu scroll rather than push the tail off the screen.
+        const fits = box.height <= (viewBottom - viewTop) - m * 2;
+        if (!fits) {
+          corrected = viewTop + m;
+          menu.style.maxHeight = ((viewBottom - viewTop) - m * 2) + 'px';
+          menu.style.overflowY = 'auto';
+        }
+        menu.style.top = corrected + 'px';
+      }
     }
     // Tapping the chevron must NOT steal focus from the message box, or the
     // mobile keyboard collapses. preventDefault on pointerdown keeps the

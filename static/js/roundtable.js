@@ -24,6 +24,14 @@
   var chipTimer = null; // elapsed-time interval while a run is live
 
   function h(html) { var t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; }
+
+  // Kept identical to the breakpoint in the injected stylesheet. If the two
+  // ever disagree, the JS enables a gesture the layout is not in — which is
+  // precisely how the windowed mode ended up reachable on a phone.
+  var _phoneMQ = window.matchMedia
+    ? window.matchMedia("(max-width: 768px), (pointer: coarse) and (max-width: 900px)")
+    : null;
+  function isPhone() { return !!(_phoneMQ && _phoneMQ.matches); }
   function esc(s) { return (s == null ? "" : String(s)).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
   function fmtDur(ms) {
     var s = Math.max(0, Math.round(ms / 1000));
@@ -322,8 +330,9 @@
     .rt-pr-approve:disabled,.rt-pr-reject:disabled{opacity:.5;cursor:default;}
     .rt-pr-result{font-size:12px;}
 
-    /* The phone segmented control is desktop-invisible. */
+    /* The phone segmented control and grab pill are desktop-invisible. */
     .rt-mtabs{display:none;}
+    .rt-grab{display:none;}
 
     /* ── Phones ──────────────────────────────────────────────────────────
        This panel was built as a fixed two-column layout: #rt-left is
@@ -338,9 +347,16 @@
        run view gets the whole screen once a discussion is underway. */
     @media (max-width: 768px), (pointer: coarse) and (max-width: 900px) {
       /* Full-bleed, but never under the Dynamic Island or the home bar. */
+      /* !important because dragging writes position/left/top/width/height as
+         INLINE styles, which outrank any rule here. Without this, a panel that
+         was windowed on a desktop stays stranded at that box the moment the
+         viewport is narrow — a resize, a rotate, or the same account on a
+         phone. Windowed mode is simply not a state this breakpoint has. */
       #rt-overlay, #rt-overlay.rt-fixed, #rt-overlay.rt-windowed {
-        position: fixed;
-        inset: 0;
+        position: fixed !important;
+        inset: 0 !important;
+        width: auto !important;
+        height: auto !important;
         margin: 0;
         border-radius: 0;
         border: none;
@@ -352,11 +368,27 @@
       }
       /* Dragging a full-screen sheet around has no meaning on a phone, and it
          only fights the browser's own gestures. */
-      #rt-head { cursor: default; flex-wrap: wrap; gap: 8px; padding: 10px 12px 6px; }
+      #rt-head { cursor: default; flex-wrap: wrap; gap: 8px; padding: 6px 12px 6px; }
       #rt-head .rt-title { font-size: 13px; }
       #rt-overlay.rt-windowed .rt-tabs { display: inline-flex; }
       #rt-chip { max-width: 100%; }
       #rt-min { display: none; }            /* nothing to minimise into */
+
+      /* Exit is the swipe, matching every other sheet in the app, so the X
+         would be a second way to do the same thing in the corner most likely
+         to be misgrabbed. The pill is the affordance that says so. */
+      #rt-x { display: none; }
+      .rt-grab {
+        display: block; order: -1; width: 100%; height: 16px; position: relative;
+      }
+      .rt-grab::before {
+        content: ""; position: absolute; left: 50%; top: 5px;
+        transform: translateX(-50%);
+        width: 36px; height: 4px; border-radius: 2px;
+        background: color-mix(in srgb, var(--fg,#9cdef2) 26%, transparent);
+      }
+      /* The sheet follows the finger, so it must not also animate. */
+      #rt-overlay { transition: none; }
 
       .rt-tabs { order: 3; width: 100%; display: flex; }
       .rt-tab { flex: 1; padding: 9px 6px; font-size: 12.5px; }
@@ -390,8 +422,9 @@
       /* Touch targets: 44px is the floor for anything tappable. */
       #rt-run { padding: 14px; font-size: 14px; }
       #rt-ws-btn { padding: 12px; }
-      #rt-x { width: 40px; height: 40px; display: inline-flex;
-              align-items: center; justify-content: center; }
+      /* No #rt-x sizing here: the close button is hidden at this breakpoint
+         (swipe down to exit). A later display:inline-flex would have quietly
+         un-hidden it, since it wins on source order. */
       .rt-field textarea { min-height: 84px; }
       /* 16px stops iOS zooming the whole page in on focus. */
       .rt-field input, .rt-field textarea, #rt-ws-path { font-size: 16px; }
@@ -415,6 +448,9 @@
     var ov = h(`<div id="rt-overlay" role="dialog" aria-label="Round Table">
       <div id="rt-panel">
         <div id="rt-head">
+          <!-- Phone-only affordance. Standing in for the X, which is gone on
+               mobile in favour of the swipe every other sheet uses. -->
+          <span class="rt-grab" aria-hidden="true"></span>
           <span class="rt-title">${icon("table", 16)} Round Table</span>
           <span id="rt-chip"><span class="rt-chip-dot"></span><span id="rt-chip-text"></span></span>
           <span class="rt-spacer"></span>
@@ -516,6 +552,10 @@
     (function wireDrag() {
       var head = ov.querySelector("#rt-head");
       head.addEventListener("mousedown", function (e) {
+        // Windowed mode is a desktop affordance. On a phone the panel is
+        // full-screen by definition, so freezing it to a dragged-out box just
+        // strands it at a size the layout was never built for.
+        if (isPhone()) return;
         if (e.button !== 0 || e.target.closest("button")) return;
         var windowed = ov.classList.contains("rt-windowed");
         var W, H, oxx, oyy;
@@ -556,6 +596,10 @@
         document.addEventListener("mouseup", up);
       });
       head.addEventListener("dblclick", function (e) {
+        // Nothing to re-dock from on a phone, and a stray double-tap on the
+        // header would otherwise strip the inline layout out from under the
+        // full-screen sheet.
+        if (isPhone()) return;
         if (e.target.closest("button")) return;
         // Re-dock: full edge-to-edge panel with the frost back, re-aligned
         // to the rail's top edge.
@@ -590,6 +634,85 @@
     }
     mSetup.addEventListener("click", function () { setPane("setup"); });
     mLog.addEventListener("click", function () { setPane("log"); });
+
+    // ---- swipe down to exit (phones) -------------------------------------------
+    // Matches the gesture every other mobile sheet in the app uses, which is why
+    // the X is hidden at this breakpoint. Implemented here rather than reusing
+    // ui.js's helper because that one dismisses by hiding el.closest('.modal');
+    // this overlay is not inside a .modal and owns its own teardown (backdrop,
+    // body class, minimise chip), so hiding it that way would leave those set.
+    (function wireSwipeToExit() {
+      var DISMISS_PX = 50;        // same thresholds as the shared sheet helper,
+      var DISMISS_VELOCITY = 0.3; // so the gesture feels identical
+      var startY = 0, lastY = 0, lastT = 0, velocity = 0;
+      var dragging = false, armed = false;
+
+      function scrolledToTop() {
+        var pane = ov.classList.contains("rt-m-log")
+          ? ov.querySelector("#rt-log") : ov.querySelector("#rt-left");
+        return !pane || pane.scrollTop <= 0;
+      }
+
+      ov.addEventListener("touchstart", function (e) {
+        if (!isPhone() || e.touches.length !== 1) return;
+        // Buttons and the workspace menu keep their own taps.
+        if (e.target.closest("button, input, textarea, select, #rt-ws-menu")) return;
+        var t = e.touches[0];
+        var fromHead = !!e.target.closest("#rt-head");
+        // Anywhere on the sheet is fair game once its pane is at the top —
+        // the same rule the other sheets use — otherwise only the header.
+        if (!fromHead && !scrolledToTop()) return;
+        armed = true; dragging = false;
+        startY = lastY = t.clientY; lastT = e.timeStamp; velocity = 0;
+      }, { passive: true });
+
+      ov.addEventListener("touchmove", function (e) {
+        if (!armed || e.touches.length !== 1) return;
+        var t = e.touches[0];
+        var dy = t.clientY - startY;
+        if (!dragging) {
+          if (dy < 8) { if (dy < -8) armed = false; return; }  // upward = let it scroll
+          dragging = true;
+          ov.style.transition = "none";
+          ov.style.willChange = "transform";
+        }
+        var dt = e.timeStamp - lastT;
+        if (dt > 0) velocity = velocity * 0.6 + ((t.clientY - lastY) / dt) * 0.4;
+        lastY = t.clientY; lastT = e.timeStamp;
+        e.preventDefault();          // own the gesture once committed
+        ov.style.transform = "translateY(" + Math.max(0, dy) + "px)";
+      }, { passive: false });
+
+      function settle(dismiss) {
+        var reset = function () {
+          ov.style.transition = ""; ov.style.transform = "";
+          ov.style.willChange = "";
+        };
+        if (!dismiss) {
+          ov.style.transition = "transform .18s cubic-bezier(.2,0,.4,1)";
+          ov.style.transform = "";
+          setTimeout(reset, 200);
+          return;
+        }
+        ov.style.transition = "transform .2s cubic-bezier(.2,0,.4,1)";
+        ov.style.transform = "translateY(100%)";
+        setTimeout(function () { close(); reset(); }, 200);
+      }
+
+      ov.addEventListener("touchend", function () {
+        if (!armed) return;
+        var wasDragging = dragging;
+        armed = false; dragging = false;
+        if (!wasDragging) return;
+        var dy = lastY - startY;
+        settle(dy > DISMISS_PX || (dy > 20 && velocity > DISMISS_VELOCITY));
+      });
+
+      ov.addEventListener("touchcancel", function () {
+        if (dragging) settle(false);
+        armed = false; dragging = false;
+      });
+    })();
 
     els.run.addEventListener("click", function () {
       if (els.run.dataset.mode === "stop") { stopRun(); return; }

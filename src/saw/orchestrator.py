@@ -233,15 +233,41 @@ def _build_check(workspace: str):
             try:
                 r = subprocess.run("flutter analyze", cwd=proj, shell=True,
                                    capture_output=True, text=True, timeout=360)
-                errs = [ln.strip() for ln in (r.stdout + r.stderr).splitlines()
+                out = (r.stdout or "") + (r.stderr or "")
+                errs = [ln.strip() for ln in out.splitlines()
                         if re.match(r"(?i)^error\b", ln.strip())]
                 if errs:
                     return False, "flutter analyze", "Analyzer errors — fix these:\n" + "\n".join(errs[:30])
+                # Dependency resolution runs BEFORE analysis and fails without
+                # printing a single line that starts with "error", so scanning
+                # for those alone reported a project that cannot even resolve
+                # its packages as clean. A wrong flame/SDK pin lands exactly
+                # here: "version solving failed", exit 1, no "error" line, and
+                # the app was passed as complete while unable to build at all.
+                # The exit code is the only reliable signal, so it decides.
+                if r.returncode != 0:
+                    lines = [ln.rstrip() for ln in out.splitlines() if ln.strip()]
+                    # flutter prints its own remedy for a bad constraint; that
+                    # is the single most useful line to hand the developer.
+                    hint = [ln.strip() for ln in lines
+                            if "flutter pub add" in ln or "Try " in ln]
+                    detail = ("flutter analyze exited %d — the project does not build.\n%s"
+                              % (r.returncode, "\n".join(lines[-25:])))
+                    if hint:
+                        detail += "\n\nSuggested fix: " + hint[0].lstrip("* ").strip()
+                    return False, "flutter analyze", detail
                 return True, "flutter analyze", f"{where}lib/main.dart present; flutter analyze found no errors."
             except subprocess.TimeoutExpired:
-                return True, "structure", f"{where}lib/main.dart present (flutter analyze timed out — skipped)."
-            except Exception:
-                return True, "structure", f"{where}lib/main.dart present (flutter analyze unavailable)."
+                # Deliberately NOT a pass. These used to return True, so a
+                # machine without a Flutter toolchain passed every Flutter
+                # project automatically — the gate exists precisely to stop an
+                # unverified build being called done. None means "no verdict":
+                # the QAS still reviews, but nothing claims this built.
+                logger.warning("[saw] flutter analyze timed out in %s — no build verdict", proj)
+                return None
+            except Exception as e:
+                logger.warning("[saw] flutter analyze unavailable in %s (%s) — no build verdict", proj, e)
+                return None
         # Python: every file must compile. Compile IN-PROCESS — in the frozen
         # app sys.executable is Odysseus itself, and spawning it with
         # "-m py_compile" fell through the argv dispatch and opened a whole
@@ -539,6 +565,44 @@ def _parse_rte(text: str, fallback_title: str) -> Tuple[str, str, str]:
 # Message builders
 # ---------------------------------------------------------------------------
 
+def _workspace_digest(workspace: str, max_entries: int = 60) -> str:
+    """A listing of the workspace, inlined into the analyst's prompt.
+
+    The BSA is told to "explore the workspace to ground the spec in what already
+    exists", but it was only ever handed the PATH. On a greenfield ticket the
+    directory is empty, so the only way to discover that is to call ls — and
+    nothing told the model what to do once it had. A small model answers by
+    looking again, which is the loop that gets seen: repeated get_workspace + ls
+    with no text and no progress.
+
+    Handing it the answer up front removes the reason to call a tool at all.
+    """
+    try:
+        if not workspace or not os.path.isdir(workspace):
+            return "(the workspace directory does not exist yet — this is a NEW project)"
+        names = []
+        for root, dirs, files in os.walk(workspace):
+            dirs[:] = [d for d in dirs
+                       if d not in {".git", "node_modules", "build", ".dart_tool",
+                                    "__pycache__", ".gradle", ".idea"}]
+            for f in files:
+                rel = os.path.relpath(os.path.join(root, f), workspace)
+                names.append(rel.replace("\\", "/"))
+                if len(names) > max_entries:
+                    break
+            if len(names) > max_entries:
+                break
+        if not names:
+            return ("(EMPTY — this is a NEW project. There is nothing to explore, so do "
+                    "NOT call ls/glob/grep/read_file. Write the spec from the ticket alone.)")
+        listing = "\n".join("  " + n for n in sorted(names)[:max_entries])
+        more = "\n  … (truncated)" if len(names) > max_entries else ""
+        return "Existing files:\n" + listing + more
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("[saw] workspace digest failed for %s: %s", workspace, e)
+        return "(could not list the workspace)"
+
+
 def _bsa_messages(role: RoleSpec, title: str, description: str, acceptance: str,
                   workspace: str, arch_feedback: Optional[str] = None, prior_spec: str = "") -> list:
     ac_block = (
@@ -549,7 +613,7 @@ def _bsa_messages(role: RoleSpec, title: str, description: str, acceptance: str,
         else "No acceptance criteria were provided — you MUST define them."
     )
     user = (
-        f"# Workspace\n{workspace}\n\n"
+        f"# Workspace\n{workspace}\n{_workspace_digest(workspace)}\n\n"
         f"# Ticket\nTitle: {title}\n\nDescription:\n{description or '(none)'}\n\n{ac_block}\n\n"
         "VERIFICATION STEPS MUST BE STATIC: the team cannot run the app, open a browser, or play a "
         "game — never write verification steps like 'test gameplay' or 'run the app'. Verification "

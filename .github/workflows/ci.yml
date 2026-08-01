@@ -78,7 +78,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
-          python-version: "3.11"
+          # 3.12 is the real floor, not a preference: src/agent_loop.py uses
+          # backslashes inside f-string expressions (PEP 701, 3.12+), which is a
+          # hard SyntaxError on 3.11, and numpy requires >=3.12. CI was the only
+          # thing still on 3.11 — Docker builds 3.14, the macOS app 3.12 — and
+          # because it never ran, nothing surfaced that the tree does not compile.
+          python-version: "3.12"
       # Byte-compile sources — catches syntax errors without installing deps.
       - run: python -m compileall -q app.py core routes src services scripts tests
 
@@ -138,7 +143,12 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         if: steps.docs-check.outputs.docs_only != 'true'
         with:
-          python-version: "3.11"
+          # 3.12 is the real floor, not a preference: src/agent_loop.py uses
+          # backslashes inside f-string expressions (PEP 701, 3.12+), which is a
+          # hard SyntaxError on 3.11, and numpy requires >=3.12. CI was the only
+          # thing still on 3.11 — Docker builds 3.14, the macOS app 3.12 — and
+          # because it never ran, nothing surfaced that the tree does not compile.
+          python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
         if: steps.docs-check.outputs.docs_only != 'true'

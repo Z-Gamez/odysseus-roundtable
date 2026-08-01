@@ -24,6 +24,11 @@ jobs:
       # silently changed what ran, and floating @v4/@v5 kept this job on the
       # deprecated Node 20 runtime that GitHub is removing.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # checkout leaves the job's token in .git/config by default, where an
+          # artifact upload of the workspace would carry it out of the run. This
+          # job only reads the tree and pushes nothing, so it never needs it.
+          persist-credentials: false
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
@@ -176,4 +181,10 @@ jobs:
         if: ${{ github.event.inputs.release_tag != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.inputs.release_tag }}" Odysseus-macOS-arm64.dmg --clobber
+          # Passed as an env var, never interpolated into the script body: a
+          # ${{ }} expansion is substituted as raw text BEFORE the shell parses
+          # the line, so a tag containing shell metacharacters would execute
+          # rather than be treated as a tag. Quoting the expansion does not help;
+          # only keeping it out of the source does.
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: gh release upload "$RELEASE_TAG" Odysseus-macOS-arm64.dmg --clobber

@@ -152,3 +152,62 @@ def test_analyze_timeout_gives_no_verdict(tmp_path, monkeypatch):
     _flutter_project(tmp_path)
     monkeypatch.setattr(subprocess, "run", slow)
     assert orch._build_check(str(tmp_path)) is None
+
+
+# ── the QAS file listing ───────────────────────────────────────────────────
+#
+# The listing is titled "Files actually on disk right now" and the QAS prompt
+# tells the model those files DO exist. It truncated in os.walk order at 80
+# entries, and a Flutter project's android/ tree is bigger than that on its own
+# — so the budget went to generated scaffolding and lib/ never appeared. The
+# QAS then failed a finished game for "zero .dart files", which was a correct
+# reading of the evidence it was given.
+
+
+def _flutter_tree_with_big_scaffold(tmp_path, scaffold_files=140):
+    (tmp_path / "pubspec.yaml").write_text("name: app\n", encoding="utf-8")
+    (tmp_path / "SPEC.md").write_text("# spec\n", encoding="utf-8")
+    lib = tmp_path / "lib" / "src"
+    lib.mkdir(parents=True)
+    (tmp_path / "lib" / "main.dart").write_text("void main() {}\n", encoding="utf-8")
+    for n in ("bird", "game", "pipe"):
+        (lib / f"{n}.dart").write_text("// impl\n", encoding="utf-8")
+    android = tmp_path / "android" / "app" / "src" / "main"
+    android.mkdir(parents=True)
+    for i in range(scaffold_files):
+        (android / f"gen_{i:03d}.xml").write_text("<x/>\n", encoding="utf-8")
+
+
+def test_source_survives_truncation_ahead_of_scaffolding(tmp_path):
+    _flutter_tree_with_big_scaffold(tmp_path)
+    listing = orch._list_workspace(str(tmp_path), limit=40)
+    assert "lib/main.dart" in listing, "the entry point must never be truncated away"
+    for n in ("bird", "game", "pipe"):
+        assert f"lib/src/{n}.dart" in listing
+    assert "pubspec.yaml" in listing
+    assert "SPEC.md" in listing
+
+
+def test_truncation_says_what_it_dropped(tmp_path):
+    """"Not in the list" must never be readable as "not on disk"."""
+    _flutter_tree_with_big_scaffold(tmp_path)
+    listing = orch._list_workspace(str(tmp_path), limit=40)
+    assert "more file(s) not shown" in listing
+    assert "android" in listing
+    assert "they exist" in listing
+
+
+def test_small_project_is_listed_whole(tmp_path):
+    _flutter_tree_with_big_scaffold(tmp_path, scaffold_files=3)
+    listing = orch._list_workspace(str(tmp_path))
+    assert "lib/main.dart" in listing
+    assert "not shown" not in listing
+
+
+def test_generated_dirs_stay_excluded(tmp_path):
+    _flutter_tree_with_big_scaffold(tmp_path, scaffold_files=1)
+    junk = tmp_path / ".dart_tool" / "x"
+    junk.mkdir(parents=True)
+    (junk / "noise.dart").write_text("//\n", encoding="utf-8")
+    listing = orch._list_workspace(str(tmp_path))
+    assert ".dart_tool" not in listing

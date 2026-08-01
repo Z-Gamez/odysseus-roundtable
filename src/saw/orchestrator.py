@@ -133,9 +133,38 @@ def _build_spec_md(bsa_text: str, title: str, acceptance: str) -> str:
     return spec
 
 
-def _list_workspace(workspace: str, limit: int = 80) -> str:
+# Platform scaffolding that `flutter create` (and the native templates) emit.
+# Dozens of files that say nothing about whether the app was actually written.
+_SCAFFOLD_DIRS = {"android", "ios", "windows", "linux", "macos", "web"}
+# Where the code that matters lives.
+_SOURCE_DIRS = {"lib", "src", "test", "tests", "app", "assets"}
+
+
+def _listing_rank(rel: str) -> int:
+    """Sort key deciding what survives truncation. Lower wins."""
+    top = rel.split("/", 1)[0]
+    if "/" not in rel:
+        return 0                      # root files: pubspec.yaml, SPEC.md, README
+    if top in _SOURCE_DIRS:
+        return 1                      # the implementation itself
+    if top in _SCAFFOLD_DIRS:
+        return 3                      # generated platform boilerplate
+    return 2
+
+
+def _list_workspace(workspace: str, limit: int = 200) -> str:
     """A real listing of files on disk, handed to QAS so it knows exactly what exists rather
-    than trusting the Developer's narration."""
+    than trusting the Developer's narration.
+
+    Ordering matters as much as the contents. This used to truncate in os.walk
+    order at 80 entries, and a Flutter project's android/ tree alone is bigger
+    than that — so the budget was spent on generated scaffolding and the walk
+    never reached lib/. The QAS was then handed a block titled "Files actually
+    on disk right now", told "the files listed above DO exist", and that list
+    genuinely contained no lib/main.dart. It failed the run for having no source
+    files while the developer's game sat right there. Source is now ranked above
+    boilerplate BEFORE anything is cut, and whatever gets cut is named.
+    """
     try:
         skip = {".git", "__pycache__", "node_modules", "build", ".dart_tool", ".gradle", ".idea"}
         out = []
@@ -143,9 +172,20 @@ def _list_workspace(workspace: str, limit: int = 80) -> str:
             dirs[:] = [d for d in dirs if d not in skip]
             for f in files:
                 out.append(os.path.relpath(os.path.join(root, f), workspace).replace("\\", "/"))
-                if len(out) >= limit:
-                    return "\n".join(sorted(out)) + "\n… (truncated)"
-        return "\n".join(sorted(out)) if out else "(no files yet)"
+            if len(out) > 4000:       # pathological tree — stop walking, not listing
+                break
+        if not out:
+            return "(no files yet)"
+        ordered = sorted(out, key=lambda r: (_listing_rank(r), r))
+        kept, dropped = ordered[:limit], ordered[limit:]
+        text = "\n".join(sorted(kept))
+        if dropped:
+            # Name what was cut so "not in the list" can never be read as "not
+            # on disk" — that inference is exactly what failed this run.
+            tops = sorted({d.split("/", 1)[0] for d in dropped})
+            text += ("\n… (%d more file(s) not shown, all under: %s — they exist, "
+                     "they are just generated/platform files)" % (len(dropped), ", ".join(tops)))
+        return text
     except Exception:
         return "(could not list workspace)"
 

@@ -197,7 +197,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_workspace",
-            "description": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without a path, instead of asking them. Takes no arguments.",
+            "description": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without a path, instead of asking them. Takes no arguments. RUNNABLE PROJECTS: whenever you finish something a browser can open — a game, a page, a canvas/JS demo — write it as index.html at the workspace root and then give the user this exact markdown link so they can play it: [▶ Run it](/api/workspace/preview/). That link serves the workspace's index.html and works on phones too. Offer it unprompted; do not tell the user to open a local file path, and never claim you ran or played it yourself.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
@@ -546,6 +546,37 @@ FUNCTION_TOOL_SCHEMAS = [
                     "video_id": {"type": "string", "description": "For launch with youtube: the YouTube video id (the v= value), which starts playback directly. Ignored by other apps."}
                 },
                 "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": (
+                "Generate an image from a text description and show it to the user. Use "
+                "this whenever they ask you to draw, create, make, or generate a picture, "
+                "image, illustration, logo, artwork, photo or wallpaper. Write a rich, "
+                "specific prompt — subject, composition, lighting, style and mood — rather "
+                "than echoing their words back; a bare noun produces a generic result. The "
+                "finished image is saved to the gallery and displayed in the chat, so do "
+                "not describe what it looks like afterwards as though the user cannot see "
+                "it. You CANNOT edit an existing image with this tool; a follow-up request "
+                "like 'make it darker' means generating again with an adjusted prompt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string",
+                               "description": "Full description of the image to create. Be specific and visual."},
+                    "model": {"type": "string",
+                              "description": "Optional image model. Omit to auto-detect the configured one."},
+                    "size": {"type": "string",
+                             "description": "Optional, e.g. 1024x1024 (default), 1792x1024 wide, 1024x1792 tall."},
+                    "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"],
+                                "description": "Optional, default medium."}
+                },
+                "required": ["prompt"]
             }
         }
     },

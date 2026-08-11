@@ -17,6 +17,7 @@ import pathlib
 import re
 import sys
 import time
+from functools import lru_cache
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 
@@ -278,6 +279,64 @@ def agent_cwd() -> str:
     return get_active_workspace() or _AGENT_WORKDIR
 
 
+# Developer SDKs that are installed but routinely absent from the server's own
+# PATH. Odysseus inherits whatever launched it — a desktop shortcut, a service,
+# a frozen bundle — which is rarely the user's interactive shell. The QAS role
+# could not verify a single Flutter project because `flutter --version` returned
+# 127 inside the agent's bash while working fine in the user's terminal, so the
+# reviewer fell back to reading code it could not compile.
+#
+# Only directories that exist AND contain the binary are added, and only when
+# the tool is not already resolvable, so this never shadows a real install.
+_SDK_BIN_CANDIDATES = {
+    "flutter": (
+        os.path.join(os.environ.get("FLUTTER_ROOT", ""), "bin"),
+        r"C:\flutter\bin",
+        r"C:\src\flutter\bin",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "flutter", "bin"),
+        os.path.expanduser("~/flutter/bin"),
+        os.path.expanduser("~/development/flutter/bin"),
+        "/opt/flutter/bin",
+        "/usr/local/flutter/bin",
+    ),
+    # Dart ships inside Flutter; a standalone install is also common.
+    "dart": (
+        r"C:\flutter\bin\cache\dart-sdk\bin",
+        os.path.expanduser("~/flutter/bin/cache/dart-sdk/bin"),
+        os.path.expanduser("~/development/flutter/bin/cache/dart-sdk/bin"),
+        "/opt/flutter/bin/cache/dart-sdk/bin",
+        r"C:\tools\dart-sdk\bin",
+        "/usr/local/dart-sdk/bin",
+        "/usr/lib/dart/bin",
+    ),
+}
+
+
+@lru_cache(maxsize=1)
+def _agent_path() -> str:
+    """PATH for agent subprocesses: the inherited one plus any missing SDKs."""
+    import shutil
+
+    path = os.environ.get("PATH", "")
+    parts = path.split(os.pathsep)
+    added = []
+    for tool, candidates in _SDK_BIN_CANDIDATES.items():
+        if shutil.which(tool, path=path):
+            continue                     # already reachable; leave PATH alone
+        for d in candidates:
+            if not d or not os.path.isdir(d):
+                continue
+            if shutil.which(tool, path=d):
+                parts.append(d)
+                path = os.pathsep.join(parts)
+                added.append(d)
+                break
+    if added:
+        logger.info("[agent-path] added SDK dirs the server's PATH lacked: %s",
+                    ", ".join(added))
+    return path
+
+
 def get_mcp_manager():
     from src import agent_tools
     return agent_tools.get_mcp_manager()
@@ -529,6 +588,7 @@ async def _direct_fallback(
         "COLUMNS": "120",
         "LINES": "40",
         "HOME": _AGENT_WORKDIR,
+        "PATH": _agent_path(),
     }
 
     try:

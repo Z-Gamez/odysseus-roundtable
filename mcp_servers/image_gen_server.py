@@ -111,7 +111,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # recommend a paid service. A ComfyUI on the box renders for free on the
         # GPU, so it is preferred whenever it is actually answering — and when
         # it is not, we fall through to the configured/paid path unchanged.
-        if not model_spec or model_spec.lower() in ("comfyui", "local"):
+        # Only a name that clearly identifies a HOSTED provider skips the local
+        # backend. Matching "comfyui"/"local" exactly was too strict: the model
+        # fills in this optional argument with a plausible guess — "sdxl",
+        # "stable-diffusion", "flux" — and every one of those fell through to
+        # the endpoint resolver and came back "No enabled endpoints found",
+        # while a perfectly good local ComfyUI sat idle. An unrecognised name
+        # now means "whatever renders this", which is local.
+        _hosted = ("gpt-image", "dall-e", "dalle", "openai", "azure",
+                   "midjourney", "ideogram", "recraft")
+        wants_hosted = any(h in model_spec.lower() for h in _hosted) if model_spec else False
+        if not wants_hosted:
             # Launches it if it is not up. ComfyUI is deliberately not running
             # all the time — idle it costs ~1-2GB RAM and ~7GB VRAM once a
             # checkpoint loads, which is most of a 12GB card the local LLM

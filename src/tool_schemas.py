@@ -570,7 +570,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "prompt": {"type": "string",
                                "description": "Full description of the image to create. Be specific and visual."},
                     "model": {"type": "string",
-                              "description": "Optional image model. Omit to auto-detect the configured one."},
+                              "description": "OMIT THIS. The right backend is chosen automatically. Only set it if the user explicitly names a hosted provider model such as dall-e-3 — never guess a name like 'sdxl' or 'stable-diffusion'."},
                     "size": {"type": "string",
                              "description": "Optional, e.g. 1024x1024 (default), 1792x1024 wide, 1024x1792 tall."},
                     "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"],

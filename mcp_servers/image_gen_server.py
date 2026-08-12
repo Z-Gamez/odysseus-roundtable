@@ -112,7 +112,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # GPU, so it is preferred whenever it is actually answering — and when
         # it is not, we fall through to the configured/paid path unchanged.
         if not model_spec or model_spec.lower() in ("comfyui", "local"):
-            if await comfy.is_available():
+            # Launches it if it is not up. ComfyUI is deliberately not running
+            # all the time — idle it costs ~1-2GB RAM and ~7GB VRAM once a
+            # checkpoint loads, which is most of a 12GB card the local LLM
+            # wants. First image after a quiet spell therefore pays a startup
+            # and model-load wait; subsequent ones are immediate.
+            from src import comfyui_launcher
+            if await comfyui_launcher.ensure_running():
+                comfyui_launcher.note_request()
                 try:
                     png = await comfy.generate(
                         prompt, size=size,

@@ -1074,6 +1074,15 @@ async def _startup_event():
         _start_llamacpp_supervisor()
     except Exception as e:
         logger.warning("[llamacpp] autostart skipped: %s", e)
+    # ComfyUI gets the idle watcher but NOT an autostart: it is launched on the
+    # first image request instead. Running it permanently would hold ~1-2GB of
+    # RAM and, once a checkpoint loads, ~7GB of VRAM — most of a 12GB card the
+    # local LLM wants — for a feature used occasionally.
+    try:
+        from src.comfyui_launcher import start_supervisor as _start_comfy_supervisor
+        _start_comfy_supervisor()
+    except Exception as e:
+        logger.warning("[comfyui] idle supervisor skipped: %s", e)
     # Wipe any leftover incognito sessions from previous process — they're
     # ephemeral by design and must not survive a restart.
     try:

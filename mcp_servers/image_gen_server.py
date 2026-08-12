@@ -21,6 +21,41 @@ from src.constants import GENERATED_IMAGES_DIR
 server = Server("image_gen")
 
 
+def _save_and_report(png: bytes, prompt: str, model_id: str,
+                     size: str, quality: str) -> str:
+    """Persist a rendered image, record it in the gallery, and describe it.
+
+    Shared by both backends so a locally-rendered image is stored, linked and
+    reported exactly like a paid one — the caller should not be able to tell
+    which produced it.
+    """
+    from src.settings import get_setting
+
+    img_dir = Path(GENERATED_IMAGES_DIR)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex[:12]}.png"
+    (img_dir / filename).write_bytes(png)
+
+    _pub_base = (get_setting("app_public_url", "") or "").rstrip("/")
+    image_url = f"{_pub_base}/api/generated-image/{filename}"
+
+    try:
+        from src.database import SessionLocal, GalleryImage
+        db = SessionLocal()
+        db.add(GalleryImage(id=str(uuid.uuid4()), filename=filename, prompt=prompt,
+                            model=model_id, size=size, quality=quality))
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+    # "Direct link:" rather than an "image_url:" label — small models copied the
+    # label token ("image_url") into the link href, producing a broken link.
+    return (f"Generated image for: {prompt[:100]}\n"
+            f"Direct link: {image_url}\n"
+            f"model: {model_id}\nsize: {size}")
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     return [
@@ -69,6 +104,24 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if quality == "medium" and _settings.get("image_quality"):
             quality = _settings["image_quality"]
 
+        from src import comfyui_backend as comfy
+
+        # Local first. Every OpenAI-compatible image provider costs money, so
+        # without this the tool's only answer to "draw me a picture" was to
+        # recommend a paid service. A ComfyUI on the box renders for free on the
+        # GPU, so it is preferred whenever it is actually answering — and when
+        # it is not, we fall through to the configured/paid path unchanged.
+        if not model_spec or model_spec.lower() in ("comfyui", "local"):
+            if await comfy.is_available():
+                try:
+                    png = await comfy.generate(
+                        prompt, size=size,
+                        negative=_settings.get("image_negative_prompt", ""))
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error: {e}")]
+                return [TextContent(type="text",
+                                    text=_save_and_report(png, prompt, "comfyui", size, quality))]
+
         # Auto-detect best available image model
         if not model_spec:
             for candidate in ("gpt-image-1.5", "gpt-image-1", "dall-e-3"):
@@ -79,7 +132,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 except ValueError:
                     continue
             if not model_spec:
-                return [TextContent(type="text", text="Error: No image model found. Configure one in Admin.")]
+                return [TextContent(type="text", text=(
+                    "Error: No image model is available. Nothing is configured in Admin, "
+                    f"and no local ComfyUI is answering on {comfy.comfy_url()}. Start "
+                    "ComfyUI to generate images locally and for free, or configure an "
+                    "image model in Admin."))]
 
         try:
             url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, model_type="image")
@@ -122,50 +179,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 return [TextContent(type="text", text="Error: No images returned from API")]
 
             img = images[0]
-            image_url = None
-            # Prefix the instance's public base URL (existing app_public_url setting) so the
-            # link is fully-qualified and clickable when the model echoes it. Empty = relative
-            # same-origin path (unchanged default).
-            _pub_base = (get_setting("app_public_url", "") or "").rstrip("/")
-
             if img.get("b64_json"):
-                img_dir = Path(GENERATED_IMAGES_DIR)
-                img_dir.mkdir(parents=True, exist_ok=True)
-                filename = f"{uuid.uuid4().hex[:12]}.png"
-                img_path = img_dir / filename
-                img_path.write_bytes(base64.b64decode(img["b64_json"]))
-                image_url = f"{_pub_base}/api/generated-image/{filename}"
-
-                # Save to gallery
-                try:
-                    from src.database import SessionLocal, GalleryImage
-                    db = SessionLocal()
-                    db.add(GalleryImage(
-                        id=str(uuid.uuid4()),
-                        filename=filename,
-                        prompt=prompt,
-                        model=model_id,
-                        size=size,
-                        quality=payload.get("quality", "medium"),
-                    ))
-                    db.commit()
-                    db.close()
-                except Exception:
-                    pass
-
-            elif img.get("url"):
-                image_url = img["url"]
-            else:
-                return [TextContent(type="text", text="Error: Unexpected image API response format")]
-
-            # "Direct link:" rather than an "image_url:" label — small models copied the
-            # label token ("image_url") into the link href, producing a broken link.
-            result = (
-                f"Generated image for: {prompt[:100]}\n"
-                f"Direct link: {image_url}\n"
-                f"model: {model_id}\nsize: {size}"
-            )
-            return [TextContent(type="text", text=result)]
+                return [TextContent(type="text", text=_save_and_report(
+                    base64.b64decode(img["b64_json"]), prompt, model_id, size,
+                    payload.get("quality", "medium")))]
+            if img.get("url"):
+                # A hosted provider returned a link rather than bytes; pass it
+                # through as-is (nothing local to store).
+                return [TextContent(type="text", text=(
+                    f"Generated image for: {prompt[:100]}\n"
+                    f"Direct link: {img['url']}\n"
+                    f"model: {model_id}\nsize: {size}"))]
+            return [TextContent(type="text", text="Error: Unexpected image API response format")]
 
     except httpx.TimeoutException:
         return [TextContent(type="text", text="Error: Image generation timed out (300s)")]

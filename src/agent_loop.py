@@ -460,6 +460,19 @@ _DOMAIN_RULES = {
   not expose per-title playback. Say that plainly rather than reporting that
   something is playing when it is not.
 - If the TV is unreachable, say so; do not retry the same call repeatedly.""",
+    "images": """\
+## Image generation rules
+- `generate_image` makes a picture from a text description. Use it whenever the
+  user asks you to draw, create, make or generate an image, illustration, logo,
+  wallpaper or artwork. You CAN do this — never reply that you are unable to.
+- Write a rich, specific prompt of your own — subject, composition, lighting,
+  style, mood. Echoing the user's words back produces a generic result.
+- OMIT the `model` argument. The backend is chosen automatically; inventing a
+  name like "sdxl" sends the request to a provider that is not configured.
+- The image is shown to the user and saved to the gallery. Do not describe what
+  it looks like afterwards as though they cannot see it.
+- `generate_image` cannot edit an existing image. "Make it darker" means
+  generating again with an adjusted prompt.""",
     "documents": """\
 ## Document rules
 - For long code/content (>15 lines), use `create_document` instead of pasting into chat.
@@ -531,6 +544,7 @@ _DOMAIN_TOOL_MAP = {
     # indexes external servers -- this only guarantees the domain is never
     # empty when no MCP server is registered.
     "media": {"tv_control"},
+    "images": {"generate_image", "edit_image"},
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "approve_pending_email", "cancel_pending_email", "resolve_contact", "manage_contact"},
@@ -545,6 +559,80 @@ _DOMAIN_TOOL_MAP = {
     "messaging": {"send_imessage", "read_imessages", "resolve_contact", "manage_contact"},
     "open_url": {"open_in_safari", "browser"},
 }
+
+# One phrase per domain that MUST classify into it. This is the fixture for
+# verify_domain_wiring() below, and adding a domain without adding a probe is
+# itself a failure — that is the point.
+#
+# Every one of these has been a shipped bug: a tool wired into a domain the
+# classifier could never produce is invisible, and the failure is silent and
+# looks like the model refusing. send_imessage had no messaging domain,
+# browser/open_url matched "ui" instead, tv_control had no media domain, and
+# generate_image had no images domain — "generate me an image of a cat" scored
+# low_signal with no domains at all and the agent was handed memory/ask_user/
+# update_plan, so it answered that it had no such tool. The mirror-image fault
+# shipped too: a domain present in the tool map but missing from _DOMAIN_RULES
+# raised KeyError on every message that matched it.
+_DOMAIN_PROBES = {
+    "web": "search the web for the latest news",
+    "media": "turn on the tv and open netflix",
+    "images": "generate me an image of a cat",
+    "documents": "create a document with the meeting notes",
+    "email": "send an email to bob",
+    "messaging": "text 5551234567 that I am running late",
+    "notes_calendar_tasks": "add a task to buy milk",
+    "cookbook": "what models are running",
+    "files": "read the file config.json",
+    "sessions": "list my sessions",
+    "ui": "switch to dark theme",
+    "settings": "change my settings",
+    "contacts": "look up chris in my contacts",
+    "integrations": "make an api_call to home assistant",
+    "open_url": "open github.com in the browser",
+}
+
+
+def verify_domain_wiring() -> None:
+    """Fail loudly when a domain is unreachable or has no rules.
+
+    Called at startup. Four separate tools shipped invisible because a domain
+    existed in the tool map that no classifier pattern could ever produce, and
+    a fifth crashed every matching message because the domain had no rule pack.
+    Both are pure wiring mistakes that no amount of prompt tuning can fix and
+    that nothing else notices, so they get an assertion rather than a comment.
+    """
+    problems = []
+
+    missing_rules = sorted(set(_DOMAIN_TOOL_MAP) - set(_DOMAIN_RULES))
+    if missing_rules:
+        problems.append("no entry in _DOMAIN_RULES (KeyError on every matching "
+                        "message): " + ", ".join(missing_rules))
+
+    orphan_rules = sorted(set(_DOMAIN_RULES) - set(_DOMAIN_TOOL_MAP))
+    if orphan_rules:
+        problems.append("rules for a domain no tool maps to: " + ", ".join(orphan_rules))
+
+    missing_probes = sorted(set(_DOMAIN_TOOL_MAP) - set(_DOMAIN_PROBES))
+    if missing_probes:
+        problems.append("no probe phrase, so reachability is unproven: "
+                        + ", ".join(missing_probes))
+
+    unreachable = []
+    for domain, phrase in _DOMAIN_PROBES.items():
+        if domain not in _DOMAIN_TOOL_MAP:
+            continue
+        try:
+            got = _classify_agent_request([{"role": "user", "content": phrase}], phrase)
+            if domain not in (got.get("domains") or set()):
+                unreachable.append(f"{domain} ({phrase!r} -> {sorted(got.get('domains') or [])})")
+        except Exception as e:            # a domain that raises is also broken
+            unreachable.append(f"{domain} (classifier raised {type(e).__name__}: {e})")
+    if unreachable:
+        problems.append("no classifier pattern reaches these, so their tools can "
+                        "never be offered: " + "; ".join(unreachable))
+
+    if problems:
+        raise RuntimeError("Domain wiring is broken — " + " | ".join(problems))
 
 _WORKSPACE_TERMINUS_TOOLS = (
     _DOMAIN_TOOL_MAP["files"]
@@ -1457,6 +1545,18 @@ def _classify_agent_request(messages: List[Dict], last_user: str,
            r"\bhdmi\s*\d\b",
            r"\b(volume|mute|unmute)\b"):
         domains.add("media")
+    # Image generation. Nothing matched these before, so "generate me an image
+    # of a cat" scored low_signal with no domain and the agent was handed only
+    # memory/ask_user/update_plan — it then answered, correctly for what it had,
+    # that it has no such tool. The "draw/create/make ... image" alternation is
+    # separate from the bare nouns so "the picture you sent" does not drag the
+    # image tools into an unrelated turn.
+    if has(r"\b(image|picture|photo|artwork|illustration|drawing|render|"
+           r"wallpaper|logo|icon|avatar)\b",
+           r"\b(draw|paint|paints|drawing)\b",
+           r"\bcomfy ?ui\b",
+           r"\b(stable diffusion|sdxl|txt2img|img2img|dall-?e|midjourney)\b"):
+        domains.add("images")
     if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
         domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
@@ -1491,7 +1591,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str,
            r"\bnavigate to\b",
            r"\b(?:open|go ?to|goto|pull up|visit|launch)\b[^.\n]*(?:https?://|www\.|\b[\w-]+\.(?:com|org|net|io|dev|gov|edu|co|app|ai)\b)"):
         domains.add("open_url")
-    if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
+    if has(r"\b(sessions?|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash)\b"):
         domains.add("files")
@@ -1512,7 +1612,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str,
             or has(r"\b(kill|stop|cancel|terminate|check|tail|show|list)\b.{0,16}\bjobs?\b")
             or has(r"\bjobs?\b.{0,16}\b(output|status|done|finished|running)\b")):
         domains.add("files")
-    if has(r"\b(endpoint|api token|mcp|webhook|preference|configure|config|setting)\b"):
+    if has(r"\b(endpoints?|api tokens?|mcp|webhooks?|preferences?|configure|config|settings?)\b"):
         domains.add("settings")
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")

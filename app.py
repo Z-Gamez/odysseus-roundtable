@@ -1083,6 +1083,19 @@ async def _startup_event():
         _start_comfy_supervisor()
     except Exception as e:
         logger.warning("[comfyui] idle supervisor skipped: %s", e)
+    # Fail loudly on domain wiring rather than shipping an invisible tool. Four
+    # tools have reached users unreachable because their domain existed in the
+    # tool map but no classifier pattern could produce it — the agent simply
+    # never sees them and answers that it cannot do the thing. Logged rather
+    # than raised so a wiring slip degrades one capability instead of stopping
+    # the app; the tests fail on it, which is where it should be caught.
+    try:
+        from src.agent_loop import verify_domain_wiring
+        verify_domain_wiring()
+    except RuntimeError as e:
+        logger.error("[domains] %s", e)
+    except Exception as e:
+        logger.warning("[domains] wiring check skipped: %s", e)
     # Wipe any leftover incognito sessions from previous process — they're
     # ephemeral by design and must not survive a restart.
     try:

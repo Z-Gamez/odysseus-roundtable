@@ -91,6 +91,37 @@ def idle_seconds() -> float:
     return 0.0 if not _last_request else time.time() - _last_request
 
 
+def _port_in_use() -> bool:
+    """Is anything bound to the port, answering or not?
+
+    Distinguishes "no server" from "server too busy to reply", which
+    is_answering() cannot: a ComfyUI loading a 6GB checkpoint under memory
+    pressure fails a 2.5s health check while being perfectly alive.
+    """
+    import socket
+    s = socket.socket()
+    s.settimeout(1.0)
+    try:
+        s.connect(("127.0.0.1", _port()))
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+async def _wait_until_answering(timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if await is_answering():
+            return True
+        await asyncio.sleep(2.0)
+    return False
+
+
 async def is_answering(timeout: float = 2.5) -> bool:
     import httpx
     try:
@@ -162,6 +193,20 @@ async def ensure_running(timeout: float = 180.0) -> bool:
         if await is_answering():
             note_request()
             return True
+        # Someone is already on the port. That is almost always a ComfyUI busy
+        # loading a checkpoint — its HTTP server stops answering while a large
+        # model pages in, so is_answering() says no while the process is very
+        # much alive. Launching a second one here would collide, exit, and
+        # leave the pidfile pointing at the corpse, which is how a slow first
+        # run turned into "cold every time".
+        if _port_in_use():
+            logger.info("[comfyui] port %s already held — waiting for it to "
+                        "answer rather than starting a second server", _port())
+            if await _wait_until_answering(timeout):
+                note_request()
+                return True
+            logger.warning("[comfyui] the process on port %s never answered", _port())
+            return False
         logger.info("[comfyui] starting on demand: %s", " ".join(argv[:3]))
         try:
             kwargs = {"cwd": root, "stdout": subprocess.DEVNULL,
@@ -188,10 +233,40 @@ async def ensure_running(timeout: float = 180.0) -> bool:
             if await is_answering():
                 logger.info("[comfyui] up after on-demand start")
                 note_request()
+                _maybe_warm()
                 return True
             await asyncio.sleep(1.0)
         logger.warning("[comfyui] did not answer within %ss", timeout)
         return False
+
+
+def _maybe_warm() -> None:
+    """Kick off a throwaway 64x64 render so the checkpoint loads NOW.
+
+    The checkpoint load is the expensive part — ~145s on a 16GB machine with a
+    local LLM also resident, six times the uncontended cost. Paying it in the
+    background right after launch means the user's actual request finds the
+    model already in memory, instead of being the one that waits for it.
+
+    Fire-and-forget on purpose: a failed warm-up must never fail the launch,
+    and the real request will simply load the checkpoint itself.
+    """
+    if not _setting("comfyui_warm_on_launch", True):
+        return
+
+    async def _warm():
+        try:
+            from src import comfyui_backend as backend
+            logger.info("[comfyui] warming the checkpoint in the background")
+            await backend.generate("warmup", size="64x64", steps=1)
+            logger.info("[comfyui] checkpoint warm — first real image will be fast")
+        except Exception as e:
+            logger.info("[comfyui] warm-up did not finish (harmless): %s", e)
+
+    try:
+        asyncio.get_running_loop().create_task(_warm())
+    except RuntimeError:
+        pass          # no loop (sync caller) — the first request warms it instead
 
 
 def stop() -> bool:

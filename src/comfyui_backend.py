@@ -22,10 +22,40 @@ from typing import Optional, Tuple
 logger = logging.getLogger(__name__)
 
 DEFAULT_URL = "http://127.0.0.1:8188"
-# A ComfyUI render is seconds on a modern GPU but minutes on a cold start, when
-# the checkpoint is first paged into VRAM.
+# A warm render is seconds. The FIRST one after a cold start also loads the
+# checkpoint, and that is where the real cost is — measured on a 16GB M2 with
+# a 6.46GB SDXL checkpoint:
+#
+#   ComfyUI alone, checkpoint warm : ready 6.2s  + gen  25.2s =  31.4s
+#   with a llama.cpp model resident: ready 4.1s  + gen 145.2s = 149.3s
+#
+# Six times slower under memory contention, so any budget tuned to the
+# uncontended case fails every time a local LLM is loaded. The first run
+# therefore gets its own, much larger allowance.
 POLL_TIMEOUT = 300.0
 POLL_INTERVAL = 1.0
+# Read timeout for the polling client. This used to be 60s and was the real
+# failure: while ComfyUI loads a large checkpoint under memory pressure its
+# HTTP server stops answering, so the /history poll itself timed out and the
+# exception escaped the loop — the generation died at ~60s regardless of
+# POLL_TIMEOUT. Polls are now both patient and non-fatal.
+POLL_READ_TIMEOUT = 120.0
+# Set once a generation completes, so subsequent calls use the shorter budget.
+_checkpoint_warm = False
+
+
+def is_warm() -> bool:
+    return _checkpoint_warm
+
+
+def _first_run_timeout() -> float:
+    """Budget for a run that may still have to load the checkpoint."""
+    try:
+        from src.settings import get_setting
+        v = get_setting("comfyui_first_run_timeout_seconds", 300)
+        return float(v) if v else 300.0
+    except Exception:
+        return 300.0
 
 
 def comfy_url() -> str:
@@ -128,7 +158,10 @@ async def generate(prompt: str, *, checkpoint: str = "", size: str = "1024x1024"
                               negative=negative)
     client_id = os.urandom(8).hex()
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=60.0,
+    global _checkpoint_warm
+    budget = POLL_TIMEOUT if _checkpoint_warm else _first_run_timeout()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0,
+                                                       read=POLL_READ_TIMEOUT,
                                                        write=30.0, pool=10.0)) as c:
         r = await c.post(base + "/prompt",
                          json={"prompt": workflow, "client_id": client_id})
@@ -143,21 +176,46 @@ async def generate(prompt: str, *, checkpoint: str = "", size: str = "1024x1024"
         # Poll rather than open a websocket: one less moving part, and the job
         # is seconds long.
         loop = asyncio.get_event_loop()
-        deadline = loop.time() + POLL_TIMEOUT
+        started = loop.time()
+        deadline = started + budget
         entry = None
+        last_note = 0.0
         while loop.time() < deadline:
             await asyncio.sleep(POLL_INTERVAL)
-            h = await c.get(f"{base}/history/{prompt_id}")
+            try:
+                h = await c.get(f"{base}/history/{prompt_id}")
+            except Exception as e:
+                # NOT fatal. While a large checkpoint is paging in, ComfyUI's
+                # HTTP server stops answering; letting that escape is what
+                # killed every first generation at the read timeout. The job
+                # is still queued and running, so keep waiting.
+                logger.debug("[comfyui] poll hiccup (still waiting): %s", e)
+                continue
             if h.status_code != 200:
                 continue
             hist = h.json()
             if prompt_id in hist:
                 entry = hist[prompt_id]
                 break
+            # Silence for two minutes looks like a hang, so say what is going on.
+            waited = loop.time() - started
+            if waited - last_note >= 15.0:
+                last_note = waited
+                logger.info("[comfyui] still working (%ds elapsed%s)", int(waited),
+                            "" if _checkpoint_warm else " — first run, loading the checkpoint")
         if entry is None:
+            waited = int(loop.time() - started)
+            if not _checkpoint_warm:
+                raise RuntimeError(
+                    f"timed out during first checkpoint load after {waited}s. The "
+                    f"model is {'' if waited < budget else 'still '}being read into "
+                    f"memory — with a local LLM also resident this measured ~145s on "
+                    f"a 16GB machine. ComfyUI has been left running, so trying again "
+                    f"now starts warm and should be quick. Raise "
+                    f"comfyui_first_run_timeout_seconds if it keeps happening.")
             raise RuntimeError(
-                f"ComfyUI did not finish within {int(POLL_TIMEOUT)}s. A first run "
-                f"loads the checkpoint into VRAM and can be slow; try again.")
+                f"ComfyUI did not finish within {waited}s even though the checkpoint "
+                f"was already loaded — something is wrong with the render itself.")
 
         status = (entry.get("status") or {})
         if status.get("status_str") == "error" or not status.get("completed", True):
@@ -177,4 +235,7 @@ async def generate(prompt: str, *, checkpoint: str = "", size: str = "1024x1024"
             "type": img.get("type", "output"),
         })
         v.raise_for_status()
+        # The expensive part is done: the checkpoint is resident, so the next
+        # call gets the short budget rather than the first-run one.
+        _checkpoint_warm = True
         return v.content

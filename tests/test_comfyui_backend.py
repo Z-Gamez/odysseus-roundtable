@@ -138,12 +138,15 @@ def test_render_error_is_reported(monkeypatch):
         asyncio.run(comfy.generate("x", checkpoint="m"))
 
 
-def test_timeout_explains_the_cold_start(monkeypatch):
+def test_timeout_on_an_already_warm_checkpoint(monkeypatch):
+    """Warmth is module state, so it is set explicitly here — otherwise this
+    passes or fails depending on which test ran first."""
     _patch_client(monkeypatch, _Client(
         post=_Resp(200, {"prompt_id": "pid"}),
         gets={"/history/": _Resp(200, {})}))    # never completes
     monkeypatch.setattr(comfy, "POLL_INTERVAL", 0)
     monkeypatch.setattr(comfy, "POLL_TIMEOUT", 0.05)
+    monkeypatch.setattr(comfy, "_checkpoint_warm", True)
     with pytest.raises(RuntimeError, match="did not finish"):
         asyncio.run(comfy.generate("x", checkpoint="m"))
 
@@ -173,3 +176,84 @@ def test_is_available_is_false_when_nothing_listens(monkeypatch):
 def test_url_is_overridable_for_a_remote_box(monkeypatch):
     monkeypatch.setenv("COMFYUI_URL", "http://10.0.0.9:8188/")
     assert comfy.comfy_url() == "http://10.0.0.9:8188"
+
+
+# ── slow first run under memory contention ─────────────────────────────────
+#
+# Measured on a 16GB M2 with a 6.46GB SDXL checkpoint:
+#   ComfyUI alone, checkpoint warm : ready 6.2s + gen  25.2s =  31.4s
+#   with a llama.cpp model resident: ready 4.1s + gen 145.2s = 149.3s
+#
+# Six times slower. Worse, while the checkpoint pages in ComfyUI's HTTP server
+# stops answering, so the /history poll itself hit the client's 60s read
+# timeout and the exception escaped the loop — every first generation died at
+# ~60s no matter how large POLL_TIMEOUT was.
+
+
+def test_a_poll_timeout_mid_load_does_not_kill_the_run(monkeypatch):
+    """The job is still queued and rendering; a silent server is not a failure."""
+    import httpx
+    state = {"polls": 0}
+
+    class C(_Client):
+        async def get(self, url, **kw):
+            if "/history/" in url:
+                state["polls"] += 1
+                if state["polls"] <= 3:
+                    raise httpx.ReadTimeout("busy loading checkpoint")
+                return _Resp(200, {"pid": {"status": {"completed": True},
+                                           "outputs": {"9": {"images": [
+                                               {"filename": "a.png", "subfolder": "",
+                                                "type": "output"}]}}}})
+            return _Resp(200, content=b"\x89PNG")
+
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda *a, **k: C(post=_Resp(200, {"prompt_id": "pid"})))
+    monkeypatch.setattr(comfy, "POLL_INTERVAL", 0)
+    monkeypatch.setattr(comfy, "_checkpoint_warm", False)
+    assert asyncio.run(comfy.generate("x", checkpoint="m")) == b"\x89PNG"
+    assert state["polls"] > 3, "it must have kept polling through the timeouts"
+
+
+def test_read_timeout_is_generous_enough_for_a_stalled_server():
+    """60s was shorter than a contended checkpoint load, which is why the poll
+    died before the render could finish."""
+    assert comfy.POLL_READ_TIMEOUT >= 120
+
+
+def test_first_run_gets_a_bigger_budget_than_a_warm_one(monkeypatch):
+    monkeypatch.setattr(comfy, "_checkpoint_warm", False)
+    assert comfy._first_run_timeout() >= 300
+    assert comfy._first_run_timeout() >= comfy.POLL_TIMEOUT
+
+
+def test_success_marks_the_checkpoint_warm(monkeypatch):
+    history = {"pid": {"status": {"completed": True},
+                       "outputs": {"9": {"images": [
+                           {"filename": "o.png", "subfolder": "", "type": "output"}]}}}}
+    _patch_client(monkeypatch, _Client(
+        post=_Resp(200, {"prompt_id": "pid"}),
+        gets={"/history/": _Resp(200, history),
+              "/view": _Resp(200, content=b"\x89PNG")}))
+    monkeypatch.setattr(comfy, "POLL_INTERVAL", 0)
+    monkeypatch.setattr(comfy, "_checkpoint_warm", False)
+    asyncio.run(comfy.generate("x", checkpoint="m"))
+    assert comfy.is_warm() is True
+
+
+def test_first_run_timeout_names_itself_and_says_the_server_is_still_up(monkeypatch):
+    """A generic failure sent the user round the loop again. It has to say the
+    retry will be fast, or they just see the same wait twice."""
+    _patch_client(monkeypatch, _Client(
+        post=_Resp(200, {"prompt_id": "pid"}),
+        gets={"/history/": _Resp(200, {})}))
+    monkeypatch.setattr(comfy, "POLL_INTERVAL", 0)
+    monkeypatch.setattr(comfy, "POLL_TIMEOUT", 0.05)
+    monkeypatch.setattr(comfy, "_first_run_timeout", lambda: 0.05)
+    monkeypatch.setattr(comfy, "_checkpoint_warm", False)
+    with pytest.raises(RuntimeError) as e:
+        asyncio.run(comfy.generate("x", checkpoint="m"))
+    msg = str(e.value)
+    assert "first checkpoint load" in msg
+    assert "left running" in msg
+    assert "comfyui_first_run_timeout_seconds" in msg

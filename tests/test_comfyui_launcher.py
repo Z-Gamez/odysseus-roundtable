@@ -144,7 +144,88 @@ def test_launch_is_windowless_on_windows(monkeypatch):
 
     monkeypatch.setattr(L, "install_dir", lambda: str(os.getcwd()))
     monkeypatch.setattr(L, "_launch_argv", lambda root: ["python", "-s", "main.py"])
+    monkeypatch.setattr(L, "_port_in_use", lambda: False)
+    monkeypatch.setattr(L, "_maybe_warm", lambda: None)
     monkeypatch.setattr(L, "is_answering", answering_after)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     asyncio.run(L.ensure_running(timeout=5))
     assert seen.get("creationflags", 0) & subprocess.CREATE_NO_WINDOW
+
+
+# ── a slow first load must not look like "no server" ───────────────────────
+#
+# While a 6GB checkpoint pages in, ComfyUI stops answering /system_stats. The
+# health check said "not running", so ensure_running launched a SECOND server
+# onto the busy port; it collided, exited, and left the pidfile pointing at a
+# corpse. That is how a merely-slow first run turned into cold-every-time.
+
+
+def test_a_busy_server_is_waited_for_not_relaunched(monkeypatch):
+    launched = []
+    answers = {"n": 0}
+
+    async def answering(*a, **k):
+        answers["n"] += 1
+        return answers["n"] > 2        # silent at first, then responds
+
+    monkeypatch.setattr(L, "is_answering", answering)
+    monkeypatch.setattr(L, "_port_in_use", lambda: True)
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: launched.append(1))
+    monkeypatch.setattr(L, "install_dir", lambda: "/tmp/comfy")
+    monkeypatch.setattr(L, "_launch_argv", lambda root: ["python", "main.py"])
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    assert asyncio.run(L.ensure_running(timeout=30)) is True
+    assert not launched, "a second server on a busy port collides with the first"
+
+
+def test_a_dead_port_still_launches(monkeypatch):
+    """The guard must not stop a genuine cold start."""
+    launched = []
+
+    class P:
+        pid = 1234
+        def poll(self): return None
+
+    calls = {"n": 0}
+
+    async def answering(*a, **k):
+        # Two checks happen before any launch — before the lock and inside it.
+        calls["n"] += 1
+        return calls["n"] > 2          # only answers once the launch has run
+
+    monkeypatch.setattr(L, "is_answering", answering)
+    monkeypatch.setattr(L, "_port_in_use", lambda: False)
+    monkeypatch.setattr(L, "install_dir", lambda: "/tmp/comfy")
+    monkeypatch.setattr(L, "_launch_argv", lambda root: ["python", "main.py"])
+    monkeypatch.setattr(L, "_maybe_warm", lambda: None)
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: launched.append(1) or P())
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    assert asyncio.run(L.ensure_running(timeout=30)) is True
+    assert launched, "nothing was listening, so it should have started one"
+
+
+async def _no_sleep(*a, **k):
+    return None
+
+
+def test_warmup_can_be_turned_off(monkeypatch):
+    monkeypatch.setattr(L, "_setting", lambda k, d: False if "warm" in k else d)
+    started = []
+    monkeypatch.setattr(asyncio, "get_running_loop",
+                        lambda: started.append(1))     # would be used if it ran
+    L._maybe_warm()
+    assert not started
+
+
+def test_warmup_failure_is_harmless(monkeypatch):
+    """A failed warm-up must never fail the launch — the real request will
+    load the checkpoint itself."""
+    monkeypatch.setattr(L, "_setting", lambda k, d: True if "warm" in k else d)
+
+    def boom():
+        raise RuntimeError("no loop")
+
+    monkeypatch.setattr(asyncio, "get_running_loop", boom)
+    L._maybe_warm()      # must not raise

@@ -48,6 +48,79 @@ def is_warm() -> bool:
     return _checkpoint_warm
 
 
+def _total_ram_bytes() -> int:
+    """Physical RAM, without taking a psutil dependency into an MCP process."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            ms = _MS()
+            ms.dwLength = ctypes.sizeof(_MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
+            return int(ms.ullTotalPhys)
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except Exception:
+        return 0
+
+
+# Below this, a big checkpoint and a resident LLM cannot both fit. A 16GB M2
+# measured 145s for a load that takes 25s uncontended — and with a large model
+# also resident it does not complete at all: the machine pages rather than
+# loads, so no timeout is generous enough to rescue it. Freeing the LLM first
+# is the fix; it reloads by itself on the next chat message.
+_LOW_RAM_CEILING = 24 * 1024 ** 3
+
+
+def _should_free_llm() -> bool:
+    setting = None
+    try:
+        from src.settings import get_setting
+        setting = get_setting("comfyui_free_llm_memory", "auto")
+    except Exception:
+        pass
+    if setting in (True, "always", "yes"):
+        return True
+    if setting in (False, "never", "no"):
+        return False
+    total = _total_ram_bytes()
+    return bool(total and total < _LOW_RAM_CEILING)
+
+
+def free_memory_for_image() -> bool:
+    """Unload the local LLM so the checkpoint has room. True if we freed one.
+
+    Only for the cold path: once the checkpoint is resident this costs nothing
+    to skip. llama.cpp is restarted automatically by its own supervisor the
+    next time a chat request arrives, so the user loses nothing but the reload.
+    """
+    if not _should_free_llm():
+        return False
+    try:
+        from src import llamacpp_supervisor as llama
+        if not llama.is_running():
+            return False
+        freed = llama.server_rss_bytes() or 0
+        if llama._stop_child():
+            logger.info("[comfyui] unloaded the local LLM (%.1fGB) so the "
+                        "checkpoint can load; it restarts on the next chat",
+                        freed / 1024 ** 3 if freed else 0.0)
+            return True
+    except Exception as e:
+        logger.debug("[comfyui] could not free LLM memory: %s", e)
+    return False
+
+
 def _first_run_timeout() -> float:
     """Budget for a run that may still have to load the checkpoint."""
     try:
@@ -159,6 +232,11 @@ async def generate(prompt: str, *, checkpoint: str = "", size: str = "1024x1024"
     client_id = os.urandom(8).hex()
 
     global _checkpoint_warm
+    # Cold load on a memory-tight machine: make room BEFORE asking ComfyUI to
+    # read 6.46GB off disk. Without this a 16GB box simply pages forever and no
+    # timeout is long enough, which is what "the model never loads" looked like.
+    if not _checkpoint_warm:
+        free_memory_for_image()
     budget = POLL_TIMEOUT if _checkpoint_warm else _first_run_timeout()
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0,
                                                        read=POLL_READ_TIMEOUT,

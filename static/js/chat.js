@@ -4868,15 +4868,18 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
         const stillStale = Date.now() - (stillActive.lastActivity || _lastReaderActivity);
         if (stillStale < 5000) return; // Came back to life
 
-        console.warn('[tab-recovery] Stream confirmed dead. Aborting and reloading session.');
+        console.warn('[tab-recovery] Reader is dead. Re-attaching to the run on the server.');
 
-        // Abort the frozen stream, but preserve the visible bubble.
+        // Abort the frozen READER, but preserve the visible bubble. The run
+        // itself is untouched by this — chat runs are detached server-side, so
+        // dropping the SSE only removes a subscriber.
         if (stillActive.abortCtrl) {
           stillActive.abortCtrl._reason = 'recovery';
           stillActive.abortCtrl.abort();
         }
+        let sid = null;
         try {
-          const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+          sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
           if (sid) _activeStreams.delete(sid);
         } catch (_) {}
         _syncForegroundStreamGlobals();
@@ -4887,11 +4890,28 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
           _webLockRelease = null;
         }
 
-        // Reset UI state
-        var _submitBtn = document.getElementById('submit');
-        updateSubmitButton('idle', _submitBtn);
-        var _msgInput = document.getElementById('message');
-        if (_msgInput) _msgInput.disabled = false;
+        // Re-attach rather than give up. iOS kills the fetch reader whenever
+        // the screen locks or the app is swiped away, and this path used to
+        // abort and reset to idle — so a run that was still going on the
+        // server looked to the user like it had timed out and was lost. The
+        // server buffers output for exactly this, so /api/chat/resume replays
+        // what was missed and then streams live.
+        const _resetIdle = () => {
+          var _submitBtn = document.getElementById('submit');
+          updateSubmitButton('idle', _submitBtn);
+          var _msgInput = document.getElementById('message');
+          if (_msgInput) _msgInput.disabled = false;
+        };
+        if (!sid) { _resetIdle(); return; }
+        resumeStream(sid).then((attached) => {
+          if (attached) {
+            console.info('[tab-recovery] Re-attached; the run kept going while we were away.');
+            return;   // resumeStream owns the UI from here
+          }
+          // Nothing to re-attach to: the run really did finish or fail while
+          // we were backgrounded. Fall back to the old behaviour.
+          _resetIdle();
+        }).catch(() => _resetIdle());
       }, 2000); // 2 second grace period
     });
 
